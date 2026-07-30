@@ -1,0 +1,16 @@
+{
+  "name": "mcp-form-demo",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Tiny Lit web component with a signal-backed text field, synced live to an MCP server so an agent can read/write it.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "stop": "kill -9 $(lsof -ti :${PORT:-8765}) 2>/dev/null && echo 'Server stopped' || echo 'No server running'"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  }
+}

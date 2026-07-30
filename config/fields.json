@@ -1,0 +1,10 @@
+{
+  "fields": [
+    {
+      "name": "firstName",
+      "label": "First Name",
+      "type": "string",
+      "default": ""
+    }
+  ]
+}

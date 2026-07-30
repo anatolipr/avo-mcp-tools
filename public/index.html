@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MCP Form</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+      margin: 0;
+      background: #f5f5f0;
+    }
+    mcp-form {
+      background: white;
+      padding: 2rem 2.5rem;
+      border-radius: 12px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+      min-width: 340px;
+      max-width: 480px;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <mcp-form></mcp-form>
+
+  <script type="module">
+    import { LitElement, html, css } from 'https://esm.sh/lit@3';
+
+    class Signal {
+      #value;
+      #subs = new Set();
+      constructor(initial) { this.#value = initial; }
+      get() { return this.#value; }
+      set(next) {
+        if (next === this.#value) return;
+        this.#value = next;
+        for (const fn of this.#subs) fn(next);
+      }
+      subscribe(fn) { this.#subs.add(fn); return () => this.#subs.delete(fn); }
+    }
+
+    class McpForm extends LitElement {
+      static styles = css`
+        :host { display: block; }
+
+        .title {
+          font-size: 1.1rem;
+          font-weight: 600;
+          color: #1a1a1a;
+          margin: 0 0 1.5rem;
+          line-height: 1.4;
+        }
+
+        .field { margin-bottom: 1.1rem; }
+
+        label {
+          display: block;
+          font-size: 0.78rem;
+          font-weight: 500;
+          color: #555;
+          margin-bottom: 0.3rem;
+          letter-spacing: 0.01em;
+        }
+
+        input[type="text"],
+        input[type="number"],
+        textarea,
+        select {
+          font-family: inherit;
+          font-size: 0.95rem;
+          padding: 0.5rem 0.7rem;
+          border: 1px solid #ddd;
+          border-radius: 6px;
+          width: 100%;
+          outline: none;
+          background: #fff;
+          color: #1a1a1a;
+          transition: border-color 0.15s;
+        }
+        input[type="text"]:focus,
+        input[type="number"]:focus,
+        textarea:focus,
+        select:focus { border-color: #666; }
+
+        textarea { resize: vertical; min-height: 80px; }
+
+        .actions {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-top: 1.5rem;
+          gap: 1rem;
+        }
+
+        button {
+          font-family: inherit;
+          font-size: 0.9rem;
+          font-weight: 600;
+          padding: 0.55rem 1.4rem;
+          border: none;
+          border-radius: 6px;
+          cursor: pointer;
+          background: #1a1a1a;
+          color: #fff;
+          transition: opacity 0.15s, background 0.15s;
+        }
+        button:hover:not(:disabled) { background: #333; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .submitted-note {
+          font-size: 0.78rem;
+          color: #4caf50;
+          font-weight: 500;
+        }
+
+        .status {
+          font-size: 0.72rem;
+          color: #aaa;
+        }
+        .dot {
+          display: inline-block;
+          width: 7px; height: 7px;
+          border-radius: 50%;
+          margin-right: 4px;
+          background: #ccc;
+          vertical-align: middle;
+        }
+        .dot.live { background: #4caf50; }
+      `;
+
+      static properties = {
+        _title:     { state: true },
+        _fields:    { state: true },
+        _connected: { state: true },
+        _submitted: { state: true },
+      };
+
+      constructor() {
+        super();
+        this._title     = '';
+        this._fields    = [];
+        this._signals   = new Map();
+        this._connected = false;
+        this._submitted = false;
+        this._connect();
+      }
+
+      _connect() {
+        const ws = new WebSocket(`ws://${location.host}/ws`);
+        this._ws = ws;
+        ws.onopen  = () => { this._connected = true; };
+        ws.onclose = () => {
+          this._connected = false;
+          // simple reconnect after 2 s
+          setTimeout(() => this._connect(), 2000);
+        };
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'init' || msg.type === 'reinit') {
+            this._applyFormDef(msg.formDef, msg.state);
+          }
+          if (msg.type === 'update') {
+            const signal = this._signals.get(msg.field);
+            if (signal) signal.set(msg.value);
+          }
+        };
+      }
+
+      _applyFormDef(formDef, state) {
+        this._title    = formDef.title ?? '';
+        this._fields   = formDef.fields;
+        this._submitted = false;
+        this._signals  = new Map();
+        for (const f of this._fields) {
+          const signal = new Signal(state[f.name] ?? f.default ?? '');
+          signal.subscribe(() => this.requestUpdate());
+          this._signals.set(f.name, signal);
+        }
+        this.requestUpdate();
+      }
+
+      _onInput(name, value) {
+        this._signals.get(name)?.set(value);
+        this._ws.send(JSON.stringify({ type: 'set', field: name, value }));
+      }
+
+      _onSubmit() {
+        this._submitted = true;
+        this._ws.send(JSON.stringify({ type: 'submit' }));
+      }
+
+      _renderField(f) {
+        const value = this._signals.get(f.name)?.get() ?? '';
+        const onInput = (e) => this._onInput(f.name, e.target.value);
+
+        switch (f.type) {
+          case 'textarea':
+            return html`
+              <div class="field">
+                <label for=${f.name}>${f.label}</label>
+                <textarea
+                  id=${f.name}
+                  placeholder=${f.placeholder ?? ''}
+                  .value=${value}
+                  @input=${onInput}
+                  ?disabled=${this._submitted}
+                ></textarea>
+              </div>`;
+
+          case 'number':
+            return html`
+              <div class="field">
+                <label for=${f.name}>${f.label}</label>
+                <input
+                  type="number"
+                  id=${f.name}
+                  placeholder=${f.placeholder ?? ''}
+                  .value=${value}
+                  @input=${onInput}
+                  ?disabled=${this._submitted}
+                />
+              </div>`;
+
+          case 'select':
+            return html`
+              <div class="field">
+                <label for=${f.name}>${f.label}</label>
+                <select
+                  id=${f.name}
+                  .value=${value}
+                  @change=${onInput}
+                  ?disabled=${this._submitted}
+                >
+                  <option value="">— choose —</option>
+                  ${(f.options ?? []).map(
+                    (o) => html`<option value=${o} ?selected=${value === o}>${o}</option>`
+                  )}
+                </select>
+              </div>`;
+
+          default: // text
+            return html`
+              <div class="field">
+                <label for=${f.name}>${f.label}</label>
+                <input
+                  type="text"
+                  id=${f.name}
+                  placeholder=${f.placeholder ?? ''}
+                  .value=${value}
+                  @input=${onInput}
+                  ?disabled=${this._submitted}
+                />
+              </div>`;
+        }
+      }
+
+      render() {
+        return html`
+          ${this._title ? html`<p class="title">${this._title}</p>` : ''}
+
+          ${this._fields.map((f) => this._renderField(f))}
+
+          ${this._fields.length > 0 ? html`
+            <div class="actions">
+              <button @click=${this._onSubmit} ?disabled=${this._submitted}>
+                ${this._submitted ? 'Submitted' : 'Submit'}
+              </button>
+              ${this._submitted
+                ? html`<span class="submitted-note">Sent — waiting for agent…</span>`
+                : ''}
+            </div>
+          ` : ''}
+
+          <div class="status" style="margin-top: 1rem;">
+            <span class="dot ${this._connected ? 'live' : ''}"></span>
+            ${this._connected ? 'connected' : 'reconnecting…'}
+          </div>
+        `;
+      }
+    }
+
+    customElements.define('mcp-form', McpForm);
+  </script>
+</body>
+</html>
