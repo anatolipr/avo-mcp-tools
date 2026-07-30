@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -11,6 +12,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8765;
+
+const UPLOAD_DIR = path.join(os.tmpdir(), 'mcp-form-uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // ---------------------------------------------------------------------------
 // 1. Mutable form definition — starts from fields.json, replaced by
@@ -138,6 +142,46 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/upload' && req.method === 'POST') {
+    const contentType = req.headers['content-type'] ?? '';
+    const boundaryMatch = contentType.match(/boundary=(.+)$/);
+    if (!boundaryMatch) { res.writeHead(400); res.end('Missing boundary'); return; }
+
+    const boundary = Buffer.from('--' + boundaryMatch[1]);
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+
+      // Find the filename from Content-Disposition header in the part
+      const headerEnd = body.indexOf('\r\n\r\n');
+      const headerSection = body.slice(0, headerEnd).toString();
+      const nameMatch = headerSection.match(/filename="([^"]+)"/);
+      const originalName = nameMatch ? nameMatch[1] : 'upload';
+      const ext = path.extname(originalName);
+      const savedName = `${randomUUID()}${ext}`;
+      const savedPath = path.join(UPLOAD_DIR, savedName);
+
+      // Extract file bytes: after \r\n\r\n, before the closing boundary
+      const fileStart = headerEnd + 4;
+      const closingBoundary = Buffer.from('\r\n' + boundary.toString() + '--');
+      let fileEnd = body.length;
+      for (let i = fileStart; i <= body.length - closingBoundary.length; i++) {
+        if (body.slice(i, i + closingBoundary.length).equals(closingBoundary)) {
+          fileEnd = i;
+          break;
+        }
+      }
+
+      fs.writeFile(savedPath, body.slice(fileStart, fileEnd), (err) => {
+        if (err) { res.writeHead(500); res.end('Write error'); return; }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ path: savedPath, name: originalName }));
+      });
+    });
+    return;
+  }
+
   let filePath = url.pathname === '/' ? '/index.html' : url.pathname;
   filePath = path.join(__dirname, 'public', filePath);
 
@@ -179,15 +223,28 @@ httpServer.listen(PORT, () => {
 // 6. MCP server — tools read/write the live formDef and store.
 // ---------------------------------------------------------------------------
 
-const fieldTypeEnum = z.enum(['text', 'number', 'textarea', 'select']);
+const fieldTypeEnum = z.enum(['text', 'number', 'textarea', 'select', 'checkbox', 'radio', 'date', 'datetime', 'range', 'multiselect', 'file']);
 
 const fieldDefSchema = z.object({
   name: z.string().describe('Unique field identifier (snake_case)'),
   label: z.string().describe('Human-readable label shown above the input'),
-  type: fieldTypeEnum.default('text').describe('Input type: text | number | textarea | select'),
+  type: fieldTypeEnum.default('text').describe(
+    'Input type: text | number | textarea | select | checkbox | radio | date | datetime | range | multiselect. ' +
+    '"checkbox" — boolean toggle, value is "true"/"false". ' +
+    '"radio" — pick exactly one from a list; requires options[] array. ' +
+    '"date" — date picker, value is ISO date string YYYY-MM-DD. ' +
+    '"datetime" — date+time picker, value is ISO datetime string YYYY-MM-DDTHH:MM. ' +
+    '"range" — slider; value is a number string. Use min/max/step to control bounds. ' +
+    '"multiselect" — checkbox list allowing multiple selections; requires options[] array; value is a JSON array string e.g. "[\"a\",\"b\"]". ' +
+    '"file" — file upload; value returned as the absolute path on the server where the file was saved. The agent can Read that path directly.'
+  ),
   placeholder: z.string().optional().describe('Placeholder text for text/number/textarea'),
-  options: z.array(z.string()).optional().describe('Required when type is "select"'),
-  default: z.string().optional().describe('Initial value'),
+  options: z.array(z.string()).optional().describe('Required when type is "select", "radio", or "multiselect"'),
+  default: z.string().optional().describe('Initial value. For checkbox use "true"/"false". For multiselect use a JSON array string e.g. "[\"option1\"]". For range use a number string.'),
+  accept: z.string().optional().describe('For file type only: MIME type filter or file extension filter, e.g. ".pdf,.docx" or "image/*"'),
+  min: z.number().optional().describe('Minimum value for range type (default 0)'),
+  max: z.number().optional().describe('Maximum value for range type (default 100)'),
+  step: z.number().optional().describe('Step increment for range type (default 1)'),
 });
 
 function buildMcpServer() {
@@ -229,6 +286,13 @@ function buildMcpServer() {
     '"number" — numeric input (age, quantity, rating 1-10). ' +
     '"textarea" — multi-line input (descriptions, feedback, long answers). ' +
     '"select" — dropdown from a fixed list; requires options[] array (yes/no, category, priority). ' +
+    '"checkbox" — boolean toggle (agree to terms, enable feature, yes/no flags). ' +
+    '"radio" — mutually exclusive choice shown as buttons; requires options[] array (better than select for ≤5 short options). ' +
+    '"date" — date picker; value returned as YYYY-MM-DD (deadlines, birthdays, start dates). ' +
+    '"datetime" — date+time picker; value returned as YYYY-MM-DDTHH:MM (scheduling, appointments). ' +
+    '"range" — slider with min/max/step; value returned as a number string (ratings, confidence, budget). ' +
+    '"multiselect" — checkbox list for picking multiple items; requires options[] array; value returned as JSON array string (tags, features, interests). ' +
+    '"file" — file upload button; value returned as absolute server path the agent can Read directly (PDFs, images, documents). Use accept to restrict file types e.g. ".pdf" or "image/*". ' +
     '\n\n' +
     'EXAMPLES OF GOOD FORM USE: ' +
     '"What are your top 3 favourite movies?" → 3 text fields. ' +

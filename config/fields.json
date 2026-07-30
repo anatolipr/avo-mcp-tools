@@ -1,9 +1,9 @@
 {
   "fields": [
     {
-      "name": "firstName",
-      "label": "First Name",
-      "type": "string",
+      "name": "text",
+      "label": "Enter text",
+      "type": "textarea",
       "default": ""
     }
   ]

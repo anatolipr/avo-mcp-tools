@@ -68,6 +68,8 @@
 
         input[type="text"],
         input[type="number"],
+        input[type="date"],
+        input[type="datetime-local"],
         textarea,
         select {
           font-family: inherit;
@@ -83,10 +85,128 @@
         }
         input[type="text"]:focus,
         input[type="number"]:focus,
+        input[type="date"]:focus,
+        input[type="datetime-local"]:focus,
         textarea:focus,
         select:focus { border-color: #666; }
 
         textarea { resize: vertical; min-height: 80px; }
+
+        .checkbox-row {
+          display: flex;
+          align-items: center;
+          gap: 0.55rem;
+          padding: 0.3rem 0;
+        }
+        .checkbox-row input[type="checkbox"] {
+          width: 1.1rem;
+          height: 1.1rem;
+          margin: 0;
+          cursor: pointer;
+          accent-color: #1a1a1a;
+          flex-shrink: 0;
+        }
+        .checkbox-row label {
+          margin: 0;
+          font-size: 0.9rem;
+          font-weight: 400;
+          color: #1a1a1a;
+          cursor: pointer;
+        }
+
+        .radio-group {
+          display: flex;
+          flex-direction: column;
+          gap: 0.45rem;
+          padding: 0.1rem 0;
+        }
+        .radio-row {
+          display: flex;
+          align-items: center;
+          gap: 0.55rem;
+        }
+        .radio-row input[type="radio"] {
+          width: 1rem;
+          height: 1rem;
+          margin: 0;
+          cursor: pointer;
+          accent-color: #1a1a1a;
+          flex-shrink: 0;
+        }
+        .radio-row label {
+          margin: 0;
+          font-size: 0.9rem;
+          font-weight: 400;
+          color: #1a1a1a;
+          cursor: pointer;
+        }
+
+        .range-wrap {
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+        }
+        input[type="range"] {
+          flex: 1;
+          accent-color: #1a1a1a;
+          cursor: pointer;
+        }
+        .range-value {
+          font-size: 0.9rem;
+          font-weight: 600;
+          color: #1a1a1a;
+          min-width: 2.5rem;
+          text-align: right;
+        }
+
+        .multiselect-group {
+          display: flex;
+          flex-direction: column;
+          gap: 0.45rem;
+          padding: 0.1rem 0;
+        }
+        .multiselect-row {
+          display: flex;
+          align-items: center;
+          gap: 0.55rem;
+        }
+        .multiselect-row input[type="checkbox"] {
+          width: 1rem;
+          height: 1rem;
+          margin: 0;
+          cursor: pointer;
+          accent-color: #1a1a1a;
+          flex-shrink: 0;
+        }
+        .multiselect-row label {
+          margin: 0;
+          font-size: 0.9rem;
+          font-weight: 400;
+          color: #1a1a1a;
+          cursor: pointer;
+        }
+
+        .file-drop {
+          border: 2px dashed #ddd;
+          border-radius: 8px;
+          padding: 1.2rem 1rem;
+          text-align: center;
+          cursor: pointer;
+          transition: border-color 0.15s, background 0.15s;
+          position: relative;
+        }
+        .file-drop:hover:not(.file-drop--disabled) { border-color: #999; background: #fafafa; }
+        .file-drop--over { border-color: #1a1a1a; background: #f0f0f0; }
+        .file-drop--done { border-color: #4caf50; background: #f6fff6; cursor: default; }
+        .file-drop--disabled { opacity: 0.5; cursor: not-allowed; }
+        .file-drop input[type="file"] {
+          position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+        }
+        .file-drop--disabled input[type="file"] { pointer-events: none; }
+        .file-drop__icon { font-size: 1.5rem; margin-bottom: 0.3rem; }
+        .file-drop__prompt { font-size: 0.85rem; color: #666; }
+        .file-drop__name { font-size: 0.85rem; font-weight: 600; color: #1a1a1a; margin-top: 0.2rem; }
+        .file-drop__uploading { font-size: 0.78rem; color: #aaa; margin-top: 0.2rem; }
 
         .actions {
           display: flex;
@@ -175,10 +295,12 @@
         this._fields   = formDef.fields;
         this._submitted = false;
         this._signals  = new Map();
+        this._fileState = new Map(); // name -> { status: 'idle'|'uploading'|'done'|'error', fileName }
         for (const f of this._fields) {
           const signal = new Signal(state[f.name] ?? f.default ?? '');
           signal.subscribe(() => this.requestUpdate());
           this._signals.set(f.name, signal);
+          if (f.type === 'file') this._fileState.set(f.name, { status: 'idle', fileName: '' });
         }
         this.requestUpdate();
       }
@@ -186,6 +308,24 @@
       _onInput(name, value) {
         this._signals.get(name)?.set(value);
         this._ws.send(JSON.stringify({ type: 'set', field: name, value }));
+      }
+
+      async _uploadFile(name, file) {
+        this._fileState.set(name, { status: 'uploading', fileName: file.name });
+        this.requestUpdate();
+
+        try {
+          const fd = new FormData();
+          fd.append('file', file);
+          const res = await fetch('/upload', { method: 'POST', body: fd });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const { path } = await res.json();
+          this._fileState.set(name, { status: 'done', fileName: file.name });
+          this._onInput(name, path);
+        } catch (err) {
+          this._fileState.set(name, { status: 'error', fileName: file.name });
+        }
+        this.requestUpdate();
       }
 
       _onSubmit() {
@@ -241,6 +381,174 @@
                   )}
                 </select>
               </div>`;
+
+          case 'checkbox': {
+            const checked = value === 'true';
+            return html`
+              <div class="field">
+                <div class="checkbox-row">
+                  <input
+                    type="checkbox"
+                    id=${f.name}
+                    .checked=${checked}
+                    @change=${(e) => this._onInput(f.name, String(e.target.checked))}
+                    ?disabled=${this._submitted}
+                  />
+                  <label for=${f.name}>${f.label}</label>
+                </div>
+              </div>`;
+          }
+
+          case 'radio':
+            return html`
+              <div class="field">
+                <label>${f.label}</label>
+                <div class="radio-group">
+                  ${(f.options ?? []).map((o) => html`
+                    <div class="radio-row">
+                      <input
+                        type="radio"
+                        id=${`${f.name}_${o}`}
+                        name=${f.name}
+                        value=${o}
+                        .checked=${value === o}
+                        @change=${() => this._onInput(f.name, o)}
+                        ?disabled=${this._submitted}
+                      />
+                      <label for=${`${f.name}_${o}`}>${o}</label>
+                    </div>
+                  `)}
+                </div>
+              </div>`;
+
+          case 'date':
+            return html`
+              <div class="field">
+                <label for=${f.name}>${f.label}</label>
+                <input
+                  type="date"
+                  id=${f.name}
+                  .value=${value}
+                  @change=${onInput}
+                  ?disabled=${this._submitted}
+                />
+              </div>`;
+
+          case 'datetime':
+            return html`
+              <div class="field">
+                <label for=${f.name}>${f.label}</label>
+                <input
+                  type="datetime-local"
+                  id=${f.name}
+                  .value=${value}
+                  @change=${onInput}
+                  ?disabled=${this._submitted}
+                />
+              </div>`;
+
+          case 'range': {
+            const min = f.min ?? 0;
+            const max = f.max ?? 100;
+            const step = f.step ?? 1;
+            const numVal = value !== '' ? value : String(min);
+            return html`
+              <div class="field">
+                <label for=${f.name}>${f.label}</label>
+                <div class="range-wrap">
+                  <input
+                    type="range"
+                    id=${f.name}
+                    min=${min}
+                    max=${max}
+                    step=${step}
+                    .value=${numVal}
+                    @input=${(e) => this._onInput(f.name, e.target.value)}
+                    ?disabled=${this._submitted}
+                  />
+                  <span class="range-value">${numVal}</span>
+                </div>
+              </div>`;
+          }
+
+          case 'multiselect': {
+            let selected;
+            try { selected = JSON.parse(value || '[]'); } catch { selected = []; }
+            if (!Array.isArray(selected)) selected = [];
+            const toggle = (o) => {
+              const next = selected.includes(o)
+                ? selected.filter((x) => x !== o)
+                : [...selected, o];
+              this._onInput(f.name, JSON.stringify(next));
+            };
+            return html`
+              <div class="field">
+                <label>${f.label}</label>
+                <div class="multiselect-group">
+                  ${(f.options ?? []).map((o) => html`
+                    <div class="multiselect-row">
+                      <input
+                        type="checkbox"
+                        id=${`${f.name}_${o}`}
+                        .checked=${selected.includes(o)}
+                        @change=${() => toggle(o)}
+                        ?disabled=${this._submitted}
+                      />
+                      <label for=${`${f.name}_${o}`}>${o}</label>
+                    </div>
+                  `)}
+                </div>
+              </div>`;
+          }
+
+          case 'file': {
+            const fs = this._fileState?.get(f.name) ?? { status: 'idle', fileName: '' };
+            const isDone = fs.status === 'done';
+            const isUploading = fs.status === 'uploading';
+            const disabled = this._submitted || isUploading;
+            const dropClass = [
+              'file-drop',
+              isDone ? 'file-drop--done' : '',
+              disabled ? 'file-drop--disabled' : '',
+            ].filter(Boolean).join(' ');
+
+            const onFileChange = (e) => {
+              const file = e.target.files?.[0];
+              if (file) this._uploadFile(f.name, file);
+            };
+            const onDragOver = (e) => { e.preventDefault(); e.currentTarget.classList.add('file-drop--over'); };
+            const onDragLeave = (e) => { e.currentTarget.classList.remove('file-drop--over'); };
+            const onDrop = (e) => {
+              e.preventDefault();
+              e.currentTarget.classList.remove('file-drop--over');
+              const file = e.dataTransfer.files?.[0];
+              if (file && !disabled) this._uploadFile(f.name, file);
+            };
+
+            return html`
+              <div class="field">
+                <label>${f.label}</label>
+                <div
+                  class=${dropClass}
+                  @dragover=${onDragOver}
+                  @dragleave=${onDragLeave}
+                  @drop=${onDrop}
+                >
+                  ${!disabled ? html`
+                    <input
+                      type="file"
+                      accept=${f.accept ?? ''}
+                      @change=${onFileChange}
+                    />` : ''}
+                  <div class="file-drop__icon">${isDone ? '✓' : '📎'}</div>
+                  ${isDone
+                    ? html`<div class="file-drop__name">${fs.fileName}</div>`
+                    : isUploading
+                      ? html`<div class="file-drop__uploading">Uploading ${fs.fileName}…</div>`
+                      : html`<div class="file-drop__prompt">Click or drag a file here</div>`}
+                </div>
+              </div>`;
+          }
 
           default: // text
             return html`
