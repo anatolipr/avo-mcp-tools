@@ -29,6 +29,22 @@
 
   <script type="module">
     import { LitElement, html, css } from 'https://esm.sh/lit@3';
+    import { unsafeHTML } from 'https://esm.sh/lit@3/directives/unsafe-html.js';
+
+    class HtmlOutputBlock extends LitElement {
+      static properties = {
+        content: { type: String },
+        scopedCss: { type: String, attribute: 'scoped-css' },
+      };
+      constructor() { super(); this.content = ''; this.scopedCss = ''; }
+      render() {
+        return html`
+          ${this.scopedCss ? html`<style>${unsafeHTML(this.scopedCss)}</style>` : ''}
+          ${unsafeHTML(this.content)}
+        `;
+      }
+    }
+    customElements.define('html-output-block', HtmlOutputBlock);
 
     class Signal {
       #value;
@@ -186,6 +202,82 @@
           cursor: pointer;
         }
 
+        .list-rows {
+          display: flex;
+          flex-direction: column;
+          gap: 0.6rem;
+        }
+        .list-card {
+          position: relative;
+          border: 1px solid #e0e0e0;
+          border-radius: 8px;
+          padding: 0.85rem 0.9rem 0.75rem;
+          background: #fafafa;
+        }
+        .list-card .field:last-child { margin-bottom: 0; }
+        .list-card__remove {
+          position: absolute;
+          top: 0.5rem;
+          right: 0.5rem;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 1.5rem;
+          height: 1.5rem;
+          padding: 0;
+          border-radius: 50%;
+          font-size: 0.75rem;
+          font-weight: 700;
+          line-height: 1;
+          background: #e0e0e0;
+          color: #555;
+          border: none;
+          cursor: pointer;
+          transition: background 0.15s, color 0.15s;
+        }
+        .list-card__remove:hover:not(:disabled) { background: #e53e3e; color: #fff; }
+        .list-card__remove:disabled { opacity: 0.35; cursor: not-allowed; }
+        .list-add-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.35rem;
+          background: transparent;
+          border: 1.5px dashed #bbb;
+          color: #555;
+          border-radius: 6px;
+          padding: 0.4rem 0.85rem;
+          font-size: 0.82rem;
+          font-weight: 600;
+          font-family: inherit;
+          cursor: pointer;
+          transition: border-color 0.15s, color 0.15s, background 0.15s;
+          width: 100%;
+          justify-content: center;
+        }
+        .list-add-btn:hover:not(:disabled) { border-color: #888; color: #1a1a1a; background: #f5f5f0; }
+        .list-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .color-wrap {
+          display: flex;
+          align-items: center;
+          gap: 0.65rem;
+        }
+        input[type="color"] {
+          width: 2.5rem;
+          height: 2.5rem;
+          padding: 0.15rem;
+          border: 1px solid #ddd;
+          border-radius: 6px;
+          cursor: pointer;
+          background: #fff;
+          flex-shrink: 0;
+        }
+        .color-hex {
+          font-size: 0.9rem;
+          font-family: monospace;
+          color: #1a1a1a;
+        }
+
         .file-drop {
           border: 2px dashed #ddd;
           border-radius: 8px;
@@ -231,6 +323,30 @@
         button:hover:not(:disabled) { background: #333; }
         button:disabled { opacity: 0.4; cursor: not-allowed; }
 
+        .btn-interrupt {
+          background: transparent;
+          border: 1.5px solid #bbb;
+          color: #555;
+          font-size: 0.82rem;
+          padding: 0.4rem 0.9rem;
+        }
+        .btn-interrupt:hover:not(:disabled) { border-color: #888; color: #1a1a1a; background: #f5f5f0; }
+
+        .field-error {
+          font-size: 0.75rem;
+          color: #d32f2f;
+          margin-top: 0.25rem;
+          font-weight: 500;
+        }
+        .input-error,
+        .input-error:focus {
+          border-color: #d32f2f !important;
+        }
+        .list-card.card-has-error {
+          border-color: #f5c2c2;
+          background: #fffafa;
+        }
+
         .submitted-note {
           font-size: 0.78rem;
           color: #4caf50;
@@ -257,6 +373,7 @@
         _fields:    { state: true },
         _connected: { state: true },
         _submitted: { state: true },
+        _errors:    { state: true },
       };
 
       constructor() {
@@ -266,6 +383,7 @@
         this._signals   = new Map();
         this._connected = false;
         this._submitted = false;
+        this._errors    = {};
         this._connect();
       }
 
@@ -294,9 +412,11 @@
         this._title    = formDef.title ?? '';
         this._fields   = formDef.fields;
         this._submitted = false;
+        this._errors   = {};
         this._signals  = new Map();
         this._fileState = new Map(); // name -> { status: 'idle'|'uploading'|'done'|'error', fileName }
         for (const f of this._fields) {
+          if (f.type === 'html_output') continue;
           const signal = new Signal(state[f.name] ?? f.default ?? '');
           signal.subscribe(() => this.requestUpdate());
           this._signals.set(f.name, signal);
@@ -305,9 +425,69 @@
         this.requestUpdate();
       }
 
-      _onInput(name, value) {
+      _onInput(name, value, errorKey) {
         this._signals.get(name)?.set(value);
         this._ws.send(JSON.stringify({ type: 'set', field: name, value }));
+        const key = errorKey ?? name;
+        if (this._errors[key]) {
+          const next = { ...this._errors };
+          delete next[key];
+          this._errors = next;
+        }
+      }
+
+      _validateField(f, value) {
+        if (f.required) {
+          if (f.type === 'checkbox' && value !== 'true') return 'This field is required.';
+          if (f.type === 'multiselect') {
+            let arr; try { arr = JSON.parse(value || '[]'); } catch { arr = []; }
+            if (!arr.length) return 'Please select at least one option.';
+          } else if (!value || value.trim() === '') {
+            return 'This field is required.';
+          }
+        }
+        if (value && f.pattern) {
+          try {
+            if (!new RegExp(f.pattern).test(value))
+              return f.patternMessage || 'Invalid format.';
+          } catch { /* bad regex — skip */ }
+        }
+        if (value && (f.type === 'text' || f.type === 'textarea')) {
+          if (f.minLength != null && value.length < f.minLength)
+            return `Must be at least ${f.minLength} characters.`;
+          if (f.maxLength != null && value.length > f.maxLength)
+            return `Must be at most ${f.maxLength} characters.`;
+        }
+        if (value && f.type === 'number') {
+          const num = Number(value);
+          if (f.min != null && num < f.min) return `Must be at least ${f.min}.`;
+          if (f.max != null && num > f.max) return `Must be at most ${f.max}.`;
+        }
+        return null;
+      }
+
+      _validate() {
+        const errors = {};
+        for (const f of this._fields) {
+          if (f.type === 'html_output') continue;
+          const value = this._signals.get(f.name)?.get() ?? '';
+          if (f.type === 'list') {
+            let rows; try { rows = JSON.parse(value || '[]'); } catch { rows = []; }
+            if (f.required && !rows.some(r => Object.values(r).some(v => v && v.trim?.() !== '')))
+              errors[f.name] = 'Please add at least one entry.';
+            for (let i = 0; i < rows.length; i++) {
+              for (const sf of (f.fields ?? [])) {
+                const sv = rows[i][sf.name] ?? '';
+                const msg = this._validateField(sf, sv);
+                if (msg) errors[`${f.name}[${i}].${sf.name}`] = msg;
+              }
+            }
+          } else {
+            const msg = this._validateField(f, value);
+            if (msg) errors[f.name] = msg;
+          }
+        }
+        return errors;
       }
 
       async _uploadFile(name, file) {
@@ -329,13 +509,29 @@
       }
 
       _onSubmit() {
+        const errors = this._validate();
+        if (Object.keys(errors).length) {
+          this._errors = errors;
+          return;
+        }
         this._submitted = true;
         this._ws.send(JSON.stringify({ type: 'submit' }));
       }
 
-      _renderField(f) {
+      _onInterrupt() {
+        this._ws.send(JSON.stringify({ type: 'interrupt' }));
+      }
+
+      _errorMsg(key) {
+        const msg = this._errors[key];
+        return msg ? html`<p class="field-error">${msg}</p>` : '';
+      }
+
+      _renderField(f, errorKey) {
+        const eKey = errorKey ?? f.name;
+        const err = this._errors[eKey];
         const value = this._signals.get(f.name)?.get() ?? '';
-        const onInput = (e) => this._onInput(f.name, e.target.value);
+        const onInput = (e) => this._onInput(f.name, e.target.value, eKey);
 
         switch (f.type) {
           case 'textarea':
@@ -344,11 +540,13 @@
                 <label for=${f.name}>${f.label}</label>
                 <textarea
                   id=${f.name}
+                  class=${err ? 'input-error' : ''}
                   placeholder=${f.placeholder ?? ''}
                   .value=${value}
                   @input=${onInput}
                   ?disabled=${this._submitted}
                 ></textarea>
+                ${this._errorMsg(eKey)}
               </div>`;
 
           case 'number':
@@ -358,11 +556,13 @@
                 <input
                   type="number"
                   id=${f.name}
+                  class=${err ? 'input-error' : ''}
                   placeholder=${f.placeholder ?? ''}
                   .value=${value}
                   @input=${onInput}
                   ?disabled=${this._submitted}
                 />
+                ${this._errorMsg(eKey)}
               </div>`;
 
           case 'select':
@@ -371,6 +571,7 @@
                 <label for=${f.name}>${f.label}</label>
                 <select
                   id=${f.name}
+                  class=${err ? 'input-error' : ''}
                   .value=${value}
                   @change=${onInput}
                   ?disabled=${this._submitted}
@@ -380,6 +581,7 @@
                     (o) => html`<option value=${o} ?selected=${value === o}>${o}</option>`
                   )}
                 </select>
+                ${this._errorMsg(eKey)}
               </div>`;
 
           case 'checkbox': {
@@ -391,11 +593,12 @@
                     type="checkbox"
                     id=${f.name}
                     .checked=${checked}
-                    @change=${(e) => this._onInput(f.name, String(e.target.checked))}
+                    @change=${(e) => this._onInput(f.name, String(e.target.checked), eKey)}
                     ?disabled=${this._submitted}
                   />
                   <label for=${f.name}>${f.label}</label>
                 </div>
+                ${this._errorMsg(eKey)}
               </div>`;
           }
 
@@ -412,13 +615,14 @@
                         name=${f.name}
                         value=${o}
                         .checked=${value === o}
-                        @change=${() => this._onInput(f.name, o)}
+                        @change=${() => this._onInput(f.name, o, eKey)}
                         ?disabled=${this._submitted}
                       />
                       <label for=${`${f.name}_${o}`}>${o}</label>
                     </div>
                   `)}
                 </div>
+                ${this._errorMsg(eKey)}
               </div>`;
 
           case 'date':
@@ -428,10 +632,12 @@
                 <input
                   type="date"
                   id=${f.name}
+                  class=${err ? 'input-error' : ''}
                   .value=${value}
                   @change=${onInput}
                   ?disabled=${this._submitted}
                 />
+                ${this._errorMsg(eKey)}
               </div>`;
 
           case 'datetime':
@@ -441,10 +647,12 @@
                 <input
                   type="datetime-local"
                   id=${f.name}
+                  class=${err ? 'input-error' : ''}
                   .value=${value}
                   @change=${onInput}
                   ?disabled=${this._submitted}
                 />
+                ${this._errorMsg(eKey)}
               </div>`;
 
           case 'range': {
@@ -479,7 +687,7 @@
               const next = selected.includes(o)
                 ? selected.filter((x) => x !== o)
                 : [...selected, o];
-              this._onInput(f.name, JSON.stringify(next));
+              this._onInput(f.name, JSON.stringify(next), eKey);
             };
             return html`
               <div class="field">
@@ -498,6 +706,7 @@
                     </div>
                   `)}
                 </div>
+                ${this._errorMsg(eKey)}
               </div>`;
           }
 
@@ -550,6 +759,202 @@
               </div>`;
           }
 
+          case 'list': {
+            const subFields = f.fields ?? [];
+            const emptyRow = () => Object.fromEntries(subFields.map((sf) => [sf.name, sf.default ?? '']));
+
+            let rows;
+            try { rows = JSON.parse(value || '[]'); } catch { rows = []; }
+            if (!Array.isArray(rows) || rows.length === 0) rows = [emptyRow()];
+
+            const updateRow = (idx, fieldName, val, sfErrKey) => {
+              const next = rows.map((r, i) => i === idx ? { ...r, [fieldName]: val } : r);
+              this._onInput(f.name, JSON.stringify(next), sfErrKey);
+            };
+            const addRow = () => {
+              this._onInput(f.name, JSON.stringify([...rows, emptyRow()]));
+            };
+            const removeRow = (idx) => {
+              const next = rows.filter((_, i) => i !== idx);
+              this._onInput(f.name, JSON.stringify(next.length ? next : [emptyRow()]));
+              // clear all errors for this row
+              const prefix = `${f.name}[${idx}].`;
+              const cleaned = Object.fromEntries(Object.entries(this._errors).filter(([k]) => !k.startsWith(prefix)));
+              this._errors = cleaned;
+            };
+
+            const renderSubField = (sf, rowIdx, rowVal) => {
+              const sfErrKey = `${f.name}[${rowIdx}].${sf.name}`;
+              const sfErr = this._errors[sfErrKey];
+              const val = rowVal[sf.name] ?? sf.default ?? '';
+              const upd = (v) => updateRow(rowIdx, sf.name, v, sfErrKey);
+              const errMsg = sfErr ? html`<p class="field-error">${sfErr}</p>` : '';
+              const ec = sfErr ? 'input-error' : '';
+
+              switch (sf.type) {
+                case 'textarea':
+                  return html`<div class="field">
+                    <label>${sf.label}</label>
+                    <textarea class=${ec} placeholder=${sf.placeholder ?? ''} .value=${val}
+                      @input=${(e) => upd(e.target.value)} ?disabled=${this._submitted}></textarea>
+                    ${errMsg}
+                  </div>`;
+                case 'number':
+                  return html`<div class="field">
+                    <label>${sf.label}</label>
+                    <input type="number" class=${ec} placeholder=${sf.placeholder ?? ''} .value=${val}
+                      @input=${(e) => upd(e.target.value)} ?disabled=${this._submitted} />
+                    ${errMsg}
+                  </div>`;
+                case 'select':
+                  return html`<div class="field">
+                    <label>${sf.label}</label>
+                    <select class=${ec} .value=${val} @change=${(e) => upd(e.target.value)} ?disabled=${this._submitted}>
+                      <option value="">— choose —</option>
+                      ${(sf.options ?? []).map((o) => html`<option value=${o} ?selected=${val === o}>${o}</option>`)}
+                    </select>
+                    ${errMsg}
+                  </div>`;
+                case 'checkbox': {
+                  const checked = val === 'true';
+                  return html`<div class="field">
+                    <div class="checkbox-row">
+                      <input type="checkbox" .checked=${checked}
+                        @change=${(e) => upd(String(e.target.checked))} ?disabled=${this._submitted} />
+                      <label>${sf.label}</label>
+                    </div>
+                    ${errMsg}
+                  </div>`;
+                }
+                case 'radio':
+                  return html`<div class="field">
+                    <label>${sf.label}</label>
+                    <div class="radio-group">
+                      ${(sf.options ?? []).map((o) => html`
+                        <div class="radio-row">
+                          <input type="radio" name=${`${f.name}_${rowIdx}_${sf.name}`} value=${o}
+                            .checked=${val === o} @change=${() => upd(o)} ?disabled=${this._submitted} />
+                          <label>${o}</label>
+                        </div>`)}
+                    </div>
+                    ${errMsg}
+                  </div>`;
+                case 'date':
+                  return html`<div class="field">
+                    <label>${sf.label}</label>
+                    <input type="date" class=${ec} .value=${val} @change=${(e) => upd(e.target.value)} ?disabled=${this._submitted} />
+                    ${errMsg}
+                  </div>`;
+                case 'datetime':
+                  return html`<div class="field">
+                    <label>${sf.label}</label>
+                    <input type="datetime-local" class=${ec} .value=${val} @change=${(e) => upd(e.target.value)} ?disabled=${this._submitted} />
+                    ${errMsg}
+                  </div>`;
+                case 'range': {
+                  const min = sf.min ?? 0; const max = sf.max ?? 100; const step = sf.step ?? 1;
+                  const num = val !== '' ? val : String(min);
+                  return html`<div class="field">
+                    <label>${sf.label}</label>
+                    <div class="range-wrap">
+                      <input type="range" min=${min} max=${max} step=${step} .value=${num}
+                        @input=${(e) => upd(e.target.value)} ?disabled=${this._submitted} />
+                      <span class="range-value">${num}</span>
+                    </div>
+                    ${errMsg}
+                  </div>`;
+                }
+                case 'multiselect': {
+                  let sel; try { sel = JSON.parse(val || '[]'); } catch { sel = []; }
+                  if (!Array.isArray(sel)) sel = [];
+                  const toggle = (o) => {
+                    const next = sel.includes(o) ? sel.filter((x) => x !== o) : [...sel, o];
+                    upd(JSON.stringify(next));
+                  };
+                  return html`<div class="field">
+                    <label>${sf.label}</label>
+                    <div class="multiselect-group">
+                      ${(sf.options ?? []).map((o) => html`
+                        <div class="multiselect-row">
+                          <input type="checkbox" .checked=${sel.includes(o)}
+                            @change=${() => toggle(o)} ?disabled=${this._submitted} />
+                          <label>${o}</label>
+                        </div>`)}
+                    </div>
+                    ${errMsg}
+                  </div>`;
+                }
+                case 'color': {
+                  const cv = val || '#000000';
+                  return html`<div class="field">
+                    <label>${sf.label}</label>
+                    <div class="color-wrap">
+                      <input type="color" .value=${cv}
+                        @input=${(e) => upd(e.target.value)} ?disabled=${this._submitted} />
+                      <span class="color-hex">${cv}</span>
+                    </div>
+                    ${errMsg}
+                  </div>`;
+                }
+                default: // text
+                  return html`<div class="field">
+                    <label>${sf.label}</label>
+                    <input type="text" class=${ec} placeholder=${sf.placeholder ?? ''} .value=${val}
+                      @input=${(e) => upd(e.target.value)} ?disabled=${this._submitted} />
+                    ${errMsg}
+                  </div>`;
+              }
+            };
+
+            const cardHasError = (idx) =>
+              subFields.some((sf) => this._errors[`${f.name}[${idx}].${sf.name}`]);
+
+            return html`
+              <div class="field">
+                <label>${f.label}</label>
+                ${this._errorMsg(f.name)}
+                <div class="list-rows">
+                  ${rows.map((rowVal, idx) => html`
+                    <div class="list-card ${cardHasError(idx) ? 'card-has-error' : ''}">
+                      ${rows.length > 1 ? html`
+                        <button type="button" class="list-card__remove" title="Remove"
+                          ?disabled=${this._submitted} @click=${() => removeRow(idx)}>✕</button>` : ''}
+                      ${subFields.map((sf) => renderSubField(sf, idx, rowVal))}
+                    </div>`)}
+                  ${!this._submitted ? html`
+                    <button type="button" class="list-add-btn" @click=${addRow}>
+                      + Add another
+                    </button>` : ''}
+                </div>
+              </div>`;
+          }
+
+          case 'color': {
+            const colorVal = value || '#000000';
+            return html`
+              <div class="field">
+                <label for=${f.name}>${f.label}</label>
+                <div class="color-wrap">
+                  <input
+                    type="color"
+                    id=${f.name}
+                    .value=${colorVal}
+                    @input=${(e) => this._onInput(f.name, e.target.value, eKey)}
+                    ?disabled=${this._submitted}
+                  />
+                  <span class="color-hex">${colorVal}</span>
+                </div>
+                ${this._errorMsg(eKey)}
+              </div>`;
+          }
+
+          case 'html_output':
+            return html`
+              <html-output-block
+                .content=${f.html ?? ''}
+                .scopedCss=${f.css ?? ''}
+              ></html-output-block>`;
+
           default: // text
             return html`
               <div class="field">
@@ -557,11 +962,13 @@
                 <input
                   type="text"
                   id=${f.name}
+                  class=${err ? 'input-error' : ''}
                   placeholder=${f.placeholder ?? ''}
                   .value=${value}
                   @input=${onInput}
                   ?disabled=${this._submitted}
                 />
+                ${this._errorMsg(eKey)}
               </div>`;
         }
       }
@@ -579,7 +986,10 @@
               </button>
               ${this._submitted
                 ? html`<span class="submitted-note">Sent — waiting for agent…</span>`
-                : ''}
+                : html`<button class="btn-interrupt" type="button" @click=${this._onInterrupt}
+                    title="Signal the agent to update the form before you submit">
+                    Update form
+                  </button>`}
             </div>
           ` : ''}
 

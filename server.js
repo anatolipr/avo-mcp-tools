@@ -37,7 +37,10 @@ class Store {
   #subscribers = new Set();
 
   constructor(fieldConfigs) {
-    for (const f of fieldConfigs) this.#values.set(f.name, f.default ?? '');
+    for (const f of fieldConfigs) {
+      if (f.type === 'html_output') continue;
+      this.#values.set(f.name, f.default ?? '');
+    }
   }
 
   has(name) { return this.#values.has(name); }
@@ -207,7 +210,11 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'submit') {
-      submitBus.emit('submit', store.snapshot());
+      submitBus.emit('submit', { __interrupted: false, ...store.snapshot() });
+    }
+
+    if (msg.type === 'interrupt') {
+      submitBus.emit('submit', { __interrupted: true, ...store.snapshot() });
     }
   });
 });
@@ -223,7 +230,42 @@ httpServer.listen(PORT, () => {
 // 6. MCP server — tools read/write the live formDef and store.
 // ---------------------------------------------------------------------------
 
-const fieldTypeEnum = z.enum(['text', 'number', 'textarea', 'select', 'checkbox', 'radio', 'date', 'datetime', 'range', 'multiselect', 'file']);
+const fieldTypeEnum = z.enum(['text', 'number', 'textarea', 'select', 'checkbox', 'radio', 'date', 'datetime', 'range', 'multiselect', 'file', 'list', 'color', 'html_output']);
+const subFieldTypeEnum = z.enum(['text', 'number', 'textarea', 'select', 'checkbox', 'radio', 'date', 'datetime', 'range', 'multiselect', 'color']);
+
+const validationSchema = {
+  required: z.boolean().optional().describe(
+    'If true, the field must have a non-empty value before the form can be submitted. ' +
+    'For checkbox, the box must be checked. For multiselect/list, at least one item must be present.'
+  ),
+  pattern: z.string().optional().describe(
+    'A JavaScript-compatible regular expression string (without delimiters) that the value must match. ' +
+    'Applied to text, textarea, and number fields. ' +
+    'Examples: "^[a-zA-Z]+$" (letters only), "^[a-zA-Z0-9 ]+$" (alphanumeric), "^\\\\d{5}$" (5-digit ZIP), ' +
+    '"^[^@\\\\s]+@[^@\\\\s]+\\\\.[^@\\\\s]+$" (email). ' +
+    'Always pair with patternMessage so the user knows what format is expected.'
+  ),
+  patternMessage: z.string().optional().describe(
+    'Human-readable error shown when the value does not match the pattern. ' +
+    'Be specific: "Only letters allowed", "Enter a valid email address", "Must be a 5-digit ZIP code". ' +
+    'Required whenever pattern is set.'
+  ),
+  minLength: z.number().optional().describe('Minimum character count for text and textarea fields.'),
+  maxLength: z.number().optional().describe('Maximum character count for text and textarea fields.'),
+};
+
+const subFieldDefSchema = z.object({
+  name: z.string().describe('Unique field identifier within a list row (snake_case)'),
+  label: z.string().describe('Human-readable label shown above the input'),
+  type: subFieldTypeEnum.default('text'),
+  placeholder: z.string().optional(),
+  options: z.array(z.string()).optional(),
+  default: z.string().optional(),
+  min: z.number().optional(),
+  max: z.number().optional(),
+  step: z.number().optional(),
+  ...validationSchema,
+});
 
 const fieldDefSchema = z.object({
   name: z.string().describe('Unique field identifier (snake_case)'),
@@ -236,15 +278,39 @@ const fieldDefSchema = z.object({
     '"datetime" — date+time picker, value is ISO datetime string YYYY-MM-DDTHH:MM. ' +
     '"range" — slider; value is a number string. Use min/max/step to control bounds. ' +
     '"multiselect" — checkbox list allowing multiple selections; requires options[] array; value is a JSON array string e.g. "[\"a\",\"b\"]". ' +
-    '"file" — file upload; value returned as the absolute path on the server where the file was saved. The agent can Read that path directly.'
+    '"file" — file upload; value returned as the absolute path on the server where the file was saved. The agent can Read that path directly. ' +
+    '"color" — color picker; value returned as a hex string e.g. "#ff0000". ' +
+    '"list" — repeatable group of sub-fields; the user can add or remove rows with +/trash buttons. ' +
+    'Requires a fields[] array defining the sub-schema for each row (supports all types except list). ' +
+    'Value returned as a JSON array of objects e.g. \'[{"first_name":"Alice","last_name":"Smith"}]\'. ' +
+    'Use this for collecting structured multi-entry data: team members, addresses, favorite movies with ratings, etc.'
   ),
   placeholder: z.string().optional().describe('Placeholder text for text/number/textarea'),
   options: z.array(z.string()).optional().describe('Required when type is "select", "radio", or "multiselect"'),
   default: z.string().optional().describe('Initial value. For checkbox use "true"/"false". For multiselect use a JSON array string e.g. "[\"option1\"]". For range use a number string.'),
   accept: z.string().optional().describe('For file type only: MIME type filter or file extension filter, e.g. ".pdf,.docx" or "image/*"'),
-  min: z.number().optional().describe('Minimum value for range type (default 0)'),
-  max: z.number().optional().describe('Maximum value for range type (default 100)'),
+  fields: z.array(subFieldDefSchema).optional().describe(
+    'Required when type is "list". Defines the sub-schema rendered inside each repeatable row card. ' +
+    'Supports all field types except "list" (no nesting) and "file". ' +
+    'Each entry follows the same shape as a top-level field: name (snake_case, unique within the row), label, type, and type-specific options. ' +
+    'The submitted value for the list field will be a JSON array of objects, one per row, keyed by each sub-field name. ' +
+    'Example: fields=[{name:"first_name",label:"First Name",type:"text"},{name:"role",label:"Role",type:"select",options:["Eng","PM"]}] ' +
+    'produces values like [{first_name:"Alice",role:"Eng"},{first_name:"Bob",role:"PM"}].'
+  ),
+  min: z.number().optional().describe('Minimum value for range/number types. Also used as validation: number inputs below this value will be rejected.'),
+  max: z.number().optional().describe('Maximum value for range/number types. Also used as validation: number inputs above this value will be rejected.'),
   step: z.number().optional().describe('Step increment for range type (default 1)'),
+  html: z.string().optional().describe(
+    'Required when type is "html_output". Raw HTML string to render inside the block. ' +
+    'Can contain any HTML: headings, color swatches, tables, images, styled divs, etc. ' +
+    'CSS in <style> tags here is NOT scoped — use the css field for scoped styles instead.'
+  ),
+  css: z.string().optional().describe(
+    'Optional CSS string to inject into the html_output block\'s shadow DOM. ' +
+    'Styles are fully scoped to the block and cannot affect other fields. ' +
+    'Example: "div { border-radius: 8px; padding: 0.5rem; }" or ":host { display: flex; gap: 1rem; }"'
+  ),
+  ...validationSchema,
 });
 
 function buildMcpServer() {
@@ -278,8 +344,8 @@ function buildMcpServer() {
     '\n\n' +
     'HOW TO USE: ' +
     '1. Call get_form_url and tell the user to open that URL in their browser. ' +
-    '2. Call define_form with a clear title and well-labelled fields. The browser UI reloads instantly. ' +
-    '3. Call wait_for_submit — this blocks until the user clicks Submit, then returns all values as JSON. ' +
+    '2. Call define_form with a clear title and well-labelled fields. Pass wait:true to block and receive submitted values in one step (preferred). ' +
+    '   Omit wait (or pass false) only if you need to prefill fields with set_field before blocking. In that case call wait_for_submit separately afterward. ' +
     '\n\n' +
     'FIELD TYPES: ' +
     '"text" — single-line free input (names, titles, short answers). ' +
@@ -291,14 +357,47 @@ function buildMcpServer() {
     '"date" — date picker; value returned as YYYY-MM-DD (deadlines, birthdays, start dates). ' +
     '"datetime" — date+time picker; value returned as YYYY-MM-DDTHH:MM (scheduling, appointments). ' +
     '"range" — slider with min/max/step; value returned as a number string (ratings, confidence, budget). ' +
-    '"multiselect" — checkbox list for picking multiple items; requires options[] array; value returned as JSON array string (tags, features, interests). ' +
+    '"multiselect" — checkbox list for picking multiple items from a fixed set; requires options[] array; ' +
+    'value returned as a JSON array string e.g. \'["tag1","tag2"]\' — parse with JSON.parse() to get an array. ' +
+    'Use when the set of choices is known in advance. Prefer "list" when the user supplies free-form entries. ' +
+    '"color" — color picker; value returned as a hex string e.g. "#ff0000". Use for theme colors, label colors, or any color choice. ' +
     '"file" — file upload button; value returned as absolute server path the agent can Read directly (PDFs, images, documents). Use accept to restrict file types e.g. ".pdf" or "image/*". ' +
+    '"html_output" — read-only display block; renders arbitrary HTML in a scoped shadow DOM. ' +
+    'Not an input — has no value and is excluded from the submitted data. ' +
+    'Use this to show context, previews, color swatches, summaries, or formatted data alongside input fields. ' +
+    'Set html to the raw HTML string to render. Optionally set css with scoped stylesheet rules. ' +
+    'Supports full HTML: headings, divs, tables, inline SVG, color swatches, images (data URIs), etc. ' +
+    'Good uses: show a color chosen in a previous step above a related color input; display a summary of earlier answers before a confirmation submit; show a styled table of results; render a preview of a chosen palette. ' +
+    'Example: {type:"html_output", name:"color_preview", html:"<div style=\'background:#ff5733;width:100%;height:40px;border-radius:6px\'></div><p>Your primary color: #ff5733</p>", css:"p{margin:0.3rem 0;font-size:0.85rem;color:#555}"}. ' +
+    '"list" — repeatable group of sub-fields the user can add or remove rows of. ' +
+    'Use this whenever you need one or more items of the same structure: people, addresses, tasks, movies, ingredients, etc. ' +
+    'Requires a fields[] array (the sub-schema); each row renders as a card. Supports all field types inside a row except "list" (no nesting) and "file". ' +
+    'Value returned as a JSON array of objects e.g. \'[{"first_name":"Alice","role":"Engineer"},{"first_name":"Bob","role":"PM"}]\' — parse with JSON.parse(). ' +
+    'The array will always contain at least one entry (the model should filter out blank rows if the user left one empty). ' +
+    '\n\n' +
+    'VALIDATION (applies to any field type): ' +
+    'required:true — blocks submit if empty; for checkbox the box must be checked; for multiselect/list at least one item must exist. ' +
+    'pattern + patternMessage — regex the value must match; use for format constraints on text/textarea/number ' +
+    '(e.g. pattern:"^[a-zA-Z ]+$", patternMessage:"Only letters and spaces allowed" for a name field). ' +
+    'minLength / maxLength — character count bounds for text and textarea. ' +
+    'min / max on number fields — numeric range validation (value must be between min and max). ' +
+    'All validation rules apply equally to sub-fields inside a list type. ' +
+    '\n\n' +
+    'WHEN TO USE "list" vs OTHER TYPES: ' +
+    'Use "list" when the number of entries is unknown in advance or the user should be able to add more. ' +
+    'Use fixed fields (text × N) only when you know exactly how many entries are needed (e.g. exactly 3 references). ' +
+    'Use "multiselect" only when picking from a predefined set, not for free-form entry. ' +
     '\n\n' +
     'EXAMPLES OF GOOD FORM USE: ' +
-    '"What are your top 3 favourite movies?" → 3 text fields. ' +
-    '"Rate your experience 1-5 and leave a comment" → 1 number + 1 textarea. ' +
+    '"What are your top 3 favourite movies?" → 1 list field (title + year) so the user can add exactly as many as they want. ' +
+    '"Rate your experience 1-5 and leave a comment" → 1 range + 1 textarea. ' +
     '"Set up your profile (name, role, team, timezone)" → 4 text/select fields. ' +
-    '"Which features do you want enabled?" → multiple select fields. ',
+    '"Which features do you want enabled?" → 1 multiselect field with the known feature options. ' +
+    '"Add your team members" → 1 list field with sub-fields: first_name (text), last_name (text), role (select). ' +
+    '"Enter your reading list with priority" → 1 list field with sub-fields: title (text), author (text), priority (radio: Low/Medium/High). ' +
+    '"Choose complementary colors (primary was #ff5733 last session)" → 1 html_output showing a swatch of the previous color, then 1 color input for the new pick. ' +
+    '"Confirm your choices before we proceed" → multiple html_output blocks summarizing earlier answers, no input fields, just a Submit to acknowledge. ' +
+    '"Pick a font size (current preview)" → 1 html_output showing live-styled sample text, then a range input for size. ',
     {
       title: z.string().optional().describe(
         'Question or prompt shown at the top of the form. Write it as a natural-language prompt ' +
@@ -306,9 +405,24 @@ function buildMcpServer() {
         'or "Configure your project settings below."'
       ),
       fields: z.array(fieldDefSchema).min(1),
+      wait: z.boolean().optional().describe(
+        'If true, immediately block after defining the form and return the submitted values once the user clicks Submit — ' +
+        'equivalent to calling wait_for_submit right after. ' +
+        'Use this for the common case where you do not need to prefill fields with set_field between defining and waiting. ' +
+        'Omit (or set false) when you need to call set_field before waiting.'
+      ),
     },
-    async ({ title, fields }) => {
+    async ({ title, fields, wait }) => {
       applyFormDef({ title: title ?? '', fields });
+      if (wait) {
+        const raw = await new Promise((resolve) => {
+          submitBus.once('submit', resolve);
+        });
+        const { __interrupted, ...values } = raw;
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ status: __interrupted ? 'interrupted' : 'submitted', values }, null, 2) }],
+        };
+      }
       return {
         content: [{
           type: 'text',
@@ -320,17 +434,31 @@ function buildMcpServer() {
 
   mcp.tool(
     'wait_for_submit',
-    'Blocks until the user clicks the Submit button on the live form UI, then returns all field values as a JSON object. ' +
+    'Blocks until the user clicks Submit or clicks "Update form" (interrupt) on the live form UI. ' +
     'Always call define_form before this — wait_for_submit has no effect if no form has been defined. ' +
-    'Do not ask the user any follow-up questions in chat while this is waiting; the form is the interaction. ' +
-    'Once this returns, read the JSON values and proceed — do not call wait_for_submit again unless you define a new form.',
+    '\n\n' +
+    'RETURN SHAPE: a JSON object with two top-level keys: ' +
+    '"status": either "submitted" (user clicked Submit — form is done) or "interrupted" (user clicked "Update form" — agent should read chat, adjust the form via define_form, then call wait_for_submit again). ' +
+    '"values": object of all current field values at the moment of submission or interruption. ' +
+    '\n\n' +
+    'INTERRUPTION FLOW: when status is "interrupted", the form stays open in the browser with all values intact. ' +
+    'The agent should read the user\'s latest chat message, optionally call define_form with updated/additional fields (existing values are preserved if field names match), then call wait_for_submit again. ' +
+    '\n\n' +
+    'RETURNED VALUE SHAPES BY FIELD TYPE: ' +
+    'text / number / textarea / select / radio / date / datetime / range → plain string. ' +
+    'checkbox → "true" or "false" string. ' +
+    'multiselect → JSON array string e.g. \'["a","b"]\'; use JSON.parse() to get an array. ' +
+    'list → JSON array-of-objects string e.g. \'[{"first_name":"Alice","role":"Engineer"}]\'; use JSON.parse() to get an array. ' +
+    'Filter out list rows where all sub-field values are empty strings. ' +
+    'file → absolute server path string; use the Read tool to access the file contents.',
     {},
     async () => {
-      const values = await new Promise((resolve) => {
+      const raw = await new Promise((resolve) => {
         submitBus.once('submit', resolve);
       });
+      const { __interrupted, ...values } = raw;
       return {
-        content: [{ type: 'text', text: JSON.stringify(values, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify({ status: __interrupted ? 'interrupted' : 'submitted', values }, null, 2) }],
       };
     }
   );
@@ -347,7 +475,10 @@ function buildMcpServer() {
       content: [{
         type: 'text',
         text: JSON.stringify(
-          formDef.fields.map((f) => ({ ...f, value: store.get(f.name) })),
+          formDef.fields.map((f) => f.type === 'html_output'
+            ? { name: f.name, type: 'html_output' }
+            : { ...f, value: store.get(f.name) }
+          ),
           null, 2
         ),
       }],
