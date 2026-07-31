@@ -30,6 +30,7 @@
   <script type="module">
     import { LitElement, html, css } from 'https://esm.sh/lit@3';
     import { unsafeHTML } from 'https://esm.sh/lit@3/directives/unsafe-html.js';
+    import { Signal, SignalWatcher } from 'https://cdn.jsdelivr.net/npm/avosignals@1.0.16/dist/avosignals.js';
 
     class HtmlOutputBlock extends LitElement {
       static properties = {
@@ -45,19 +46,6 @@
       }
     }
     customElements.define('html-output-block', HtmlOutputBlock);
-
-    class Signal {
-      #value;
-      #subs = new Set();
-      constructor(initial) { this.#value = initial; }
-      get() { return this.#value; }
-      set(next) {
-        if (next === this.#value) return;
-        this.#value = next;
-        for (const fn of this.#subs) fn(next);
-      }
-      subscribe(fn) { this.#subs.add(fn); return () => this.#subs.delete(fn); }
-    }
 
     class McpForm extends LitElement {
       static styles = css`
@@ -404,6 +392,7 @@
 
       constructor() {
         super();
+        new SignalWatcher(this);
         this._title     = '';
         this._fields    = [];
         this._signals   = new Map();
@@ -451,7 +440,6 @@
         for (const f of this._fields) {
           if (f.type === 'html_output') continue;
           const signal = new Signal(state[f.name] ?? f.default ?? '');
-          signal.subscribe(() => this.requestUpdate());
           this._signals.set(f.name, signal);
           if (f.type === 'file') this._fileState.set(f.name, { status: 'idle', fileName: '' });
         }
