@@ -401,12 +401,27 @@ const fieldDefSchema = z.object({
   html: z.string().optional().describe(
     'Required when type is "html_output". Raw HTML string to render inside the block. ' +
     'Can contain any HTML: headings, color swatches, tables, images, styled divs, etc. ' +
-    'CSS in <style> tags here is NOT scoped — use the css field for scoped styles instead.'
+    'CSS in <style> tags here is NOT scoped — use the css field for scoped styles instead. ' +
+    '\n\n' +
+    'THEMING — the form auto-switches between light and dark mode based on the user\'s system preference. ' +
+    'DO NOT set explicit text colors (e.g. color: black, color: #1a1a1a) on the elements in this HTML — ' +
+    'leave text color unset so it inherits the block\'s theme-aware default, which already tracks light/dark. ' +
+    'Setting an explicit dark text color will make it unreadable for users in dark mode (and vice versa). ' +
+    'If you must set a background color (e.g. a swatch, a highlighted card), pick a color that works with ' +
+    'readable text in BOTH themes — e.g. use the swatch/accent color itself only for small chips or borders, ' +
+    'not as a full-bleed background behind body text, and prefer CSS that adapts, such as ' +
+    '`background: light-dark(#fff, #222)` (with `color-scheme: light dark` set) or a ' +
+    '`@media (prefers-color-scheme: dark)` override in the css field. ' +
+    'When in doubt, use no background and no text color at all — the surrounding form already supplies both correctly.'
   ),
   css: z.string().optional().describe(
     'Optional CSS string to inject into the html_output block\'s shadow DOM. ' +
     'Styles are fully scoped to the block and cannot affect other fields. ' +
-    'Example: "div { border-radius: 8px; padding: 0.5rem; }" or ":host { display: flex; gap: 1rem; }"'
+    'Example: "div { border-radius: 8px; padding: 0.5rem; }" or ":host { display: flex; gap: 1rem; }" ' +
+    '\n\n' +
+    'THEMING: do not hardcode text colors here either — omit `color` and let it inherit. ' +
+    'For backgrounds/borders that need to differ between light and dark, wrap the override in ' +
+    '`@media (prefers-color-scheme: dark) { ... }` rather than picking one fixed color for both themes.'
   ),
   ...validationSchema,
 });
@@ -501,12 +516,27 @@ function buildMcpServer(tenantId: string) {
     '"Enter your reading list with priority" → 1 list field with sub-fields: title (text), author (text), priority (radio: Low/Medium/High). ' +
     '"Choose complementary colors (primary was #ff5733 last session)" → 1 html_output showing a swatch of the previous color, then 1 color input for the new pick. ' +
     '"Confirm your choices before we proceed" → multiple html_output blocks summarizing earlier answers, no input fields, just a Submit to acknowledge. ' +
-    '"Pick a font size (current preview)" → 1 html_output showing live-styled sample text, then a range input for size. ',
+    '"Pick a font size (current preview)" → 1 html_output showing live-styled sample text, then a range input for size. ' +
+    '\n\n' +
+    'MULTI-STEP FORMS: prefer breaking a long or logically-grouped set of fields into several smaller forms ' +
+    'shown one after another, rather than a single form with many fields. As a rough guideline, consider splitting ' +
+    'once you would otherwise put more than ~6-8 fields on one screen, or whenever the fields fall into clearly ' +
+    'distinct sections (e.g. "your info" then "your preferences" then "confirmation"). ' +
+    'To do this: call define_form with wait:true for step 1 (title including "Step 1 of N"), read the returned values, ' +
+    'then call define_form with wait:true again for step 2 using a fresh field set (title "Step 2 of N"), and so on — ' +
+    'no need to call get_form_url again, the same browser tab updates in place. ' +
+    'This is a soft preference, not a hard rule: a short, single-purpose form (e.g. one rating + one comment) should ' +
+    'stay as one step. Do not split just to split — only when it genuinely improves readability or reflects distinct stages.',
     {
       title: z.string().optional().describe(
-        'Question or prompt shown at the top of the form. Write it as a natural-language prompt ' +
+        'Question or prompt shown at the top of the form. STRONGLY RECOMMENDED — always set a title. ' +
+        'Without one the form is just a bare list of fields with no framing, which is confusing when the user ' +
+        'has switched away from the chat to fill it in. Write it as a natural-language prompt or short heading ' +
         'the user will read before filling in fields, e.g. "Tell us about your top 3 favourite movies" ' +
-        'or "Configure your project settings below."'
+        'or "Configure your project settings below." ' +
+        'For a multi-step flow (see MULTI-STEP FORMS below), include the step in the title, ' +
+        'e.g. "Step 1 of 3: Basic info". ' +
+        'This is plain text rendered above the fields — do not use an html_output field just to render a title.'
       ),
       fields: z.array(fieldDefSchema).min(1),
       wait: z.boolean().optional().describe(

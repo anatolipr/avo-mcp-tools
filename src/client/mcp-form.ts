@@ -20,12 +20,66 @@ export class McpForm extends LitElement {
   static styles = css`
     *, *::before, *::after { box-sizing: border-box; }
 
-    :host { display: block; min-width: 0; width: 100%; }
+    :host {
+      display: block;
+      min-width: 0;
+      width: 100%;
+
+      --text-strong: #1a1a1a;
+      --text-muted: #555;
+      --text-faint: #888;
+      --text-faint-2: #aaa;
+      --border: #ddd;
+      --border-soft: #e0e0e0;
+      --border-softer: #ebebeb;
+      --input-bg: #fff;
+      --surface: #fafafa;
+      --surface-hover: #f5f5f0;
+      --chip-bg: #e0e0e0;
+      --btn-bg: #1a1a1a;
+      --btn-bg-hover: #333;
+      --btn-text: #fff;
+      --accent: #1a1a1a;
+      --danger: #d32f2f;
+      --danger-border: #f5c2c2;
+      --danger-bg: #fffafa;
+      --success: #4caf50;
+      --success-bg: #f6fff6;
+      --focus-border: #666;
+      --dashed-border: #bbb;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :host {
+        --text-strong: #eee;
+        --text-muted: #aaa;
+        --text-faint: #888;
+        --text-faint-2: #777;
+        --border: #444;
+        --border-soft: #3a3a3a;
+        --border-softer: #333;
+        --input-bg: #1c1d1f;
+        --surface: #1e1f21;
+        --surface-hover: #2a2b2d;
+        --chip-bg: #3a3a3a;
+        --btn-bg: #eee;
+        --btn-bg-hover: #fff;
+        --btn-text: #1a1a1a;
+        --accent: #eee;
+        --danger: #ef5350;
+        --danger-border: #6b3333;
+        --danger-bg: #2a1e1e;
+        --success: #66bb6a;
+        --success-bg: #1c2a1d;
+        --focus-border: #999;
+        --dashed-border: #555;
+      }
+    }
 
     .title {
       font-size: 1.1rem;
       font-weight: 600;
-      color: #1a1a1a;
+      color: var(--text-strong);
       margin: 0 0 1.5rem;
       line-height: 1.4;
     }
@@ -38,7 +92,7 @@ export class McpForm extends LitElement {
       display: block;
       font-size: 0.78rem;
       font-weight: 500;
-      color: #555;
+      color: var(--text-muted);
       margin-bottom: 0.3rem;
       letter-spacing: 0.01em;
     }
@@ -52,12 +106,12 @@ export class McpForm extends LitElement {
       font-family: inherit;
       font-size: 0.95rem;
       padding: 0.5rem 0.7rem;
-      border: 1px solid #ddd;
+      border: 1px solid var(--border);
       border-radius: 6px;
       width: 100%;
       outline: none;
-      background: #fff;
-      color: #1a1a1a;
+      background: var(--input-bg);
+      color: var(--text-strong);
       transition: border-color 0.15s;
     }
     input[type="text"]:focus,
@@ -65,7 +119,7 @@ export class McpForm extends LitElement {
     input[type="date"]:focus,
     input[type="datetime-local"]:focus,
     textarea:focus,
-    select:focus { border-color: #666; }
+    select:focus { border-color: var(--focus-border); }
 
     textarea { resize: vertical; min-height: 80px; }
 
@@ -80,14 +134,14 @@ export class McpForm extends LitElement {
       height: 1.1rem;
       margin: 0;
       cursor: pointer;
-      accent-color: #1a1a1a;
+      accent-color: var(--accent);
       flex-shrink: 0;
     }
     .checkbox-row label {
       margin: 0;
       font-size: 0.9rem;
       font-weight: 400;
-      color: #1a1a1a;
+      color: var(--text-strong);
       cursor: pointer;
     }
 
@@ -107,14 +161,14 @@ export class McpForm extends LitElement {
       height: 1rem;
       margin: 0;
       cursor: pointer;
-      accent-color: #1a1a1a;
+      accent-color: var(--accent);
       flex-shrink: 0;
     }
     .radio-row label {
       margin: 0;
       font-size: 0.9rem;
       font-weight: 400;
-      color: #1a1a1a;
+      color: var(--text-strong);
       cursor: pointer;
     }
 
@@ -125,13 +179,13 @@ export class McpForm extends LitElement {
     }
     input[type="range"] {
       flex: 1;
-      accent-color: #1a1a1a;
+      accent-color: var(--accent);
       cursor: pointer;
     }
     .range-value {
       font-size: 0.9rem;
       font-weight: 600;
-      color: #1a1a1a;
+      color: var(--text-strong);
       min-width: 2.5rem;
       text-align: right;
     }
@@ -152,14 +206,14 @@ export class McpForm extends LitElement {
       height: 1rem;
       margin: 0;
       cursor: pointer;
-      accent-color: #1a1a1a;
+      accent-color: var(--accent);
       flex-shrink: 0;
     }
     .multiselect-row label {
       margin: 0;
       font-size: 0.9rem;
       font-weight: 400;
-      color: #1a1a1a;
+      color: var(--text-strong);
       cursor: pointer;
     }
 
@@ -173,9 +227,9 @@ export class McpForm extends LitElement {
     .list-card {
       display: flex;
       flex-direction: column;
-      border: 1px solid #e0e0e0;
+      border: 1px solid var(--border-soft);
       border-radius: 8px;
-      background: #fafafa;
+      background: var(--surface);
       min-width: 0;
     }
     .list-card__header {
@@ -183,13 +237,13 @@ export class McpForm extends LitElement {
       align-items: center;
       justify-content: space-between;
       padding: 0.6rem 0.6rem 0.6rem 0.9rem;
-      border-bottom: 1px solid #ebebeb;
+      border-bottom: 1px solid var(--border-softer);
       min-height: 2.2rem;
     }
     .list-card__title {
       font-size: 0.72rem;
       font-weight: 600;
-      color: #888;
+      color: var(--text-faint);
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }
@@ -212,8 +266,8 @@ export class McpForm extends LitElement {
       font-size: 0.75rem;
       font-weight: 700;
       line-height: 1;
-      background: #e0e0e0;
-      color: #555;
+      background: var(--chip-bg);
+      color: var(--text-muted);
       border: none;
       cursor: pointer;
       transition: background 0.15s, color 0.15s;
@@ -225,8 +279,8 @@ export class McpForm extends LitElement {
       align-items: center;
       gap: 0.35rem;
       background: transparent;
-      border: 1.5px dashed #bbb;
-      color: #555;
+      border: 1.5px dashed var(--dashed-border);
+      color: var(--text-muted);
       border-radius: 6px;
       padding: 0.4rem 0.85rem;
       font-size: 0.82rem;
@@ -237,7 +291,7 @@ export class McpForm extends LitElement {
       width: 100%;
       justify-content: center;
     }
-    .list-add-btn:hover:not(:disabled) { border-color: #888; color: #1a1a1a; background: #f5f5f0; }
+    .list-add-btn:hover:not(:disabled) { border-color: var(--text-faint); color: var(--text-strong); background: var(--surface-hover); }
     .list-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
     .color-wrap {
@@ -249,20 +303,20 @@ export class McpForm extends LitElement {
       width: 2.5rem;
       height: 2.5rem;
       padding: 0.15rem;
-      border: 1px solid #ddd;
+      border: 1px solid var(--border);
       border-radius: 6px;
       cursor: pointer;
-      background: #fff;
+      background: var(--input-bg);
       flex-shrink: 0;
     }
     .color-hex {
       font-size: 0.9rem;
       font-family: monospace;
-      color: #1a1a1a;
+      color: var(--text-strong);
     }
 
     .file-drop {
-      border: 2px dashed #ddd;
+      border: 2px dashed var(--border);
       border-radius: 8px;
       padding: 1.2rem 1rem;
       text-align: center;
@@ -270,18 +324,18 @@ export class McpForm extends LitElement {
       transition: border-color 0.15s, background 0.15s;
       position: relative;
     }
-    .file-drop:hover:not(.file-drop--disabled) { border-color: #999; background: #fafafa; }
-    .file-drop--over { border-color: #1a1a1a; background: #f0f0f0; }
-    .file-drop--done { border-color: #4caf50; background: #f6fff6; cursor: default; }
+    .file-drop:hover:not(.file-drop--disabled) { border-color: var(--text-faint-2); background: var(--surface); }
+    .file-drop--over { border-color: var(--accent); background: var(--surface-hover); }
+    .file-drop--done { border-color: var(--success); background: var(--success-bg); cursor: default; }
     .file-drop--disabled { opacity: 0.5; cursor: not-allowed; }
     .file-drop input[type="file"] {
       position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
     }
     .file-drop--disabled input[type="file"] { pointer-events: none; }
     .file-drop__icon { font-size: 1.5rem; margin-bottom: 0.3rem; }
-    .file-drop__prompt { font-size: 0.85rem; color: #666; }
-    .file-drop__name { font-size: 0.85rem; font-weight: 600; color: #1a1a1a; margin-top: 0.2rem; }
-    .file-drop__uploading { font-size: 0.78rem; color: #aaa; margin-top: 0.2rem; }
+    .file-drop__prompt { font-size: 0.85rem; color: var(--text-muted); }
+    .file-drop__name { font-size: 0.85rem; font-weight: 600; color: var(--text-strong); margin-top: 0.2rem; }
+    .file-drop__uploading { font-size: 0.78rem; color: var(--text-faint-2); margin-top: 0.2rem; }
 
     .actions {
       display: flex;
@@ -299,56 +353,56 @@ export class McpForm extends LitElement {
       border: none;
       border-radius: 6px;
       cursor: pointer;
-      background: #1a1a1a;
-      color: #fff;
+      background: var(--btn-bg);
+      color: var(--btn-text);
       transition: opacity 0.15s, background 0.15s;
     }
-    button:hover:not(:disabled) { background: #333; }
+    button:hover:not(:disabled) { background: var(--btn-bg-hover); }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
 
     .btn-interrupt {
       background: transparent;
-      border: 1.5px solid #bbb;
-      color: #555;
+      border: 1.5px solid var(--dashed-border);
+      color: var(--text-muted);
       font-size: 0.82rem;
       padding: 0.4rem 0.9rem;
     }
-    .btn-interrupt:hover:not(:disabled) { border-color: #888; color: #1a1a1a; background: #f5f5f0; }
+    .btn-interrupt:hover:not(:disabled) { border-color: var(--text-faint); color: var(--text-strong); background: var(--surface-hover); }
 
     .field-error {
       font-size: 0.75rem;
-      color: #d32f2f;
+      color: var(--danger);
       margin-top: 0.25rem;
       font-weight: 500;
     }
     .input-error,
     .input-error:focus {
-      border-color: #d32f2f !important;
+      border-color: var(--danger) !important;
     }
     .list-card.card-has-error {
-      border-color: #f5c2c2;
-      background: #fffafa;
+      border-color: var(--danger-border);
+      background: var(--danger-bg);
     }
 
     .submitted-note {
       font-size: 0.78rem;
-      color: #4caf50;
+      color: var(--success);
       font-weight: 500;
     }
 
     .status {
       font-size: 0.72rem;
-      color: #aaa;
+      color: var(--text-faint-2);
     }
     .dot {
       display: inline-block;
       width: 7px; height: 7px;
       border-radius: 50%;
       margin-right: 4px;
-      background: #ccc;
+      background: var(--chip-bg);
       vertical-align: middle;
     }
-    .dot.live { background: #4caf50; }
+    .dot.live { background: var(--success); }
   `;
 
   static properties = {
