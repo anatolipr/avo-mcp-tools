@@ -1,16 +1,28 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import type { Server } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { WebSocket } from 'ws';
 
 const PORT = 8901;
 const BASE_URL = `http://localhost:${PORT}`;
-let serverProcess;
+let serverProcess: ChildProcess;
+
+function textOf(result: Record<string, unknown>): string {
+  const content = result.content as Array<{ text: string }>;
+  return content[0]!.text;
+}
+
+function requireSessionId(transport: StreamableHTTPClientTransport): string {
+  const id = transport.sessionId;
+  if (!id) throw new Error('expected transport to have a sessionId');
+  return id;
+}
 
 before(async () => {
-  serverProcess = spawn('node', ['server.js'], {
+  serverProcess = spawn('npx', ['tsx', 'src/server.ts'], {
     cwd: new URL('..', import.meta.url).pathname,
     env: { ...process.env, PORT: String(PORT) },
     stdio: ['ignore', 'ignore', 'inherit'],
@@ -42,7 +54,7 @@ async function connectClient() {
   return { client, transport };
 }
 
-async function closeSession(sessionId) {
+async function closeSession(sessionId: string) {
   const response = await fetch(new URL('/mcp', BASE_URL), {
     method: 'DELETE',
     headers: { 'mcp-session-id': sessionId },
@@ -65,11 +77,11 @@ test('two MCP sessions get distinct session ids', async () => {
 test('getOrCreateTenant returns independent tenants with isolated stores', async () => {
   const port = 8905;
   const previousPort = process.env.PORT;
-  let importedServer;
+  let importedServer: Server | undefined;
   process.env.PORT = String(port);
 
   try {
-    const { getOrCreateTenant, httpServer } = await import('../server.js');
+    const { getOrCreateTenant, httpServer } = await import('../src/server.js');
     importedServer = httpServer;
     const tenantA = getOrCreateTenant('unit-test-tenant-a');
     const tenantB = getOrCreateTenant('unit-test-tenant-b');
@@ -90,8 +102,8 @@ test('getOrCreateTenant returns independent tenants with isolated stores', async
     if (previousPort === undefined) delete process.env.PORT;
     else process.env.PORT = previousPort;
     if (importedServer?.listening) {
-      await new Promise((resolve, reject) => {
-        importedServer.close((error) => {
+      await new Promise<void>((resolve, reject) => {
+        importedServer!.close((error) => {
           if (error) reject(error);
           else resolve();
         });
@@ -119,8 +131,8 @@ test('two MCP sessions have isolated field values', async () => {
   const aResult = await a.client.callTool({ name: 'get_field', arguments: { field: 'note' } });
   const bResult = await b.client.callTool({ name: 'get_field', arguments: { field: 'note' } });
 
-  assert.equal(aResult.content[0].text, 'from A');
-  assert.equal(bResult.content[0].text, 'from B');
+  assert.equal(textOf(aResult), 'from A');
+  assert.equal(textOf(bResult), 'from B');
 
   await a.client.close();
   await b.client.close();
@@ -129,7 +141,7 @@ test('two MCP sessions have isolated field values', async () => {
 test('get_form_url returns a tenant-scoped URL containing the session id', async () => {
   const a = await connectClient();
   const result = await a.client.callTool({ name: 'get_form_url', arguments: {} });
-  assert.equal(result.content[0].text, `${BASE_URL}/t/${a.transport.sessionId}`);
+  assert.equal(textOf(result), `${BASE_URL}/t/${requireSessionId(a.transport)}`);
   await a.client.close();
 });
 
@@ -144,11 +156,11 @@ test('disposing a tenant while define_form waits for submit resolves with an err
   });
 
   await new Promise((r) => setTimeout(r, 200));
-  await closeSession(a.transport.sessionId);
+  await closeSession(requireSessionId(a.transport));
 
   const result = await waitPromise;
   assert.equal(result.isError, true);
-  assert.equal(result.content[0].text, 'Error: the session was closed while waiting for submit');
+  assert.equal(textOf(result), 'Error: the session was closed while waiting for submit');
 });
 
 test('disposing a tenant while wait_for_submit waits resolves with an error', { timeout: 5000 }, async () => {
@@ -166,17 +178,17 @@ test('disposing a tenant while wait_for_submit waits resolves with an error', { 
   });
 
   await new Promise((r) => setTimeout(r, 200));
-  await closeSession(a.transport.sessionId);
+  await closeSession(requireSessionId(a.transport));
 
   const result = await waitPromise;
   assert.equal(result.isError, true);
-  assert.equal(result.content[0].text, 'Error: the session was closed while waiting for submit');
+  assert.equal(textOf(result), 'Error: the session was closed while waiting for submit');
 });
 
-function connectWs(tenantId) {
+function connectWs(tenantId: string): Promise<{ ws: WebSocket; messages: any[] }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${tenantId}`);
-    const messages = [];
+    const messages: any[] = [];
     ws.on('message', (raw) => messages.push(JSON.parse(raw.toString())));
     ws.on('open', () => resolve({ ws, messages }));
     ws.on('error', reject);
@@ -196,8 +208,8 @@ test('WebSocket broadcasts are scoped to the connecting tenant', async () => {
     arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] },
   });
 
-  const wsA = await connectWs(a.transport.sessionId);
-  const wsB = await connectWs(b.transport.sessionId);
+  const wsA = await connectWs(requireSessionId(a.transport));
+  const wsB = await connectWs(requireSessionId(b.transport));
 
   await a.client.callTool({ name: 'set_field', arguments: { field: 'note', value: 'hello from A' } });
   await new Promise((r) => setTimeout(r, 200));
@@ -216,7 +228,7 @@ test('WebSocket broadcasts are scoped to the connecting tenant', async () => {
 
 test('GET /t/:tenantId serves the form page', async () => {
   const a = await connectClient();
-  const res = await fetch(`${BASE_URL}/t/${a.transport.sessionId}`);
+  const res = await fetch(`${BASE_URL}/t/${requireSessionId(a.transport)}`);
   assert.equal(res.status, 200);
   const body = await res.text();
   assert.match(body, /<html/i);
@@ -241,22 +253,21 @@ test('WebSocket connection with an unknown tenant id is rejected, not silently j
   assert.equal(closeCode, 4404);
 });
 
-test('index.html client-side JS reads the tenant id from the URL path and connects with it', async () => {
-  const a = await connectClient();
-  const res = await fetch(`${BASE_URL}/t/${a.transport.sessionId}`);
-  assert.equal(res.status, 200);
-
-  const html = await res.text();
-  assert.match(html, /location\.pathname\.startsWith\('\/t\/'\)/, 'expected client-side JS to branch on /t/ URLs');
-  assert.match(
-    html,
-    /location\.pathname\.slice\('\/t\/'\.length\)\.split\('\/'\)\[0\]/,
-    'expected client-side JS to extract the tenant id segment from the path',
+test('mcp-form.ts reads the tenant id from the URL path and connects with it', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(
+    new URL('../src/client/mcp-form.ts', import.meta.url),
+    'utf-8',
   );
-  assert.match(html, /encodeURIComponent\(tenantId\)/, 'expected client-side JS to URL-encode the tenant id');
-  assert.match(html, /event\.code === 4404/, 'expected client-side JS to stop reconnecting on unknown tenants');
 
-  await a.client.close();
+  assert.match(src, /location\.pathname\.startsWith\('\/t\/'\)/, 'expected client-side code to branch on /t/ URLs');
+  assert.match(
+    src,
+    /location\.pathname\.slice\('\/t\/'\.length\)\.split\('\/'\)\[0\]/,
+    'expected client-side code to extract the tenant id segment from the path',
+  );
+  assert.match(src, /encodeURIComponent\(tenantId\)/, 'expected client-side code to URL-encode the tenant id');
+  assert.match(src, /event\.code === 4404/, 'expected client-side code to stop reconnecting on unknown tenants');
 });
 
 test('closing an MCP session disposes its tenant and closes its WebSocket clients', { timeout: 5000 }, async () => {
@@ -265,7 +276,7 @@ test('closing an MCP session disposes its tenant and closes its WebSocket client
     name: 'define_form',
     arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] },
   });
-  const tenantId = a.transport.sessionId;
+  const tenantId = requireSessionId(a.transport);
   const wsA = await connectWs(tenantId);
 
   const closed = new Promise((resolve) => wsA.ws.on('close', resolve));
@@ -277,7 +288,7 @@ test('closing an MCP session disposes its tenant and closes its WebSocket client
 
 test('idle tenants are automatically disposed after a TTL, even without explicit session close', { timeout: 10000 }, async () => {
   const idlePort = 8906;
-  const idleServerProcess = spawn('node', ['server.js'], {
+  const idleServerProcess = spawn('npx', ['tsx', 'src/server.ts'], {
     cwd: new URL('..', import.meta.url).pathname,
     env: {
       ...process.env,

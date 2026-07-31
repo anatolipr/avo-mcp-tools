@@ -4,11 +4,12 @@ import path from 'node:path';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, type WebSocket } from 'ws';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import type { FieldDef, FormDef, FieldValues, ClientMessage } from './shared/types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8765;
@@ -22,31 +23,37 @@ fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 //    plain browser access with no MCP session involved).
 // ---------------------------------------------------------------------------
 const initialConfig = JSON.parse(
-  fs.readFileSync(path.join(__dirname, 'config', 'fields.json'), 'utf-8')
-);
+  fs.readFileSync(path.join(__dirname, '..', 'config', 'fields.json'), 'utf-8')
+) as FormDef;
+
+interface SubmitPayload {
+  __interrupted: boolean;
+  __disposed?: boolean;
+  [field: string]: string | boolean | undefined;
+}
 
 class Store {
-  #values = new Map();
-  #subscribers = new Set();
+  #values = new Map<string, string>();
+  #subscribers = new Set<(name: string, value: string) => void>();
 
-  constructor(fieldConfigs) {
+  constructor(fieldConfigs: FieldDef[]) {
     for (const f of fieldConfigs) {
       if (f.type === 'html_output') continue;
       this.#values.set(f.name, f.default ?? '');
     }
   }
 
-  has(name) { return this.#values.has(name); }
-  get(name) { return this.#values.get(name); }
+  has(name: string) { return this.#values.has(name); }
+  get(name: string) { return this.#values.get(name); }
 
-  set(name, value) {
+  set(name: string, value: string) {
     this.#values.set(name, value);
     for (const fn of this.#subscribers) fn(name, value);
   }
 
-  snapshot() { return Object.fromEntries(this.#values); }
+  snapshot(): FieldValues { return Object.fromEntries(this.#values); }
 
-  onChange(fn) {
+  onChange(fn: (name: string, value: string) => void) {
     this.#subscribers.add(fn);
     return () => this.#subscribers.delete(fn);
   }
@@ -55,7 +62,14 @@ class Store {
 }
 
 class Tenant {
-  constructor(id) {
+  id: string;
+  formDef: FormDef;
+  store: Store;
+  submitBus: EventEmitter;
+  wsClients: Set<WebSocket>;
+  lastActivityAt: number;
+
+  constructor(id: string) {
     this.id = id;
     this.formDef = { title: initialConfig.title ?? '', fields: initialConfig.fields };
     this.store = new Store(this.formDef.fields);
@@ -70,7 +84,7 @@ class Tenant {
     this.lastActivityAt = Date.now();
   }
 
-  applyFormDef(def) {
+  applyFormDef(def: FormDef) {
     this.store.dispose();
     this.formDef = def;
     this.store = new Store(this.formDef.fields);
@@ -85,7 +99,7 @@ class Tenant {
     }
   }
 
-  broadcastUpdate(field, value) {
+  broadcastUpdate(field: string, value: string) {
     const payload = JSON.stringify({ type: 'update', field, value });
     for (const client of this.wsClients) {
       if (client.readyState === client.OPEN) client.send(payload);
@@ -101,9 +115,9 @@ class Tenant {
   }
 }
 
-const tenants = new Map();
+const tenants = new Map<string, Tenant>();
 
-function getOrCreateTenant(id) {
+function getOrCreateTenant(id: string): Tenant {
   let tenant = tenants.get(id);
   if (!tenant) {
     tenant = new Tenant(id);
@@ -113,18 +127,17 @@ function getOrCreateTenant(id) {
 }
 
 // The 'default' tenant backs plain browser access (no MCP session), so
-// `node server.js` + opening http://localhost:PORT keeps working standalone.
+// `npm start` + opening http://localhost:PORT keeps working standalone.
 getOrCreateTenant('default');
-export { Tenant, tenants, getOrCreateTenant, httpServer };
 
 // ---------------------------------------------------------------------------
 // 5. HTTP + WebSocket server
 // ---------------------------------------------------------------------------
-const mime = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
+const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
 
-const sessions = new Map();
+const sessions = new Map<string, StreamableHTTPServerTransport>();
 
-function envMs(name, defaultMs) {
+function envMs(name: string, defaultMs: number): number {
   const raw = process.env[name];
   if (!raw) return defaultMs;
   const n = Number(raw);
@@ -134,7 +147,7 @@ function envMs(name, defaultMs) {
 const TENANT_IDLE_TIMEOUT_MS = envMs('TENANT_IDLE_TIMEOUT_MS', 30 * 60 * 1000);
 const TENANT_SWEEP_INTERVAL_MS = envMs('TENANT_SWEEP_INTERVAL_MS', 5 * 60 * 1000);
 
-function disposeTenant(id) {
+function disposeTenant(id: string) {
   const transport = sessions.get(id);
   if (transport) {
     transport.close();
@@ -156,8 +169,10 @@ const sweepInterval = setInterval(() => {
 }, TENANT_SWEEP_INTERVAL_MS);
 sweepInterval.unref();
 
+const STATIC_DIR = path.join(__dirname, '..', 'dist', 'client');
+
 const httpServer = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
 
   if (url.pathname === '/mcp') {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -166,7 +181,7 @@ const httpServer = http.createServer(async (req, res) => {
 
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
-    const sessionId = req.headers['mcp-session-id'];
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
     if (req.method === 'POST' && !sessionId) {
       const tenantId = randomUUID();
@@ -198,7 +213,7 @@ const httpServer = http.createServer(async (req, res) => {
         tenants.delete(sessionId);
         await new Promise((resolve) => setImmediate(resolve));
       }
-      await sessions.get(sessionId).handleRequest(req, res);
+      await sessions.get(sessionId)!.handleRequest(req, res);
       return;
     }
 
@@ -212,7 +227,7 @@ const httpServer = http.createServer(async (req, res) => {
     if (!boundaryMatch) { res.writeHead(400); res.end('Missing boundary'); return; }
 
     const boundary = Buffer.from('--' + boundaryMatch[1]);
-    const chunks = [];
+    const chunks: Buffer[] = [];
     req.on('data', (chunk) => chunks.push(chunk));
     req.on('end', () => {
       const body = Buffer.concat(chunks);
@@ -221,7 +236,7 @@ const httpServer = http.createServer(async (req, res) => {
       const headerEnd = body.indexOf('\r\n\r\n');
       const headerSection = body.slice(0, headerEnd).toString();
       const nameMatch = headerSection.match(/filename="([^"]+)"/);
-      const originalName = nameMatch ? nameMatch[1] : 'upload';
+      const originalName = nameMatch ? nameMatch[1]! : 'upload';
       const ext = path.extname(originalName);
       const savedName = `${randomUUID()}${ext}`;
       const savedPath = path.join(UPLOAD_DIR, savedName);
@@ -252,7 +267,7 @@ const httpServer = http.createServer(async (req, res) => {
   }
 
   let filePath = pathname === '/' ? '/index.html' : pathname;
-  filePath = path.join(__dirname, 'public', filePath);
+  filePath = path.join(STATIC_DIR, filePath);
 
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
@@ -265,7 +280,7 @@ const httpServer = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
 wss.on('connection', (ws, req) => {
-  const wsUrl = new URL(req.url, `http://localhost:${PORT}`);
+  const wsUrl = new URL(req.url ?? '/', `http://localhost:${PORT}`);
   const requestedTenantId = wsUrl.searchParams.get('tenant');
 
   if (requestedTenantId && !tenants.has(requestedTenantId)) {
@@ -284,7 +299,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', (raw) => {
     t.touch();
-    let msg;
+    let msg: ClientMessage;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     if (msg.type === 'set' && t.store.has(msg.field)) {
@@ -396,7 +411,7 @@ const fieldDefSchema = z.object({
   ...validationSchema,
 });
 
-function buildMcpServer(tenantId) {
+function buildMcpServer(tenantId: string) {
   const mcp = new McpServer({ name: 'mcp-form-demo', version: '0.2.0' });
   const tenant = () => {
     const t = tenants.get(tenantId) ?? getOrCreateTenant(tenantId);
@@ -504,7 +519,7 @@ function buildMcpServer(tenantId) {
     async ({ title, fields, wait }) => {
       tenant().applyFormDef({ title: title ?? '', fields });
       if (wait) {
-        const raw = await new Promise((resolve) => {
+        const raw = await new Promise<SubmitPayload>((resolve) => {
           tenant().submitBus.once('submit', resolve);
         });
         const { __interrupted, __disposed, ...values } = raw;
@@ -548,7 +563,7 @@ function buildMcpServer(tenantId) {
     'file → absolute server path string; use the Read tool to access the file contents.',
     {},
     async () => {
-      const raw = await new Promise((resolve) => {
+      const raw = await new Promise<SubmitPayload>((resolve) => {
         tenant().submitBus.once('submit', resolve);
       });
       const { __interrupted, __disposed, ...values } = raw;
@@ -624,3 +639,5 @@ function buildMcpServer(tenantId) {
 
   return mcp;
 }
+
+export { Tenant, tenants, getOrCreateTenant, httpServer };
