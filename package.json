@@ -6,6 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test",
     "stop": "kill -9 $(lsof -ti :${PORT:-8765}) 2>/dev/null && echo 'Server stopped' || echo 'No server running'"
   },
   "dependencies": {

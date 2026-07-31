@@ -17,21 +17,14 @@ const UPLOAD_DIR = path.join(os.tmpdir(), 'mcp-form-uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // ---------------------------------------------------------------------------
-// 1. Mutable form definition — starts from fields.json, replaced by
-//    define_form tool calls at runtime.
+// 1. Tenant -- bundles the form definition, store, submit bus, and connected
+//    WebSocket clients for one MCP session (or the 'default' tenant used by
+//    plain browser access with no MCP session involved).
 // ---------------------------------------------------------------------------
 const initialConfig = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'config', 'fields.json'), 'utf-8')
 );
 
-let formDef = {
-  title: initialConfig.title ?? '',
-  fields: initialConfig.fields,
-};
-
-// ---------------------------------------------------------------------------
-// 2. Store — rebuilt whenever the form definition changes.
-// ---------------------------------------------------------------------------
 class Store {
   #values = new Map();
   #subscribers = new Set();
@@ -61,41 +54,68 @@ class Store {
   dispose() { this.#subscribers.clear(); }
 }
 
-let store = new Store(formDef.fields);
+class Tenant {
+  constructor(id) {
+    this.id = id;
+    this.formDef = { title: initialConfig.title ?? '', fields: initialConfig.fields };
+    this.store = new Store(this.formDef.fields);
+    this.submitBus = new EventEmitter();
+    this.submitBus.setMaxListeners(0);
+    this.wsClients = new Set();
+    this.lastActivityAt = Date.now();
+    this.store.onChange((field, value) => this.broadcastUpdate(field, value));
+  }
 
-// ---------------------------------------------------------------------------
-// 3. Submit bus — fires once per user Submit click, resolved by wait_for_submit.
-// ---------------------------------------------------------------------------
-const submitBus = new EventEmitter();
-submitBus.setMaxListeners(0);
+  touch() {
+    this.lastActivityAt = Date.now();
+  }
 
-// ---------------------------------------------------------------------------
-// 4. Helpers to rebuild the form and push it to all connected browsers.
-// ---------------------------------------------------------------------------
-function applyFormDef(def) {
-  store.dispose();
-  formDef = def;
-  store = new Store(formDef.fields);
+  applyFormDef(def) {
+    this.store.dispose();
+    this.formDef = def;
+    this.store = new Store(this.formDef.fields);
+    this.store.onChange((field, value) => this.broadcastUpdate(field, value));
+    this.broadcastReinit();
+  }
 
-  // Re-register the broadcast listener on the new store.
-  store.onChange((field, value) => broadcastUpdate(field, value));
+  broadcastReinit() {
+    const payload = JSON.stringify({ type: 'reinit', formDef: this.formDef, state: this.store.snapshot() });
+    for (const client of this.wsClients) {
+      if (client.readyState === client.OPEN) client.send(payload);
+    }
+  }
 
-  broadcastReinit();
-}
+  broadcastUpdate(field, value) {
+    const payload = JSON.stringify({ type: 'update', field, value });
+    for (const client of this.wsClients) {
+      if (client.readyState === client.OPEN) client.send(payload);
+    }
+  }
 
-function broadcastReinit() {
-  const payload = JSON.stringify({ type: 'reinit', formDef, state: store.snapshot() });
-  for (const client of wss.clients) {
-    if (client.readyState === client.OPEN) client.send(payload);
+  dispose() {
+    this.submitBus.emit('submit', { __interrupted: true, __disposed: true, ...this.store.snapshot() });
+    this.store.dispose();
+    this.submitBus.removeAllListeners();
+    for (const client of this.wsClients) client.close();
+    this.wsClients.clear();
   }
 }
 
-function broadcastUpdate(field, value) {
-  const payload = JSON.stringify({ type: 'update', field, value });
-  for (const client of wss.clients) {
-    if (client.readyState === client.OPEN) client.send(payload);
+const tenants = new Map();
+
+function getOrCreateTenant(id) {
+  let tenant = tenants.get(id);
+  if (!tenant) {
+    tenant = new Tenant(id);
+    tenants.set(id, tenant);
   }
+  return tenant;
 }
+
+// The 'default' tenant backs plain browser access (no MCP session), so
+// `node server.js` + opening http://localhost:PORT keeps working standalone.
+getOrCreateTenant('default');
+export { Tenant, tenants, getOrCreateTenant, httpServer };
 
 // ---------------------------------------------------------------------------
 // 5. HTTP + WebSocket server
@@ -103,6 +123,38 @@ function broadcastUpdate(field, value) {
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
 
 const sessions = new Map();
+
+function envMs(name, defaultMs) {
+  const raw = process.env[name];
+  if (!raw) return defaultMs;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : defaultMs;
+}
+
+const TENANT_IDLE_TIMEOUT_MS = envMs('TENANT_IDLE_TIMEOUT_MS', 30 * 60 * 1000);
+const TENANT_SWEEP_INTERVAL_MS = envMs('TENANT_SWEEP_INTERVAL_MS', 5 * 60 * 1000);
+
+function disposeTenant(id) {
+  const transport = sessions.get(id);
+  if (transport) {
+    transport.close();
+  } else {
+    tenants.get(id)?.dispose();
+    tenants.delete(id);
+  }
+}
+
+const sweepInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [id, tenant] of tenants) {
+    if (id === 'default') continue;
+    if (now - tenant.lastActivityAt > TENANT_IDLE_TIMEOUT_MS) {
+      console.error(`[mcp] sweeping idle tenant: ${id}`);
+      disposeTenant(id);
+    }
+  }
+}, TENANT_SWEEP_INTERVAL_MS);
+sweepInterval.unref();
 
 const httpServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -117,26 +169,35 @@ const httpServer = http.createServer(async (req, res) => {
     const sessionId = req.headers['mcp-session-id'];
 
     if (req.method === 'POST' && !sessionId) {
+      const tenantId = randomUUID();
       const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
+        sessionIdGenerator: () => tenantId,
         onsessioninitialized: (id) => {
           sessions.set(id, transport);
+          getOrCreateTenant(id);
           console.error(`[mcp] session opened: ${id}`);
         },
       });
       transport.onclose = () => {
         if (transport.sessionId) {
           sessions.delete(transport.sessionId);
+          tenants.get(transport.sessionId)?.dispose();
+          tenants.delete(transport.sessionId);
           console.error(`[mcp] session closed: ${transport.sessionId}`);
         }
       };
-      const mcpInstance = buildMcpServer();
+      const mcpInstance = buildMcpServer(tenantId);
       await mcpInstance.connect(transport);
       await transport.handleRequest(req, res);
       return;
     }
 
     if (sessionId && sessions.has(sessionId)) {
+      if (req.method === 'DELETE') {
+        tenants.get(sessionId)?.dispose();
+        tenants.delete(sessionId);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
       await sessions.get(sessionId).handleRequest(req, res);
       return;
     }
@@ -185,7 +246,12 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
-  let filePath = url.pathname === '/' ? '/index.html' : url.pathname;
+  let pathname = url.pathname;
+  if (pathname.startsWith('/t/')) {
+    pathname = '/';
+  }
+
+  let filePath = pathname === '/' ? '/index.html' : pathname;
   filePath = path.join(__dirname, 'public', filePath);
 
   fs.readFile(filePath, (err, data) => {
@@ -198,29 +264,46 @@ const httpServer = http.createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
-wss.on('connection', (ws) => {
-  ws.send(JSON.stringify({ type: 'init', formDef, state: store.snapshot() }));
+wss.on('connection', (ws, req) => {
+  const wsUrl = new URL(req.url, `http://localhost:${PORT}`);
+  const requestedTenantId = wsUrl.searchParams.get('tenant');
+
+  if (requestedTenantId && !tenants.has(requestedTenantId)) {
+    // An explicit tenant was requested but no longer exists (for example
+    // because its MCP session was disposed). Reject instead of silently
+    // falling back to the shared default tenant.
+    ws.close(4404, 'Unknown or expired tenant');
+    return;
+  }
+
+  const tenantId = requestedTenantId || 'default';
+  const t = getOrCreateTenant(tenantId);
+
+  t.wsClients.add(ws);
+  ws.send(JSON.stringify({ type: 'init', formDef: t.formDef, state: t.store.snapshot() }));
 
   ws.on('message', (raw) => {
+    t.touch();
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
-    if (msg.type === 'set' && store.has(msg.field)) {
-      store.set(msg.field, msg.value);
+    if (msg.type === 'set' && t.store.has(msg.field)) {
+      t.store.set(msg.field, msg.value);
     }
 
     if (msg.type === 'submit') {
-      submitBus.emit('submit', { __interrupted: false, ...store.snapshot() });
+      t.submitBus.emit('submit', { __interrupted: false, ...t.store.snapshot() });
     }
 
     if (msg.type === 'interrupt') {
-      submitBus.emit('submit', { __interrupted: true, ...store.snapshot() });
+      t.submitBus.emit('submit', { __interrupted: true, ...t.store.snapshot() });
     }
   });
-});
 
-// Initial broadcast wiring for the startup store.
-store.onChange((field, value) => broadcastUpdate(field, value));
+  ws.on('close', () => {
+    t.wsClients.delete(ws);
+  });
+});
 
 httpServer.listen(PORT, () => {
   console.error(`[mcp-form-demo] UI available at http://localhost:${PORT}`);
@@ -313,20 +396,26 @@ const fieldDefSchema = z.object({
   ...validationSchema,
 });
 
-function buildMcpServer() {
+function buildMcpServer(tenantId) {
   const mcp = new McpServer({ name: 'mcp-form-demo', version: '0.2.0' });
+  const tenant = () => {
+    const t = tenants.get(tenantId) ?? getOrCreateTenant(tenantId);
+    t.touch();
+    return t;
+  };
 
   // --- form-level tools ---
 
   mcp.tool(
     'get_form_url',
-    'Returns the URL of the live browser form UI (e.g. http://localhost:8765). ' +
+    'Returns the URL of the live browser form UI (e.g. http://localhost:8765/t/<id>). ' +
     'Call this and share the URL with the user whenever you are about to collect input via define_form, ' +
     'so they know where to open the form before you call wait_for_submit.',
     {},
-    async () => ({
-      content: [{ type: 'text', text: `http://localhost:${PORT}` }],
-    })
+    async () => {
+      tenant();
+      return { content: [{ type: 'text', text: `http://localhost:${PORT}/t/${tenantId}` }] };
+    }
   );
 
   mcp.tool(
@@ -413,12 +502,18 @@ function buildMcpServer() {
       ),
     },
     async ({ title, fields, wait }) => {
-      applyFormDef({ title: title ?? '', fields });
+      tenant().applyFormDef({ title: title ?? '', fields });
       if (wait) {
         const raw = await new Promise((resolve) => {
-          submitBus.once('submit', resolve);
+          tenant().submitBus.once('submit', resolve);
         });
-        const { __interrupted, ...values } = raw;
+        const { __interrupted, __disposed, ...values } = raw;
+        if (__disposed) {
+          return {
+            content: [{ type: 'text', text: 'Error: the session was closed while waiting for submit' }],
+            isError: true,
+          };
+        }
         return {
           content: [{ type: 'text', text: JSON.stringify({ status: __interrupted ? 'interrupted' : 'submitted', values }, null, 2) }],
         };
@@ -454,9 +549,15 @@ function buildMcpServer() {
     {},
     async () => {
       const raw = await new Promise((resolve) => {
-        submitBus.once('submit', resolve);
+        tenant().submitBus.once('submit', resolve);
       });
-      const { __interrupted, ...values } = raw;
+      const { __interrupted, __disposed, ...values } = raw;
+      if (__disposed) {
+        return {
+          content: [{ type: 'text', text: 'Error: the session was closed while waiting for submit' }],
+          isError: true,
+        };
+      }
       return {
         content: [{ type: 'text', text: JSON.stringify({ status: __interrupted ? 'interrupted' : 'submitted', values }, null, 2) }],
       };
@@ -475,9 +576,9 @@ function buildMcpServer() {
       content: [{
         type: 'text',
         text: JSON.stringify(
-          formDef.fields.map((f) => f.type === 'html_output'
+          tenant().formDef.fields.map((f) => f.type === 'html_output'
             ? { name: f.name, type: 'html_output' }
-            : { ...f, value: store.get(f.name) }
+            : { ...f, value: tenant().store.get(f.name) }
           ),
           null, 2
         ),
@@ -492,10 +593,11 @@ function buildMcpServer() {
     'Field must exist in the currently active form (use list_fields to see available names).',
     { field: z.string().describe('snake_case field name as defined in the current form schema') },
     async ({ field }) => {
-      if (!store.has(field)) {
+      const t = tenant();
+      if (!t.store.has(field)) {
         return { content: [{ type: 'text', text: `Error: field "${field}" does not exist in the current form` }], isError: true };
       }
-      return { content: [{ type: 'text', text: String(store.get(field)) }] };
+      return { content: [{ type: 'text', text: String(t.store.get(field)) }] };
     }
   );
 
@@ -511,10 +613,11 @@ function buildMcpServer() {
       value: z.string(),
     },
     async ({ field, value }) => {
-      if (!store.has(field)) {
+      const t = tenant();
+      if (!t.store.has(field)) {
         return { content: [{ type: 'text', text: `Error: field "${field}" does not exist in the current form` }], isError: true };
       }
-      store.set(field, value);
+      t.store.set(field, value);
       return { content: [{ type: 'text', text: `${field} = ${value}` }] };
     }
   );

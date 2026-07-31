@@ -34,10 +34,27 @@ Open `http://localhost:8765` in a browser to see the live form.
 > *spawned* by an MCP client, not run interactively. The HTTP server comes up
 > immediately regardless.
 
-## Wiring it into Claude Desktop or Claude Code
+## Wiring it into Claude Desktop, Claude Code, or Copilot
 
-Add to your MCP config (`claude_desktop_config.json`, or `.mcp.json` for
-Claude Code):
+`server.js` exposes MCP over **both** stdio and streamable HTTP (at
+`/mcp` on the same port as the web UI), so pick whichever config style
+your client supports.
+
+**HTTP (recommended — no absolute paths, just needs the server already
+running via `node server.js`):**
+
+```json
+{
+  "mcpServers": {
+    "mcp-form": {
+      "type": "http",
+      "url": "http://localhost:8765/mcp"
+    }
+  }
+}
+```
+
+**stdio (client spawns the process for you):**
 
 ```json
 {
@@ -49,6 +66,9 @@ Claude Code):
   }
 }
 ```
+
+Add this to `claude_desktop_config.json`, `.mcp.json` for Claude Code, or
+your Copilot MCP config file.
 
 Then, in a conversation:
 

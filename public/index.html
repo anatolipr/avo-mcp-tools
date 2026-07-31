@@ -414,11 +414,18 @@
       }
 
       _connect() {
-        const ws = new WebSocket(`ws://${location.host}/ws`);
+        const tenantId = location.pathname.startsWith('/t/')
+          ? location.pathname.slice('/t/'.length).split('/')[0]
+          : '';
+        const wsPath = tenantId ? `/ws?tenant=${encodeURIComponent(tenantId)}` : '/ws';
+        const ws = new WebSocket(`ws://${location.host}${wsPath}`);
         this._ws = ws;
         ws.onopen  = () => { this._connected = true; };
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           this._connected = false;
+          if (event.code === 4404) {
+            return;
+          }
           // simple reconnect after 2 s
           setTimeout(() => this._connect(), 2000);
         };
