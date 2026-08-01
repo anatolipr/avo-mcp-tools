@@ -42,7 +42,7 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
       }
 
       if (msg.type === 'register_tools') {
-        t.setToolManifest(msg.tools);
+        t.setToolManifest(msg.tools, msg.summary);
       }
 
       if (msg.type === 'call_result') {

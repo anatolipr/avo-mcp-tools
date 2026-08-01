@@ -32,7 +32,7 @@ test('Tenant call/rejectCall round-trip rejects', async () => {
   await assert.rejects(pending, /boom/);
 });
 
-test('createManifestToolRegistry registers a tool per manifest entry with correct zod param types', () => {
+test('createManifestToolRegistry registers a tool per manifest entry with correct zod param types, plus the built-in describe_tools', () => {
   const t = new Tenant('t1', undefined, {});
   t.setToolManifest([
     { name: 'insert_title', description: 'sets title', params: { title: { type: 'string' } } },
@@ -40,8 +40,9 @@ test('createManifestToolRegistry registers a tool per manifest entry with correc
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
-  assert.equal(registry.handles.size, 1);
+  assert.equal(registry.handles.size, 2);
   assert.ok(registry.handles.has('insert_title'));
+  assert.ok(registry.handles.has('describe_tools'));
 });
 
 test('calling a manifest tool sends a "call" WS message (by tool name) and resolves via resolveCall', async () => {
@@ -92,6 +93,29 @@ test('re-registering a manifest removes stale tools and adds new ones', () => {
   registry.sync();
   assert.ok(!registry.handles.has('insert_title'), 'stale tool should be removed');
   assert.ok(registry.handles.has('insert_main'));
+  assert.ok(registry.handles.has('describe_tools'), 'describe_tools should never be treated as stale');
+});
+
+test('describe_tools returns the page summary and a compact tool index, and shadows a page tool of the same name', async () => {
+  const t = new Tenant('t1', undefined, {});
+  t.setToolManifest(
+    [
+      { name: 'insert_title', description: 'sets title', params: {} },
+      { name: 'describe_tools', description: 'a page tool that should be shadowed', params: {} },
+    ],
+    'This page is a hello-world demo.'
+  );
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  assert.equal(registry.handles.size, 2, 'the colliding page tool name should not add a second handle');
+
+  const handle = registry.handles.get('describe_tools')!;
+  const result: any = await (handle as any).handler({}, {});
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.summary, 'This page is a hello-world demo.');
+  assert.ok(payload.tools.some((e: any) => e.name === 'insert_title'));
 });
 
 test('WS "register_tools" message updates the tenant manifest; "call_result" resolves a pending call', async () => {

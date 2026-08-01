@@ -75,10 +75,10 @@ async function waitForTool(client: Client, name: string, timeoutMs = 3000) {
   throw new Error(`tool "${name}" did not appear in tools/list within ${timeoutMs}ms`);
 }
 
-test('a fresh session only has get_embed_snippet until a page pushes its manifest', async () => {
+test('a fresh session only has get_embed_snippet and describe_tools until a page pushes its manifest', async () => {
   const a = await connectClient();
   const names = await toolNames(a.client);
-  assert.deepEqual(names, ['get_embed_snippet']);
+  assert.deepEqual(names.sort(), ['describe_tools', 'get_embed_snippet']);
   await a.client.close();
 });
 
@@ -112,6 +112,28 @@ test('pushing a manifest over WS makes new named tools appear in tools/list, and
   await a.client.close();
 });
 
+test('a manifest\'s summary is readable via describe_tools once registered', async () => {
+  const a = await connectClient();
+  const tenantId = requireSessionId(a.transport);
+
+  const ws = await connectWs(tenantId);
+  ws.send(JSON.stringify({
+    type: 'register_tools',
+    tools: [{ name: 'insert_title', description: 'd', params: { title: { type: 'string' } } }],
+    summary: 'This page is a hello-world demo with a title and a body.',
+  }));
+
+  await waitForTool(a.client, 'insert_title');
+
+  const result = await a.client.callTool({ name: 'describe_tools', arguments: {} });
+  const payload = JSON.parse(textOf(result));
+  assert.equal(payload.summary, 'This page is a hello-world demo with a title and a body.');
+  assert.ok(payload.tools.some((t: any) => t.name === 'insert_title'));
+
+  ws.close();
+  await a.client.close();
+});
+
 test('manifests are isolated per tenant — a second session with no manifest still only sees get_embed_snippet', async () => {
   const a = await connectClient();
   const b = await connectClient();
@@ -125,7 +147,7 @@ test('manifests are isolated per tenant — a second session with no manifest st
   await waitForTool(a.client, 'insert_title');
 
   const bNames = await toolNames(b.client);
-  assert.deepEqual(bNames, ['get_embed_snippet']);
+  assert.deepEqual(bNames.sort(), ['describe_tools', 'get_embed_snippet']);
 
   wsA.close();
   await a.client.close();

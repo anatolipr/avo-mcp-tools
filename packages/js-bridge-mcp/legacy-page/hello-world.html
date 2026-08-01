@@ -40,6 +40,13 @@
       return 'main content updated';
     }
 
+    // Optional: shared context read once alongside window.__mcpTools below.
+    // Surfaced to agents via the describe_tools tool the bridge always
+    // registers — use it for cross-tool rules or domain concepts that
+    // don't belong in any single tool's own description.
+    window.__mcpSummary = 'This is a bare demo page with an <h1> title and a <main> body. ' +
+      'insert_title and insert_main are independent — no ordering requirement between them.';
+
     // window.__mcpTools is the contract the injected bridge script looks
     // for: an array of { name, description, params, example, fn } — real
     // function references, not string lookups. Any page wiring itself up

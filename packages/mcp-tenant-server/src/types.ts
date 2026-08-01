@@ -46,6 +46,18 @@ export interface ToolManifestEntry {
 export interface RegisterToolsMessage {
   type: 'register_tools';
   tools: ToolManifestEntry[];
+  /**
+   * Optional page-authored context shared across all tools in this manifest:
+   * what kind of page/app this is, cross-tool sequencing rules ("call X
+   * before Y"), and any domain concepts an agent needs before calling
+   * individual tools blindly. Distinct from each tool's own `description` -
+   * this is manifest-level, told once, not repeated per tool. Surfaced to
+   * MCP clients via the `describe_tools` tool that createManifestToolRegistry
+   * auto-registers (see manifest-tools.ts) since it arrives after the
+   * McpServer is already constructed and can't be baked into static server
+   * `instructions`.
+   */
+  summary?: string;
 }
 
 export interface CallMessage {

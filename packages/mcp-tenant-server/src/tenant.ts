@@ -43,6 +43,7 @@ export class Tenant<TSchema, TValues> {
   wsClients: Set<WebSocket>;
   lastActivityAt: number;
   toolManifest: ToolManifestEntry[] = [];
+  toolManifestSummary?: string;
   pendingCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   manifestToolRegistry?: { sync(): void };
 
@@ -57,8 +58,9 @@ export class Tenant<TSchema, TValues> {
     this.store.onChange((field, value) => this.broadcastUpdate(field, value));
   }
 
-  setToolManifest(manifest: ToolManifestEntry[]) {
+  setToolManifest(manifest: ToolManifestEntry[], summary?: string) {
     this.toolManifest = manifest;
+    this.toolManifestSummary = summary;
     this.manifestToolRegistry?.sync();
   }
 

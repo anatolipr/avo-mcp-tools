@@ -47,6 +47,27 @@ running — you are not building a new package here.
    define `window.__mcpTools`, referencing the function directly rather than
    its name — no string-based lookup happens anywhere in this system.
 
+   **Optional: `window.__mcpSummary`** — a single string with manifest-level
+   context shared across every tool in this page's list: what kind of
+   page/app this is, cross-tool sequencing rules ("call X before Y"), and
+   domain concepts an agent needs before calling tools blindly. Read once,
+   at the same time as `window.__mcpTools`. This exists because individual
+   tool `description`s are the wrong place for context that's true of the
+   *whole page*, not one tool — repeating it in every entry wastes context
+   and drifts out of sync as tools are added/removed. Set it before the
+   embed snippet runs, same as `window.__mcpTools`:
+
+   ```js
+   window.__mcpSummary = 'This page is a data grid with rows keyed by id. ' +
+     'Call list_rows before highlight_row if you don\'t already know a valid id.';
+   ```
+
+   It's surfaced to the connected agent via a `describe_tools` MCP tool that
+   the server always registers automatically (see below) — not baked into
+   the MCP server's static `instructions`, because the page (and therefore
+   its summary) only connects and registers *after* the `McpServer` instance
+   for that session already exists.
+
 2. **The embed snippet** — one line of executable JavaScript obtained by
    calling the server's `get_embed_snippet` tool (or equivalent), e.g.
    `import("http://localhost:8766/main.js?server=...&tenant=...");`.
@@ -90,6 +111,29 @@ Each entry in `window.__mcpTools`:
   server only ever sees `name`/`description`/`params`/`example`, and dispatches
   calls back to the browser by `name`, which the bridge resolves against its
   own local copy of `window.__mcpTools`.
+
+## The `describe_tools` tool
+
+Every tenant automatically gets a `describe_tools` MCP tool alongside
+whatever the page registers — it's not something you define, it always
+exists once a page connects. Calling it returns:
+
+```json
+{
+  "summary": "This page is a data grid with rows keyed by id. Call list_rows before highlight_row...",
+  "tools": [
+    { "name": "list_rows", "description": "..." },
+    { "name": "highlight_row", "description": "..." }
+  ]
+}
+```
+
+`summary` is `null` if the page never set `window.__mcpSummary`. Point
+connecting agents at this tool first — "call `describe_tools` before
+anything else from this page" — so cross-tool context lands before any
+individual tool gets called. `describe_tools` is a reserved name: a page
+tool with that name in `window.__mcpTools` is silently shadowed by the
+built-in one and never registered.
 
 ## Common mistakes
 
