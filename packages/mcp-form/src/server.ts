@@ -32,7 +32,7 @@ const httpServer = createHttpServer({
 attachWebSocketServer(httpServer, PORT, initialFormDef);
 
 httpServer.listen(PORT, () => {
-  console.error(`[mcp-form-demo] UI available at http://localhost:${PORT}`);
+  console.error(`[mcp-form] UI available at http://localhost:${PORT}`);
 });
 
 export { getOrCreateTenant, tenants, httpServer };

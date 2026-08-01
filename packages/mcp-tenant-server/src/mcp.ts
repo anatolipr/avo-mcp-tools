@@ -9,7 +9,7 @@ export function buildMcpServer(
   port: number,
   registerFn: RegisterToolsFn
 ) {
-  const mcp = new McpServer({ name: 'mcp-form-demo', version: '0.2.0' });
+  const mcp = new McpServer({ name: 'mcp-form', version: '0.2.0' });
   const tenant = () => getTenant(tenantId);
   registerFn(mcp, tenant, port);
   return mcp;

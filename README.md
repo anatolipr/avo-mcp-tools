@@ -1,4 +1,4 @@
-# mcp-form-demo
+# avo-mcp-tools
 
 A minimal working example of the pattern: one Node process holds a shared,
 in-memory store; a browser tab (Lit web component, signal-backed input)
