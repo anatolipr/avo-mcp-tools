@@ -7,7 +7,7 @@ import type {
   FieldValues,
   ServerMessage,
   ClientMessage,
-} from '@mcp-form-demo/mcp-tenant-server';
+} from '@avo-mcp-tools/mcp-tenant-server';
 import './html-output-block.js';
 
 type FileStatus = 'idle' | 'uploading' | 'done' | 'error';

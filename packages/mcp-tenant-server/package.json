@@ -1,0 +1,21 @@
+{
+  "name": "@avo-mcp-tools/mcp-tenant-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic tenant/session bookkeeping + MCP wiring, reusable across projects.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.7.0"
+  }
+}

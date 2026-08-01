@@ -1,5 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Tenant } from '@mcp-form-demo/mcp-tenant-server';
+import type { Tenant } from '@avo-mcp-tools/mcp-tenant-server';
 import { formTools } from './form-tools.js';
 import { fieldTools } from './field-tools.js';
 

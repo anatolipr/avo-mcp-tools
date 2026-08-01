@@ -7,41 +7,38 @@ same store, so an agent and a human can both read and write the same field
 live.
 
 ```
- browser tab (Lit) <--WS--> [ server.js ]  <--stdio/MCP--> agent (Claude, etc.)
+ browser tab (Lit) <--WS--> [ mcp-tenant-server ]  <--MCP/HTTP--> agent (Claude, etc.)
                               Store (single
                               source of truth)
 ```
 
-Fields are declared once, in `config/fields.json` — the UI and the MCP tools
-are both generated from that file. Add a field there and it's immediately
-gettable/settable, no new code required.
+This repo is an npm workspace with two packages:
+- `packages/mcp-tenant-server/` — generic tenant/session bookkeeping + MCP/HTTP/WS
+  wiring, reusable across projects.
+- `packages/mcp-form/` — this form app: field config, MCP tool definitions,
+  and the Lit UI. Depends on `mcp-tenant-server`.
+
+Fields are declared once, in `packages/mcp-form/config/fields.json` — the
+UI and the MCP tools are both generated from that file. Add a field there and
+it's immediately gettable/settable, no new code required.
 
 ## Setup
 
 ```bash
 npm install
-node server.js
+npm start -w mcp-form
 ```
 
-This starts both:
-- an HTTP+WebSocket server (default `http://localhost:8765`) serving the form page
-- an MCP server on stdio, waiting for a client (e.g. Claude Desktop/Code) to connect
+This starts an HTTP+WebSocket server (default `http://localhost:8765`)
+serving the form page, with MCP exposed over streamable HTTP at `/mcp` on
+the same port.
 
 Open `http://localhost:8765` in a browser to see the live form.
 
-> Note: because the MCP transport is stdio, `node server.js` run directly in
-> a terminal will just sit there — that's expected. It's designed to be
-> *spawned* by an MCP client, not run interactively. The HTTP server comes up
-> immediately regardless.
-
 ## Wiring it into Claude Desktop, Claude Code, or Copilot
 
-`server.js` exposes MCP over **both** stdio and streamable HTTP (at
-`/mcp` on the same port as the web UI), so pick whichever config style
-your client supports.
-
-**HTTP (recommended — no absolute paths, just needs the server already
-running via `node server.js`):**
+The server exposes MCP over streamable HTTP at `/mcp` on the same port as
+the web UI (needs the server already running via `npm start -w mcp-form`):
 
 ```json
 {
@@ -49,19 +46,6 @@ running via `node server.js`):**
     "mcp-form": {
       "type": "http",
       "url": "http://localhost:8765/mcp"
-    }
-  }
-}
-```
-
-**stdio (client spawns the process for you):**
-
-```json
-{
-  "mcpServers": {
-    "mcp-form": {
-      "command": "node",
-      "args": ["/absolute/path/to/mcp-form-demo/server.js"]
     }
   }
 }
@@ -80,7 +64,7 @@ Then, in a conversation:
 
 ## Adding more fields
 
-Edit `config/fields.json`:
+Edit `packages/mcp-form/config/fields.json`:
 
 ```json
 {
@@ -107,6 +91,10 @@ enum is generated from this file at startup).
   too (not only a tool), so an agent can subscribe to `resources/updated`
   instead of polling `get_field`.
 - **Swap the transport** — the `Store` class doesn't know or care whether
-  it's being driven by stdio MCP, WebMCP (`navigator.modelContext`), or a
-  browser-extension bridge — only the bottom section of `server.js` would
-  change.
+  it's being driven by streamable-HTTP MCP, WebMCP
+  (`navigator.modelContext`), or a browser-extension bridge — only
+  `packages/mcp-tenant-server/src/http.ts` would change.
+- **Reuse the server for another project** — see
+  `docs/refactor-plan.md` for the in-progress plan to make
+  `mcp-tenant-server` pluggable into non-form projects (e.g. adding MCP
+  tools to an existing TODO app).

@@ -1,7 +1,7 @@
 {
   "files": [],
   "references": [
-    { "path": "./tsconfig.server.json" },
-    { "path": "./tsconfig.client.json" }
+    { "path": "./packages/mcp-tenant-server" },
+    { "path": "./packages/mcp-form" }
   ]
 }

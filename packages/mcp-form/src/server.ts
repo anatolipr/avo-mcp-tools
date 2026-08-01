@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { FormDef } from '@mcp-form-demo/mcp-tenant-server';
-import { getOrCreateTenant as getOrCreateTenantForForm, tenants, startIdleSweep, createHttpServer, attachWebSocketServer } from '@mcp-form-demo/mcp-tenant-server';
+import type { FormDef } from '@avo-mcp-tools/mcp-tenant-server';
+import { getOrCreateTenant as getOrCreateTenantForForm, tenants, startIdleSweep, createHttpServer, attachWebSocketServer } from '@avo-mcp-tools/mcp-tenant-server';
 import { registerFormTools } from './tools/register.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

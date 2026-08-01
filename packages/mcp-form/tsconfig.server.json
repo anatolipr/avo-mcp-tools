@@ -1,17 +1,18 @@
 {
   "compilerOptions": {
     "target": "esnext",
-    "lib": ["esnext", "dom", "dom.iterable"],
+    "lib": ["esnext"],
     "module": "esnext",
     "moduleResolution": "bundler",
+    "types": ["node"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "verbatimModuleSyntax": true,
-    "useDefineForClassFields": false
+    "verbatimModuleSyntax": true
   },
-  "include": ["src/client/**/*.ts", "src/shared/**/*.ts"]
+  "include": ["src/server.ts", "src/tools/**/*.ts", "test/**/*.ts"]
 }

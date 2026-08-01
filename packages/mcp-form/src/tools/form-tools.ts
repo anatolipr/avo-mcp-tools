@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Tenant, SubmitPayload } from '@mcp-form-demo/mcp-tenant-server';
+import type { Tenant, SubmitPayload } from '@avo-mcp-tools/mcp-tenant-server';
 
 const fieldTypeEnum = z.enum(['text', 'number', 'textarea', 'select', 'checkbox', 'radio', 'date', 'datetime', 'range', 'multiselect', 'file', 'list', 'color', 'html_output']);
 const subFieldTypeEnum = z.enum(['text', 'number', 'textarea', 'select', 'checkbox', 'radio', 'date', 'datetime', 'range', 'multiselect', 'color']);

@@ -1,34 +1,15 @@
 {
-  "name": "mcp-form-demo",
+  "name": "mcp-form-demo-workspace",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
-  "description": "Tiny Lit web component with a signal-backed text field, synced live to an MCP server so an agent can read/write it.",
-  "main": "src/server.ts",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "dev": "npm-run-all --parallel dev:client dev:server",
-    "dev:client": "vite build --watch",
-    "dev:server": "tsx watch src/server.ts",
-    "build": "vite build",
-    "prestart": "npm run build",
-    "start": "tsx src/server.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.client.json",
-    "pretest": "npm run build",
-    "test": "node --import tsx --test test/**/*.test.ts",
-    "stop": "kill -9 $(lsof -ti :${PORT:-8765}) 2>/dev/null && echo 'Server stopped' || echo 'No server running'"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "avosignals": "^1.0.16",
-    "lit": "^3.3.3",
-    "ws": "^8.18.0",
-    "zod": "^3.23.8"
+    "typecheck": "tsc --noEmit -p packages/mcp-tenant-server/tsconfig.json && npm run typecheck -w mcp-form"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
-    "@types/ws": "^8.5.0",
-    "npm-run-all": "^4.1.5",
-    "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
-    "vite": "^6.0.0"
+    "typescript": "^5.7.0"
   }
 }
