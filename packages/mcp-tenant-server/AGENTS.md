@@ -14,7 +14,7 @@ Two patterns are documented here:
   unrelated static page gets a small `<script>` snippet pasted in that
   connects cross-origin to a separately-running MCP server. Use this to
   bolt AI-agent interaction onto a legacy page without touching how it's
-  built or hosted (see `packages/hello-world-mcp`).
+  built or hosted (see `packages/js-bridge-mcp`).
 
 ## Pattern A: server-owned page
 
@@ -159,14 +159,14 @@ const httpServer = createHttpServer({
   staticDir: STATIC_DIR,
   initialSchema: undefined,
   initialValues: initialHelloState,
-  identity: { name: 'hello-world-mcp', version: '0.1.0' },
+  identity: { name: 'js-bridge-mcp', version: '0.1.0' },
   registerFn: registerHelloTools,
 });
 
 attachWebSocketServer(httpServer, PORT, undefined, initialHelloState);
 
 httpServer.listen(PORT, () => {
-  console.error(`[hello-world-mcp] UI available at http://localhost:${PORT}`);
+  console.error(`[js-bridge-mcp] UI available at http://localhost:${PORT}`);
 });
 
 export { getOrCreateTenant, tenants, httpServer };
@@ -255,7 +255,7 @@ if you'd rather dispatch by tool name generically instead of hand-matching
 Use this when there's already a page — built by something else, hosted
 somewhere else, no interest in restructuring it — and you want an agent
 to be able to read/write parts of it live. The full worked example is
-`packages/hello-world-mcp`; this section explains the parts that differ
+`packages/js-bridge-mcp`; this section explains the parts that differ
 from Pattern A.
 
 ### What's different from Pattern A
@@ -294,7 +294,10 @@ from Pattern A.
   Add a tool (project-specific, not part of the generic package) that
   returns the exact markup to paste, with the server origin and **this
   MCP session's own tenant id** (`tenant().id` — not a freshly generated,
-  unrelated one) baked into the script URL's query string:
+  unrelated one) baked into the script URL's query string. Once this tool
+  exists and the server is running, see `BRIDGING.md` in this package for
+  how to declare which page functions get exposed as MCP tools via a JSON
+  manifest — you don't need to hand-write a `ToolDef` array per tool.
   ```ts
   const serverUrl = `http://localhost:${port}`;
   const snippet = `<script type="module" src="${serverUrl}/main.js?server=${encodeURIComponent(serverUrl)}&tenant=${tenant().id}"></script>`;
@@ -331,7 +334,7 @@ from Pattern A.
    globals as normal.
 4. Add a sibling `legacy-page/` folder with the existing/example static
    page, plus a note on where the pasted `<script>` goes. Serve it with
-   whatever the "existing" hosting is — `packages/hello-world-mcp` uses
+   whatever the "existing" hosting is — `packages/js-bridge-mcp` uses
    `http-server --cors`.
 5. Checklist: same as Pattern A step 7, but the smoke test is
    cross-origin — run both servers on different ports, open the page from

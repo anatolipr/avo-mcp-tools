@@ -24,15 +24,15 @@ const httpServer = createHttpServer({
   staticDir: STATIC_DIR,
   initialSchema: undefined,
   initialValues: initialHelloState,
-  identity: { name: 'hello-world-mcp', version: '0.1.0' },
+  identity: { name: 'js-bridge-mcp', version: '0.1.0' },
   registerFn: registerHelloTools,
 });
 
 attachWebSocketServer(httpServer, PORT, undefined, initialHelloState);
 
 httpServer.listen(PORT, () => {
-  console.error(`[hello-world-mcp] MCP + bridge server listening on http://localhost:${PORT}`);
-  console.error(`[hello-world-mcp] serve legacy-page/hello-world.html separately: npm run start:static`);
+  console.error(`[js-bridge-mcp] MCP + bridge server listening on http://localhost:${PORT}`);
+  console.error(`[js-bridge-mcp] serve legacy-page/hello-world.html separately: npm run start:static`);
 });
 
 export { getOrCreateTenant, tenants, httpServer };

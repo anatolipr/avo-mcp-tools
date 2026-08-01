@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
-import type { SubmitPayload } from './types.js';
+import type { SubmitPayload, ToolManifestEntry, CallMessage } from './types.js';
 
 export class Store<TValues> {
   #values: TValues;
@@ -41,6 +42,9 @@ export class Tenant<TSchema, TValues> {
   submitBus: EventEmitter;
   wsClients: Set<WebSocket>;
   lastActivityAt: number;
+  toolManifest: ToolManifestEntry[] = [];
+  pendingCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  manifestToolRegistry?: { sync(): void };
 
   constructor(id: string, initialSchema: TSchema, initialValues: TValues) {
     this.id = id;
@@ -51,6 +55,42 @@ export class Tenant<TSchema, TValues> {
     this.wsClients = new Set();
     this.lastActivityAt = Date.now();
     this.store.onChange((field, value) => this.broadcastUpdate(field, value));
+  }
+
+  setToolManifest(manifest: ToolManifestEntry[]) {
+    this.toolManifest = manifest;
+    this.manifestToolRegistry?.sync();
+  }
+
+  call(target: string, args: unknown, timeoutMs = 10_000): Promise<unknown> {
+    const id = randomUUID();
+    const promise = new Promise<unknown>((resolve, reject) => {
+      this.pendingCalls.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (this.pendingCalls.delete(id)) reject(new Error(`call to "${target}" timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      timer.unref();
+    });
+    const payload: CallMessage = { type: 'call', id, target, args };
+    const raw = JSON.stringify(payload);
+    for (const client of this.wsClients) {
+      if (client.readyState === client.OPEN) client.send(raw);
+    }
+    return promise;
+  }
+
+  resolveCall(id: string, result: unknown) {
+    const pending = this.pendingCalls.get(id);
+    if (!pending) return;
+    this.pendingCalls.delete(id);
+    pending.resolve(result);
+  }
+
+  rejectCall(id: string, error: string) {
+    const pending = this.pendingCalls.get(id);
+    if (!pending) return;
+    this.pendingCalls.delete(id);
+    pending.reject(new Error(error));
   }
 
   touch() {
@@ -83,6 +123,10 @@ export class Tenant<TSchema, TValues> {
     this.submitBus.emit('submit', { __interrupted: true, __disposed: true, ...(this.store.snapshot() as object) } as SubmitPayload);
     this.store.dispose();
     this.submitBus.removeAllListeners();
+    for (const [, pending] of this.pendingCalls) {
+      pending.reject(new Error('tenant disposed'));
+    }
+    this.pendingCalls.clear();
     for (const client of this.wsClients) client.close();
     this.wsClients.clear();
   }

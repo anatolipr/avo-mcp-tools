@@ -28,6 +28,7 @@ export interface StateSocketHandlers<TSchema, TValues> {
   onInit?(schema: TSchema, state: TValues): void;
   onReinit?(schema: TSchema, state: TValues): void;
   onUpdate?(field: string, value: unknown): void;
+  onCall?(id: string, target: string, args: unknown): void;
   onConnect?(): void;
   onDisconnect?(): void;
 }
@@ -75,6 +76,7 @@ export function connectStateSocket<TSchema, TValues>(
       if (msg.type === 'init') handlers.onInit?.(msg.schema, msg.state);
       if (msg.type === 'reinit') handlers.onReinit?.(msg.schema, msg.state);
       if (msg.type === 'update') handlers.onUpdate?.(msg.field, msg.value);
+      if (msg.type === 'call') handlers.onCall?.(msg.id, msg.target, msg.args);
     };
   };
   connect();

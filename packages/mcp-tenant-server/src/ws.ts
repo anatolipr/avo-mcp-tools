@@ -40,6 +40,15 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
       if (msg.type === 'interrupt') {
         t.submitBus.emit('submit', { __interrupted: true, ...t.store.snapshot() });
       }
+
+      if (msg.type === 'register_tools') {
+        t.setToolManifest(msg.tools);
+      }
+
+      if (msg.type === 'call_result') {
+        if (msg.error) t.rejectCall(msg.id, msg.error);
+        else t.resolveCall(msg.id, msg.result);
+      }
     });
 
     ws.on('close', () => {
