@@ -59,6 +59,187 @@ repeated `get_embed_snippet` calls within the same session return the same
 tenant id — the page stays connected to whichever session generated the
 snippet it's using.
 
+## Bridge any other project's static HTML to this MCP server
+
+`js-bridge-mcp` doesn't care what the page is — `legacy-page/hello-world.html`
+is just a worked example. Any static HTML page (in this repo or a totally
+unrelated project) can become a tenant of an already-running `js-bridge-mcp`
+server by adding two things to its own source, with zero build-step
+dependency on this package. This section is the complete recipe — no need to
+go spelunking in other packages' docs.
+
+### 1. Define `window.__mcpTools` in the page, before the bridge script runs
+
+A global array of tool definitions, each holding a **real function
+reference** (not a string name):
+
+```html
+<script>
+  function highlightRow({ rowId, color }) {
+    const row = document.getElementById(rowId);
+    if (!row) throw new Error(`no row with id "${rowId}"`);
+    row.style.backgroundColor = color ?? 'yellow';
+    return `highlighted ${rowId}`;
+  }
+
+  window.__mcpTools = [
+    {
+      name: 'highlight_row',
+      description: 'Highlights the table row matching the given id. Call list_rows first if you don\'t know valid ids.',
+      params: {
+        rowId: { type: 'string', description: 'The id attribute of the <tr> to highlight' },
+        color: { type: 'string', description: 'CSS color name, defaults to yellow if omitted', optional: true },
+      },
+      example: { rowId: 'row-42', color: 'yellow' },
+      fn: highlightRow,
+    },
+  ];
+</script>
+```
+
+Schema per entry:
+
+- **`name`** — snake_case, unique on the page. What the MCP-connected agent
+  sees and calls.
+- **`description`** — written for the *agent*, not a human reader: state what
+  it does, preconditions ("call X first"), and side effects. See
+  `get_embed_snippet`'s description in `src/tools/hello-tools.ts` for the bar
+  to hit.
+- **`params`** — flat object only, values are `{ type, description?, optional? }`
+  with `type` one of `"string"` / `"number"` / `"boolean"`. No nested objects
+  or arrays — the server's JSON→zod converter only supports these three
+  primitives and throws a registration error otherwise. Need structured data?
+  Encode it as a JSON string param and `JSON.parse` inside `fn`.
+- **`example`** — a realistic call, useful both as page-source documentation
+  and as something you should actually try once connected.
+- **`fn`** — called with a single args object matching `params` (never
+  positional args). Its return value, or a thrown `Error`'s message, becomes
+  the tool call's result. `fn` never leaves the browser — the bridge strips
+  it before talking to the server, which only ever sees
+  `name`/`description`/`params`/`example` and dispatches calls back by
+  `name` against its local copy of `window.__mcpTools`.
+
+If the page is an ES module build rather than plain script tags, define
+`window.__mcpTools` in whichever module already has the real functions in
+scope — same shape, still a direct function reference, no string lookup.
+
+### 2. Add the embed snippet, after `window.__mcpTools` is defined
+
+Get it by calling this server's `get_embed_snippet` MCP tool (from any MCP
+client pointed at `http://localhost:8766/mcp`); it returns one line like:
+
+```js
+import("http://localhost:8766/main.js?server=http%3A%2F%2Flocalhost%3A8766&tenant=<uuid>");
+```
+
+Two ways to run it, both fine:
+
+- **Paste into DevTools console** on the already-open target page — no
+  source edit at all. This is the default workflow when you (or the agent)
+  have the page open in a browser you control.
+- **Bake into the page's HTML**, wrapped in a module script tag, placed
+  *after* the `window.__mcpTools` block:
+  ```html
+  <script type="module">import("http://localhost:8766/main.js?server=...&tenant=...");</script>
+  ```
+
+Either way, the bridge reads `window.__mcpTools` **once**, synchronously, at
+load/(re)connect time — it does not poll. Edit the tool list, then reload the
+page (and let the bridge reconnect) before the new tools show up.
+
+### Full example: a bare page, wired up end-to-end
+
+This is `legacy-page/hello-world.html` in full — copy it as a starting point
+for any project's own static page. The only things that change per-project
+are the functions and tool definitions inside the `<script>` block; the
+embed-snippet line at the bottom is generated fresh per tenant by
+`get_embed_snippet` and pasted in (or run from DevTools instead of baked in).
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Hello World</title>
+</head>
+<body>
+  <h1>Hello, world!</h1>
+  <main>Waiting for an agent to say something...</main>
+
+  <script>
+    function insertTitle({ title }) {
+      document.title = title;
+      document.querySelector('h1').textContent = title;
+      return `title set to "${title}"`;
+    }
+
+    function insertMain({ main }) {
+      document.querySelector('main').textContent = main;
+      return 'main content updated';
+    }
+
+    // window.__mcpTools is the contract the injected bridge script looks
+    // for: an array of { name, description, params, example, fn } — real
+    // function references, not string lookups. Must be defined before the
+    // embed snippet below runs.
+    window.__mcpTools = [
+      {
+        name: 'insert_title',
+        description: 'Sets the <h1> title shown on this page.',
+        params: { title: { type: 'string', description: 'New page title' } },
+        example: { title: 'Welcome, Ada!' },
+        fn: insertTitle,
+      },
+      {
+        name: 'insert_main',
+        description: 'Sets the <main> body content shown on this page.',
+        params: { main: { type: 'string', description: 'New body text' } },
+        example: { main: 'Here is your daily summary...' },
+        fn: insertMain,
+      },
+    ];
+  </script>
+
+  <!-- Paste the snippet from get_embed_snippet here, wrapped in a
+       <script type="module"> tag — or just run it from DevTools instead. -->
+  <script type="module">import("http://localhost:8766/main.js?server=http%3A%2F%2Flocalhost%3A8766&tenant=<uuid>");</script>
+</body>
+</html>
+```
+
+Run this repo's copy of it via `npm run start:static` (see "Run it" above),
+or drop the equivalent markup into any other project's page — nothing here
+depends on this package's build tooling.
+
+### Common mistakes
+
+- Positional args instead of one args object (`fn({ rowId })`, not
+  `fn(rowId)`).
+- Defining `window.__mcpTools` *after* the embed snippet already ran.
+- Reusing a `name` across two entries in the same page.
+- Expecting a live-edited `window.__mcpTools` to take effect without a page
+  reload — it's read once per connect, not watched.
+- Pasting the embed snippet into the page **after** your MCP client already
+  connected: some clients (Claude Code included, observed against
+  `js-bridge-mcp`) fetch `tools/list` once at `initialize` and won't re-poll
+  on the server's `tools/list_changed` notification mid-session. New tools
+  may need a full MCP client restart to appear, even though the browser
+  tenant is connected and the server registered them correctly.
+
+### Validation checklist before calling it done
+
+1. Call `get_embed_snippet`, run the snippet against the target page.
+2. Call `tools/list` (or just try the new tool by name) — confirm it appears.
+3. Call each new tool with its `example` args, confirm the page visibly
+   updates and the result isn't an error.
+4. Open a second tenant (call `get_embed_snippet` again from a fresh MCP
+   session) and confirm the new tools do **not** appear there — manifests
+   are per-tenant, never global.
+
+For the fuller version of this recipe (including how to scaffold a brand-new
+MCP server package, "Pattern A" vs "Pattern B") see
+`packages/mcp-tenant-server/BRIDGING.md` and `AGENTS.md`.
+
 ## Why this shape
 
 See `packages/mcp-tenant-server/AGENTS.md`, "Pattern B" section, for the
