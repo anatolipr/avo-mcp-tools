@@ -1,35 +1,26 @@
 import { EventEmitter } from 'node:events';
 import type { WebSocket } from 'ws';
-import type { FieldDef, FormDef, FieldValues } from './types.js';
+import type { SubmitPayload } from './types.js';
 
-export interface SubmitPayload {
-  __interrupted: boolean;
-  __disposed?: boolean;
-  [field: string]: string | boolean | undefined;
-}
+export class Store<TValues> {
+  #values: TValues;
+  #subscribers = new Set<(name: string, value: unknown) => void>();
 
-export class Store {
-  #values = new Map<string, string>();
-  #subscribers = new Set<(name: string, value: string) => void>();
-
-  constructor(fieldConfigs: FieldDef[]) {
-    for (const f of fieldConfigs) {
-      if (f.type === 'html_output') continue;
-      this.#values.set(f.name, f.default ?? '');
-    }
+  constructor(initial: TValues) {
+    this.#values = initial;
   }
 
-  has(name: string) { return this.#values.has(name); }
-  get(name: string) { return this.#values.get(name); }
+  has(name: string) { return Object.prototype.hasOwnProperty.call(this.#values as object, name); }
+  get(name: string) { return (this.#values as Record<string, unknown>)[name]; }
 
-  set(name: string, value: string) {
-    this.#values.set(name, value);
+  set(name: string, value: unknown) {
+    (this.#values as Record<string, unknown>)[name] = value;
     for (const fn of this.#subscribers) fn(name, value);
   }
 
-  snapshot(): FieldValues { return Object.fromEntries(this.#values); }
+  snapshot(): TValues { return { ...this.#values }; }
 
-  onChange(fn: (name: string, value: string) => void) {
+  onChange(fn: (name: string, value: unknown) => void) {
     this.#subscribers.add(fn);
     return () => this.#subscribers.delete(fn);
   }
@@ -37,18 +28,24 @@ export class Store {
   dispose() { this.#subscribers.clear(); }
 }
 
-export class Tenant {
+/**
+ * TSchema is set once per applyState call and is not itself reactive
+ * (e.g. field definitions/labels). TValues is the reactive value bag
+ * backing `store`, broadcast field-by-field over the WS `update` message.
+ * Consumers with no separate schema concept can pass `undefined` for TSchema.
+ */
+export class Tenant<TSchema, TValues> {
   id: string;
-  formDef: FormDef;
-  store: Store;
+  schema: TSchema;
+  store: Store<TValues>;
   submitBus: EventEmitter;
   wsClients: Set<WebSocket>;
   lastActivityAt: number;
 
-  constructor(id: string, initialFormDef: FormDef) {
+  constructor(id: string, initialSchema: TSchema, initialValues: TValues) {
     this.id = id;
-    this.formDef = { title: initialFormDef.title ?? '', fields: initialFormDef.fields };
-    this.store = new Store(this.formDef.fields);
+    this.schema = initialSchema;
+    this.store = new Store(initialValues);
     this.submitBus = new EventEmitter();
     this.submitBus.setMaxListeners(0);
     this.wsClients = new Set();
@@ -60,22 +57,22 @@ export class Tenant {
     this.lastActivityAt = Date.now();
   }
 
-  applyFormDef(def: FormDef) {
+  applyState(schema: TSchema, values: TValues) {
     this.store.dispose();
-    this.formDef = def;
-    this.store = new Store(this.formDef.fields);
+    this.schema = schema;
+    this.store = new Store(values);
     this.store.onChange((field, value) => this.broadcastUpdate(field, value));
     this.broadcastReinit();
   }
 
   broadcastReinit() {
-    const payload = JSON.stringify({ type: 'reinit', formDef: this.formDef, state: this.store.snapshot() });
+    const payload = JSON.stringify({ type: 'reinit', schema: this.schema, state: this.store.snapshot() });
     for (const client of this.wsClients) {
       if (client.readyState === client.OPEN) client.send(payload);
     }
   }
 
-  broadcastUpdate(field: string, value: string) {
+  broadcastUpdate(field: string, value: unknown) {
     const payload = JSON.stringify({ type: 'update', field, value });
     for (const client of this.wsClients) {
       if (client.readyState === client.OPEN) client.send(payload);
@@ -83,7 +80,7 @@ export class Tenant {
   }
 
   dispose() {
-    this.submitBus.emit('submit', { __interrupted: true, __disposed: true, ...this.store.snapshot() });
+    this.submitBus.emit('submit', { __interrupted: true, __disposed: true, ...(this.store.snapshot() as object) } as SubmitPayload);
     this.store.dispose();
     this.submitBus.removeAllListeners();
     for (const client of this.wsClients) client.close();
@@ -91,12 +88,12 @@ export class Tenant {
   }
 }
 
-const tenants = new Map<string, Tenant>();
+const tenants = new Map<string, Tenant<any, any>>();
 
-function getOrCreateTenant(id: string, initialFormDef: FormDef): Tenant {
+function getOrCreateTenant<TSchema, TValues>(id: string, initialSchema: TSchema, initialValues: TValues): Tenant<TSchema, TValues> {
   let tenant = tenants.get(id);
   if (!tenant) {
-    tenant = new Tenant(id, initialFormDef);
+    tenant = new Tenant(id, initialSchema, initialValues);
     tenants.set(id, tenant);
   }
   return tenant;

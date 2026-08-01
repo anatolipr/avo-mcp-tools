@@ -1,9 +1,9 @@
 import type { Server } from 'node:http';
 import { WebSocketServer } from 'ws';
-import type { FormDef, ClientMessage } from './types.js';
+import type { ClientMessage } from './types.js';
 import { getOrCreateTenant, tenants } from './tenant.js';
 
-export function attachWebSocketServer(httpServer: Server, port: number, initialFormDef: FormDef) {
+export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port: number, initialSchema: TSchema, initialValues: TValues) {
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
   wss.on('connection', (ws, req) => {
@@ -19,10 +19,10 @@ export function attachWebSocketServer(httpServer: Server, port: number, initialF
     }
 
     const tenantId = requestedTenantId || 'default';
-    const t = getOrCreateTenant(tenantId, initialFormDef);
+    const t = getOrCreateTenant(tenantId, initialSchema, initialValues);
 
     t.wsClients.add(ws);
-    ws.send(JSON.stringify({ type: 'init', formDef: t.formDef, state: t.store.snapshot() }));
+    ws.send(JSON.stringify({ type: 'init', schema: t.schema, state: t.store.snapshot() }));
 
     ws.on('message', (raw) => {
       t.touch();

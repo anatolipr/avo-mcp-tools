@@ -423,3 +423,169 @@ confirmed no change needed.
   build a second mechanism speculatively.
 - Any UI/design work on `examples/todo-app-stub/` beyond the minimum
   needed to demonstrate global-function wiring.
+
+---
+
+# Stage 3: close the remaining generic-package gaps + AGENTS.md recipe
+
+## Context
+
+Stage 2 extracted `packages/mcp-tenant-server` as a workspace package and
+got `mcp-form` consuming it through a clean tool-registration contract
+(`{name, description, schema, handler}` arrays + `registerFn`). Declaring
+new MCP tools is already low-effort. But the package is not actually
+project-agnostic yet — it still has one hidden consumer (`mcp-form`) baked
+into its "generic" layer:
+
+- `mcp.ts` hardcodes `new McpServer({ name: 'mcp-form', version: '0.2.0' })`
+  — every consumer gets the same MCP server identity.
+- `types.ts` defines `FieldDef`/`FormDef`/form validation types directly
+  inside the "generic" package, re-exported via `index.ts`.
+- `tenant.ts`'s `Store` is constructed from `FieldDef[]` specifically;
+  `Tenant.formDef: FormDef` is a named, form-shaped field, not generic
+  `state: T`.
+- `http.ts`'s `CreateHttpServerOptions.initialFormDef: FormDef` and
+  `ws.ts`'s `attachWebSocketServer(..., initialFormDef: FormDef)` are
+  named, form-typed params instead of generic initial state.
+- `ClientMessage`/`ServerMessage` hardcode form verbs (`set`/`submit`/
+  `interrupt`, `init`/`reinit`/`update` with a `field`/`value` shape).
+- No `AGENTS.md` exists anywhere in the repo, and no `client-bridge.ts`
+  exists — the one consumer hand-writes its own WebSocket listener and
+  DOM-wiring code from scratch.
+
+This means standing up a second package today (e.g. a "Hello World MCP"
+exposing `insertTitle()`/`insertBody()` globals) would require
+forking/duplicating `Store`, fighting form-shaped types, and hand-rolling
+a WS client — not the "rinse-repeat" experience this refactor is aiming
+for, especially for an agent following a guide unassisted.
+
+**Goal**: parameterize the MCP identity, genericize `Store`/`Tenant`/
+HTTP/WS around `T` instead of `FormDef`, build the previously-designed
+`client-bridge.ts` (window-global mode), and write the `AGENTS.md` recipe
+doc — so a second consumer package can be built by following a short
+numbered guide with no changes to `mcp-tenant-server` itself. This
+directly continues Stage 2's own "Suggested sequencing" (items 2–4
+above), which were sketched but not implemented.
+
+Non-goals (consistent with Stage 2's own scope cuts):
+- Pre-wired/build-time client bridge mode's worked example (design +
+  types only, per Stage 2 Open Question B).
+- Publishing packages to a real npm registry.
+- Building the hello-world package as a permanent example — this stage
+  produces the *mechanism*; a follow-up can add
+  `examples/hello-world-mcp/` as the worked proof, using the recipe.
+
+## Design decisions
+
+1. **MCP identity.** `buildMcpServer` gains `name`/`version` params
+   instead of hardcoding `'mcp-form'`. `mcp-form`'s `server.ts` passes its
+   own name explicitly.
+
+2. **Generic state type `T`.** Replace `FormDef` as the hardcoded shape
+   flowing through `Store`, `Tenant`, `createHttpServer`, and
+   `attachWebSocketServer` with a type parameter `T`:
+   - `Store<T>`, `Tenant<T>` (`formDef: FormDef` becomes `state: T`),
+     `getOrCreateTenant<T>(id, initialState: T)`,
+     `CreateHttpServerOptions<T>.initialState: T`,
+     `attachWebSocketServer<T>(httpServer, port, initialState: T)`.
+   - `mcp-form`'s `FormDef`/`FieldDef`/`SubFieldDef`/validation types move
+     out of `mcp-tenant-server/src/types.ts` into `packages/mcp-form/src/`
+     — project-specific, not generic-server concerns.
+     `mcp-tenant-server` keeps only truly generic types: `SubmitPayload`
+     and generic message envelopes (next point).
+
+3. **Message protocol genericity.** Keep the envelope shape generic,
+   payload becomes `T`/`unknown`:
+   - `ServerMessage<T>`: `{type: 'init'|'reinit', state: T} | {type: 'update', field: string, value: unknown}`
+   - `ClientMessage`: keep `set`/`submit`/`interrupt` as-is — reasonably
+     generic verbs a hello-world or todo consumer can reuse unchanged.
+     Consumers needing genuinely different verbs are a future extension,
+     not solved here (avoid overbuilding for a hypothetical).
+
+4. **`client-bridge.ts`** (new file, window-global mode only):
+   ```ts
+   export interface ClientAction {
+     name: string;
+     resolve: 'window' | ((args: any) => unknown | Promise<unknown>);
+   }
+   export function createClientBridge(actions: ClientAction[]): {
+     dispatch(name: string, args: unknown): Promise<unknown>;
+   };
+   ```
+   Plus a small WS-consuming helper — `connectStateSocket(tenantId, onMessage)`
+   — that opens `/ws?tenant=...`, parses `ServerMessage<T>` JSON, and
+   calls a callback, so a hello-world client doesn't hand-roll
+   `WebSocket` + `JSON.parse` + reconnect boilerplate. This is what makes
+   a plain `window.insertTitle`/`insertBody` page trivial: the guide's
+   worked example becomes "call `connectStateSocket` and pass
+   `insertTitle`/`insertBody` as the update handlers."
+
+5. **Export surface.** Extend `mcp-tenant-server/src/index.ts` to export
+   `createClientBridge`, `connectStateSocket`, and the genericized
+   `Store<T>`/`Tenant<T>` etc. Keep `.js`-suffixed relative imports
+   matching existing ESM convention. Client helpers are browser-safe
+   (no Node-only imports) so a consumer's Vite client bundle can import
+   them — may need a `./client` export condition in `package.json` to
+   keep `node:http`/`ws` out of that bundle.
+
+6. **`AGENTS.md`** (new file, `packages/mcp-tenant-server/AGENTS.md`) —
+   numbered recipe an agent can follow with zero prior context:
+   1. Scaffold a new package under `packages/<name>/` (package.json,
+      tsconfig, vite.config.ts) — point at `mcp-form`'s files as the
+      template, list exact fields to change (name, deps).
+   2. Define your state shape `T` (plain TS interface) and initial value.
+   3. Define tool schemas (zod) + handlers as `{name, description, schema, handler}`
+      data objects — one file.
+   4. Write `registerTools(mcp, tenant, port)` that loops your tool array.
+   5. Write `server.ts`: call `createHttpServer<T>` +
+      `attachWebSocketServer<T>` + `buildMcpServer(name, version, ..., registerTools)`
+      — copy `mcp-form/src/server.ts` almost verbatim, swap types/registerFn.
+   6. Client wiring: `public/index.html` shell + a client entry file that
+      calls `connectStateSocket` and `createClientBridge`, defines
+      `window.<yourGlobals>`.
+   7. Worked example inline: the full "Hello World MCP" —
+      `insertTitle`/`insertBody` as both MCP tools (server sets state)
+      and window globals (client applies state) — small enough to
+      include verbatim in the doc.
+   8. Checklist: `npm run typecheck`, `npm run build`, manual smoke test
+      via `npm start` + an MCP client call.
+
+## Files to change
+
+**`packages/mcp-tenant-server/src/`**
+- `mcp.ts` — add `name`/`version` params to `buildMcpServer`.
+- `types.ts` — strip to generic types only (`SubmitPayload`, generic
+  `ServerMessage<T>`/`ClientMessage`); form types move to `mcp-form`.
+- `tenant.ts` — genericize `Store<T>`, `Tenant<T>`, `getOrCreateTenant<T>`,
+  `disposeTenant`, `startIdleSweep`.
+- `http.ts` — `CreateHttpServerOptions<T>`, `initialFormDef` → `initialState: T`.
+- `ws.ts` — `attachWebSocketServer<T>`, `initialFormDef` → `initialState: T`.
+- `client-bridge.ts` — new (`createClientBridge` + `connectStateSocket`).
+- `index.ts` — export the new/changed surface.
+
+**`packages/mcp-tenant-server/`**
+- `package.json` — add `./client` export condition if needed.
+- `AGENTS.md` — new.
+
+**`packages/mcp-form/src/`**
+- `server.ts` — pass `{name: 'mcp-form', version: '0.2.0'}` explicitly;
+  `initialFormDef` param renamed to match new generic option name.
+- `types.ts` (new) or `tools/form-tools.ts` — receives form types moved
+  out of `mcp-tenant-server`.
+- `tools/register.ts`, `client/mcp-form.ts` — update import source for
+  moved types.
+- `client/mcp-form.ts` — optionally adopt `connectStateSocket` as a
+  regression check; not required if it risks destabilizing the working
+  Lit component.
+
+## Verification
+
+1. `npm run typecheck` clean across workspaces.
+2. `npm run build` succeeds for both packages.
+3. `npm test` in `packages/mcp-form` passes unchanged.
+4. Manual smoke test: `npm start` in `mcp-form`, confirm
+   `define_form`/`set_field`/`wait_for_submit` still work end-to-end.
+5. Write `examples/hello-world-mcp/` strictly by following `AGENTS.md`
+   step-by-step, with no edits to `mcp-tenant-server` itself, as the real
+   test of "rinse-repeat" ease. Any step requiring a generic-package
+   change signals Stage 3 missed a gap.

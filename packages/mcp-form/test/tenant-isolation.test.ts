@@ -89,10 +89,10 @@ test('getOrCreateTenant returns independent tenants with isolated stores', async
     assert.notEqual(tenantA, tenantB);
     assert.notEqual(tenantA.store, tenantB.store);
 
-    tenantA.applyFormDef({ title: '', fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] });
+    tenantA.applyState({ title: '', fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] }, { note: '' });
     tenantA.store.set('note', 'from A');
 
-    tenantB.applyFormDef({ title: '', fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] });
+    tenantB.applyState({ title: '', fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] }, { note: '' });
     tenantB.store.set('note', 'from B');
 
     assert.equal(tenantA.store.get('note'), 'from A');

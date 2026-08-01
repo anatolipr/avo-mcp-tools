@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Tenant, SubmitPayload } from '@avo-mcp-tools/mcp-tenant-server';
+import type { FormDef, FieldValues } from '../types.js';
+import { initialValuesFor } from '../types.js';
 
 const fieldTypeEnum = z.enum(['text', 'number', 'textarea', 'select', 'checkbox', 'radio', 'date', 'datetime', 'range', 'multiselect', 'file', 'list', 'color', 'html_output']);
 const subFieldTypeEnum = z.enum(['text', 'number', 'textarea', 'select', 'checkbox', 'radio', 'date', 'datetime', 'range', 'multiselect', 'color']);
@@ -104,7 +106,7 @@ export interface ToolDef {
   name: string;
   description: string;
   schema: Record<string, z.ZodTypeAny>;
-  handler: (args: any, tenant: () => Tenant, port: number) => Promise<any>;
+  handler: (args: any, tenant: () => Tenant<FormDef, FieldValues>, port: number) => Promise<any>;
 }
 
 const getFormUrl: ToolDef = {
@@ -220,7 +222,8 @@ const defineForm: ToolDef = {
     ),
   },
   handler: async ({ title, fields, wait }, tenant) => {
-    tenant().applyFormDef({ title: title ?? '', fields });
+    const formDef: FormDef = { title: title ?? '', fields };
+    tenant().applyState(formDef, initialValuesFor(formDef));
     if (wait) {
       const raw = await new Promise<SubmitPayload>((resolve) => {
         tenant().submitBus.once('submit', resolve);

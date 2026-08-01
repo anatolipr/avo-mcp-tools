@@ -1,13 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { Signal, SignalWatcher } from 'avosignals';
-import type {
-  FieldDef,
-  SubFieldDef,
-  FormDef,
-  FieldValues,
-  ServerMessage,
-  ClientMessage,
-} from '@avo-mcp-tools/mcp-tenant-server';
+import type { ServerMessage, ClientMessage } from '@avo-mcp-tools/mcp-tenant-server';
+import type { FieldDef, SubFieldDef, FormDef, FieldValues } from '../types.js';
 import './html-output-block.js';
 
 type FileStatus = 'idle' | 'uploading' | 'done' | 'error';
@@ -451,13 +445,13 @@ export class McpForm extends LitElement {
       setTimeout(() => this._connect(), 2000);
     };
     ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data) as ServerMessage;
+      const msg = JSON.parse(event.data) as ServerMessage<FormDef, FieldValues>;
       if (msg.type === 'init' || msg.type === 'reinit') {
-        this._applyFormDef(msg.formDef, msg.state);
+        this._applyFormDef(msg.schema, msg.state);
       }
       if (msg.type === 'update') {
         const signal = this._signals.get(msg.field);
-        if (signal) signal.set(msg.value);
+        if (signal) signal.set(msg.value as string);
       }
     };
   }

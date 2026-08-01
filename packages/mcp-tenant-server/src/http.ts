@@ -4,9 +4,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { FormDef } from './types.js';
 import { getOrCreateTenant, tenants } from './tenant.js';
-import { buildMcpServer, type RegisterToolsFn } from './mcp.js';
+import { buildMcpServer, type RegisterToolsFn, type McpServerIdentity } from './mcp.js';
 
 const UPLOAD_DIR = path.join(os.tmpdir(), 'mcp-form-uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -15,16 +14,18 @@ const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javasc
 
 const sessions = new Map<string, StreamableHTTPServerTransport>();
 
-export interface CreateHttpServerOptions {
+export interface CreateHttpServerOptions<TSchema, TValues> {
   port: number;
   staticDir: string;
-  initialFormDef: FormDef;
-  registerFn: RegisterToolsFn;
+  initialSchema: TSchema;
+  initialValues: TValues;
+  identity: McpServerIdentity;
+  registerFn: RegisterToolsFn<TSchema, TValues>;
 }
 
-export function createHttpServer({ port, staticDir, initialFormDef, registerFn }: CreateHttpServerOptions) {
+export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSchema, initialValues, identity, registerFn }: CreateHttpServerOptions<TSchema, TValues>) {
   const getTenant = (id: string) => {
-    const t = getOrCreateTenant(id, initialFormDef);
+    const t = getOrCreateTenant(id, initialSchema, initialValues);
     t.touch();
     return t;
   };
@@ -47,7 +48,7 @@ export function createHttpServer({ port, staticDir, initialFormDef, registerFn }
           sessionIdGenerator: () => tenantId,
           onsessioninitialized: (id) => {
             sessions.set(id, transport);
-            getOrCreateTenant(id, initialFormDef);
+            getOrCreateTenant(id, initialSchema, initialValues);
             console.error(`[mcp] session opened: ${id}`);
           },
         });
@@ -59,7 +60,7 @@ export function createHttpServer({ port, staticDir, initialFormDef, registerFn }
             console.error(`[mcp] session closed: ${transport.sessionId}`);
           }
         };
-        const mcpInstance = buildMcpServer(tenantId, getTenant, port, registerFn);
+        const mcpInstance = buildMcpServer(identity, tenantId, getTenant, port, registerFn);
         await mcpInstance.connect(transport);
         await transport.handleRequest(req, res);
         return;

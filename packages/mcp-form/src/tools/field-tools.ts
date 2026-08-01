@@ -12,7 +12,7 @@ const listFields: ToolDef = {
     content: [{
       type: 'text',
       text: JSON.stringify(
-        tenant().formDef.fields.map((f) => f.type === 'html_output'
+        tenant().schema.fields.map((f) => f.type === 'html_output'
           ? { name: f.name, type: 'html_output' }
           : { ...f, value: tenant().store.get(f.name) }
         ),
