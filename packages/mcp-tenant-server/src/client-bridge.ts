@@ -32,16 +32,37 @@ export interface StateSocketHandlers<TSchema, TValues> {
   onDisconnect?(): void;
 }
 
-export function connectStateSocket<TSchema, TValues>(handlers: StateSocketHandlers<TSchema, TValues>) {
+export interface StateSocketOptions {
+  /**
+   * Origin of the mcp-tenant-server instance to connect to, e.g.
+   * 'http://localhost:8766'. Omit when the page is served by the same
+   * server it's connecting to (same-origin) — defaults to location.host.
+   * Required for the cross-origin "AI-enable an existing page" pattern.
+   */
+  serverUrl?: string;
+  /**
+   * Explicit tenant id. Omit to fall back to parsing '/t/<id>' from
+   * location.pathname (same-origin pattern), else 'default'.
+   */
+  tenant?: string;
+}
+
+export function connectStateSocket<TSchema, TValues>(
+  handlers: StateSocketHandlers<TSchema, TValues>,
+  options: StateSocketOptions = {}
+) {
   let ws: WebSocket | undefined;
   let closedByCaller = false;
 
   const connect = () => {
-    const tenantId = location.pathname.startsWith('/t/')
+    const tenantId = options.tenant ?? (location.pathname.startsWith('/t/')
       ? location.pathname.slice('/t/'.length).split('/')[0]
-      : '';
+      : '');
     const wsPath = tenantId ? `/ws?tenant=${encodeURIComponent(tenantId)}` : '/ws';
-    ws = new WebSocket(`ws://${location.host}${wsPath}`);
+    const wsOrigin = options.serverUrl
+      ? options.serverUrl.replace(/^http/, 'ws')
+      : `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
+    ws = new WebSocket(`${wsOrigin}${wsPath}`);
 
     ws.onopen = () => handlers.onConnect?.();
     ws.onclose = (event) => {

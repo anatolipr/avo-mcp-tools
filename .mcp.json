@@ -3,6 +3,10 @@
     "mcp-form": {
       "type": "http",
       "url": "http://localhost:8765/mcp"
+    },
+    "hello-world-mcp": {
+      "type": "http",
+      "url": "http://localhost:8766/mcp"
     }
   }
 }
