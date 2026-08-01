@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MCP Form</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --page-bg: #f5f5f0;
+      --card-bg: #ffffff;
+      --card-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page-bg: #17181a;
+        --card-bg: #232427;
+        --card-shadow: 0 2px 16px rgba(0,0,0,0.4);
+      }
+    }
+    body {
+      font-family: system-ui, sans-serif;
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+      margin: 0;
+      background: var(--page-bg);
+    }
+    mcp-form {
+      background: var(--card-bg);
+      padding: 2rem 2.5rem;
+      border-radius: 12px;
+      box-shadow: var(--card-shadow);
+      min-width: 340px;
+      max-width: 480px;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <mcp-form></mcp-form>
+
+  <script type="module" src="../src/client/main.ts"></script>
+</body>
+</html>

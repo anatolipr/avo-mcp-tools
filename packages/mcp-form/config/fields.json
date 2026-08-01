@@ -1,0 +1,10 @@
+{
+  "fields": [
+    {
+      "name": "text",
+      "label": "Enter text",
+      "type": "textarea",
+      "default": ""
+    }
+  ]
+}
