@@ -11,14 +11,14 @@ import { getOrCreateTenant } from '../src/tenant.js';
 
 test('Tenant.setToolManifest stores the manifest and is readable back', () => {
   const t = new Tenant('t1', undefined, {});
-  const manifest = [{ name: 'foo', description: 'd', target: 'foo', params: {} }];
+  const manifest = [{ name: 'foo', description: 'd', params: {} }];
   t.setToolManifest(manifest);
   assert.deepEqual(t.toolManifest, manifest);
 });
 
 test('Tenant call/resolveCall round-trip resolves with the page result', async () => {
   const t = new Tenant('t1', undefined, {});
-  const pending = t.call('insertTitle', { title: 'hi' });
+  const pending = t.call('insert_title', { title: 'hi' });
   const id = [...t.pendingCalls.keys()][0]!;
   t.resolveCall(id, 'ok');
   assert.equal(await pending, 'ok');
@@ -26,7 +26,7 @@ test('Tenant call/resolveCall round-trip resolves with the page result', async (
 
 test('Tenant call/rejectCall round-trip rejects', async () => {
   const t = new Tenant('t1', undefined, {});
-  const pending = t.call('insertTitle', { title: 'hi' });
+  const pending = t.call('insert_title', { title: 'hi' });
   const id = [...t.pendingCalls.keys()][0]!;
   t.rejectCall(id, 'boom');
   await assert.rejects(pending, /boom/);
@@ -35,7 +35,7 @@ test('Tenant call/rejectCall round-trip rejects', async () => {
 test('createManifestToolRegistry registers a tool per manifest entry with correct zod param types', () => {
   const t = new Tenant('t1', undefined, {});
   t.setToolManifest([
-    { name: 'insert_title', description: 'sets title', target: 'insertTitle', params: { title: { type: 'string' } } },
+    { name: 'insert_title', description: 'sets title', params: { title: { type: 'string' } } },
   ]);
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -44,10 +44,10 @@ test('createManifestToolRegistry registers a tool per manifest entry with correc
   assert.ok(registry.handles.has('insert_title'));
 });
 
-test('calling a manifest tool sends a "call" WS message and resolves via resolveCall', async () => {
+test('calling a manifest tool sends a "call" WS message (by tool name) and resolves via resolveCall', async () => {
   const t = new Tenant('t1', undefined, {});
   t.setToolManifest([
-    { name: 'insert_title', description: 'sets title', target: 'insertTitle', params: { title: { type: 'string' } } },
+    { name: 'insert_title', description: 'sets title', params: { title: { type: 'string' } } },
   ]);
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   createManifestToolRegistry(mcp, () => t).sync();
@@ -57,19 +57,22 @@ test('calling a manifest tool sends a "call" WS message and resolves via resolve
     OPEN: 1,
     send(raw: string) {
       const msg = JSON.parse(raw);
-      if (msg.type === 'call') queueMicrotask(() => t.resolveCall(msg.id, `title set to "${msg.args.title}"`));
+      if (msg.type === 'call') {
+        assert.equal(msg.name, 'insert_title');
+        queueMicrotask(() => t.resolveCall(msg.id, `title set to "${msg.args.title}"`));
+      }
     },
   };
   t.wsClients.add(fakeSocket as any);
 
-  const result = await t.call('insertTitle', { title: 'Hi' });
+  const result = await t.call('insert_title', { title: 'Hi' });
   assert.equal(result, 'title set to "Hi"');
 });
 
 test('unsupported param type throws a clear error', () => {
   const t = new Tenant('t1', undefined, {});
   t.setToolManifest([
-    { name: 'bad', description: 'x', target: 'bad', params: { thing: { type: 'object' as any } } },
+    { name: 'bad', description: 'x', params: { thing: { type: 'object' as any } } },
   ]);
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -80,12 +83,12 @@ test('re-registering a manifest removes stale tools and adds new ones', () => {
   const t = new Tenant('t1', undefined, {});
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
 
-  t.setToolManifest([{ name: 'insert_title', description: 'd', target: 'insertTitle', params: {} }]);
+  t.setToolManifest([{ name: 'insert_title', description: 'd', params: {} }]);
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
   assert.ok(registry.handles.has('insert_title'));
 
-  t.setToolManifest([{ name: 'insert_main', description: 'd2', target: 'insertMain', params: {} }]);
+  t.setToolManifest([{ name: 'insert_main', description: 'd2', params: {} }]);
   registry.sync();
   assert.ok(!registry.handles.has('insert_title'), 'stale tool should be removed');
   assert.ok(registry.handles.has('insert_main'));
@@ -112,15 +115,16 @@ test('WS "register_tools" message updates the tenant manifest; "call_result" res
       ws.on('error', reject);
     });
 
-    const manifest = [{ name: 'insert_title', description: 'd', target: 'insertTitle', params: { title: { type: 'string' as const } } }];
+    const manifest = [{ name: 'insert_title', description: 'd', params: { title: { type: 'string' as const } } }];
     ws.send(JSON.stringify({ type: 'register_tools', tools: manifest }));
     await new Promise((r) => setTimeout(r, 100));
 
     assert.deepEqual(tenants.get('manifest-test')?.toolManifest, manifest);
 
-    const pending = tenants.get('manifest-test')!.call('insertTitle', { title: 'hi' });
+    const pending = tenants.get('manifest-test')!.call('insert_title', { title: 'hi' });
     const callMsg = await new Promise<any>((resolve) => ws.once('message', (raw) => resolve(JSON.parse(raw.toString()))));
     assert.equal(callMsg.type, 'call');
+    assert.equal(callMsg.name, 'insert_title');
     ws.send(JSON.stringify({ type: 'call_result', id: callMsg.id, result: 'done' }));
     assert.equal(await pending, 'done');
 

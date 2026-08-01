@@ -62,16 +62,16 @@ export class Tenant<TSchema, TValues> {
     this.manifestToolRegistry?.sync();
   }
 
-  call(target: string, args: unknown, timeoutMs = 10_000): Promise<unknown> {
+  call(name: string, args: unknown, timeoutMs = 10_000): Promise<unknown> {
     const id = randomUUID();
     const promise = new Promise<unknown>((resolve, reject) => {
       this.pendingCalls.set(id, { resolve, reject });
       const timer = setTimeout(() => {
-        if (this.pendingCalls.delete(id)) reject(new Error(`call to "${target}" timed out after ${timeoutMs}ms`));
+        if (this.pendingCalls.delete(id)) reject(new Error(`call to "${name}" timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       timer.unref();
     });
-    const payload: CallMessage = { type: 'call', id, target, args };
+    const payload: CallMessage = { type: 'call', id, name, args };
     const raw = JSON.stringify(payload);
     for (const client of this.wsClients) {
       if (client.readyState === client.OPEN) client.send(raw);

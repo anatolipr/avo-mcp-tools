@@ -59,7 +59,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
         { description: entry.description, inputSchema: manifestEntryToZodShape(entry) },
         async (args: any) => {
           try {
-            const result = await tenant().call(entry.target, args);
+            const result = await tenant().call(entry.name, args);
             return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
           } catch (err) {
             return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };

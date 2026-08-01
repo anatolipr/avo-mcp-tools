@@ -91,14 +91,13 @@ test('pushing a manifest over WS makes new named tools appear in tools/list, and
     {
       name: 'insert_title',
       description: 'Sets the title',
-      target: 'insertTitle',
       params: { title: { type: 'string' } },
     },
   ];
 
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw.toString());
-    if (msg.type === 'call' && msg.target === 'insertTitle') {
+    if (msg.type === 'call' && msg.name === 'insert_title') {
       ws.send(JSON.stringify({ type: 'call_result', id: msg.id, result: `title set to "${msg.args.title}"` }));
     }
   });
@@ -120,7 +119,7 @@ test('manifests are isolated per tenant — a second session with no manifest st
   const wsA = await connectWs(requireSessionId(a.transport));
   wsA.send(JSON.stringify({
     type: 'register_tools',
-    tools: [{ name: 'insert_title', description: 'd', target: 'insertTitle', params: { title: { type: 'string' } } }],
+    tools: [{ name: 'insert_title', description: 'd', params: { title: { type: 'string' } } }],
   }));
 
   await waitForTool(a.client, 'insert_title');

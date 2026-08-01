@@ -29,10 +29,16 @@ export interface ToolParamSpec {
   optional?: boolean;
 }
 
+/**
+ * The wire form of a manifest entry, as sent to the server in a
+ * RegisterToolsMessage. No function reference here — only JSON-serializable
+ * fields. The page keeps the actual function (see PageToolDef in
+ * client-bridge.ts) and dispatches on it locally when the server sends a
+ * CallMessage back by `name`.
+ */
 export interface ToolManifestEntry {
   name: string;
   description: string;
-  target: string; // window.* function name the page exposes
   params: Record<string, ToolParamSpec>;
   example?: Record<string, unknown>;
 }
@@ -45,7 +51,7 @@ export interface RegisterToolsMessage {
 export interface CallMessage {
   type: 'call';
   id: string;
-  target: string;
+  name: string;
   args: unknown;
 }
 

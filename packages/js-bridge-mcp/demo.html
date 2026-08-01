@@ -5,8 +5,39 @@
   <title>Hello World MCP Demo</title>
 </head>
 <body>
-  <h1>Loading...</h1>
-  <main></main>
+  <h1>Hello, world!</h1>
+  <main>Waiting for an agent to say something...</main>
+
+  <script>
+    function insertTitle({ title }) {
+      document.title = title;
+      document.querySelector('h1').textContent = title;
+      return `title set to "${title}"`;
+    }
+
+    function insertMain({ main }) {
+      document.querySelector('main').textContent = main;
+      return 'main content updated';
+    }
+
+    window.__mcpTools = [
+      {
+        name: 'insert_title',
+        description: 'Sets the <h1> title shown on this page.',
+        params: { title: { type: 'string', description: 'New page title' } },
+        example: { title: 'Welcome, Ada!' },
+        fn: insertTitle,
+      },
+      {
+        name: 'insert_main',
+        description: 'Sets the <main> body content shown on this page.',
+        params: { main: { type: 'string', description: 'New body text' } },
+        example: { main: 'Here is your daily summary...' },
+        fn: insertMain,
+      },
+    ];
+  </script>
+
   <script type="module" src="http://localhost:8766/main.js?server=http%3A%2F%2Flocalhost%3A8766&tenant=1e0abca4-b34b-4364-b248-730d4369195f"></script>
 </body>
 </html>
