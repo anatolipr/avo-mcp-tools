@@ -25,11 +25,14 @@ const socket = connectStateSocket<undefined, undefined>(
       console.log('[js-bridge-mcp] connected');
       socket.send({ type: 'register_tools', tools: manifest, summary: pageSummary });
     },
-    onCall(id, name, args) {
+    async onCall(id, name, args) {
       try {
         const fn = fnByName.get(name);
         if (!fn) throw new Error(`no page tool named "${name}" — was it in window.__mcpTools when this script loaded?`);
-        const result = fn(args);
+        // Page tools may be async (e.g. ones that fetch another document) —
+        // await here so we send the resolved value, not a pending Promise
+        // (which serializes to "{}" over the socket).
+        const result = await fn(args);
         socket.send({ type: 'call_result', id, result });
       } catch (err) {
         socket.send({ type: 'call_result', id, error: String((err as Error).message) });
