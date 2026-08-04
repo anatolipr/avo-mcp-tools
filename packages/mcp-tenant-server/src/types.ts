@@ -58,6 +58,13 @@ export interface RegisterToolsMessage {
    * `instructions`.
    */
   summary?: string;
+  /**
+   * Optional page-authored app identity (e.g. document.title or
+   * window.__mcpAppName). Used to disambiguate tool names and connections
+   * when a tenant has more than one live WS connection. Sanitized
+   * server-side into a slug; the raw value is only used as a display label.
+   */
+  appLabel?: string;
 }
 
 export interface CallMessage {
@@ -74,4 +81,14 @@ export interface CallResultMessage {
   error?: string;
 }
 
-export type ClientMessage = SetMessage | SubmitMessage | InterruptMessage | RegisterToolsMessage | CallResultMessage;
+/**
+ * Renames an already-registered connection's display label (and therefore
+ * its tool-name prefix once re-slugged) without resending its whole
+ * manifest. Fire-and-forget, like RegisterToolsMessage - no ack.
+ */
+export interface RenameConnectionMessage {
+  type: 'rename_connection';
+  appLabel: string;
+}
+
+export type ClientMessage = SetMessage | SubmitMessage | InterruptMessage | RegisterToolsMessage | CallResultMessage | RenameConnectionMessage;

@@ -246,9 +246,10 @@ if you'd rather dispatch by tool name generically instead of hand-matching
 - Pre-wired/build-time client bridge mode's worked example (types exist,
   no worked sample yet).
 - Publishing packages to a real npm registry — workspace-local only.
-- Changing `ClientMessage` verbs (`set`/`submit`/`interrupt`) — these are
-  fixed today. If your project needs different verbs, that's a change to
-  `mcp-tenant-server` itself, not something you can override per-package.
+- Changing `ClientMessage` verbs (`set`/`submit`/`interrupt`/`register_tools`/
+  `call_result`/`rename_connection`) — these are fixed today. If your
+  project needs different verbs, that's a change to `mcp-tenant-server`
+  itself, not something you can override per-package.
 
 ## Pattern B: AI-enabling an existing static page (cross-origin)
 
@@ -305,7 +306,11 @@ from Pattern A.
   Using the session's own tenant id means `insert_title`/`insert_main`
   calls made from that same MCP conversation land on the exact tenant the
   pasted page is connected to — no separate "which session is this"
-  bookkeeping needed.
+  bookkeeping needed. If the *same* snippet is pasted into more than one
+  tab, both connections share the tenant; tool names get an automatic
+  per-connection prefix once a second connection registers (see "Multiple
+  connections per tenant" below) — this is a supported way to let one MCP
+  session drive multiple pages, not just an edge case to avoid.
 - **The client bundle reads `server`/`tenant` from its own script URL**,
   via `import.meta.url` (reliable for `<script type="module">` — the
   browser resolves it to the script's own URL, including query string):
@@ -340,6 +345,51 @@ from Pattern A.
    cross-origin — run both servers on different ports, open the page from
    its own server, paste the generated snippet, reload, confirm live
    updates and confirm a second tenant/page doesn't receive them.
+
+### Multiple connections per tenant
+
+A tenant can have more than one live WS connection — e.g. two browser tabs
+that both got the same `get_embed_snippet` output pasted in, whether it's
+two different apps or two tabs of the same app. `Tenant.connections` (in
+`tenant.ts`) is a `Map<connectionId, TenantConnection>`, one entry per WS
+socket, each with its own `manifest`/`summary`/`label` — replacing the old
+single flat `toolManifest` field, which is now a back-compat getter that
+only stays meaningful for 0-1 connections.
+
+- **0-1 connections** (the common case): tool names are registered exactly
+  as the page declared them, no prefix — identical to pre-multi-connection
+  behavior, and `describe_tools` returns the flat `{summary, tools}` shape.
+- **2+ connections**: every tool is registered under
+  `${slug}__${originalName}` (`manifest-tools.ts`'s `sync()`), where `slug`
+  is derived from that connection's `appLabel` (sanitized to `[a-z0-9_]`,
+  falling back to `tab` if absent/empty). Two connections landing on the
+  same slug get ordinal-suffixed by connection-open order — first keeps the
+  bare slug, next becomes `slug2`, etc. `describe_tools` switches to a
+  `{connections: [{id, label, toolPrefix, summary, tools}]}` shape so an
+  agent can look up which prefix routes to which tab instead of guessing.
+- **Renaming a connection's label after registration**: `RenameConnectionMessage`
+  (`{type: 'rename_connection', appLabel}`) updates just `conn.label` via
+  `Tenant.renameConnection()` and re-syncs, without touching that
+  connection's `manifest`/`summary` (unlike resending `register_tools`,
+  which overwrites all three). The `js-bridge-mcp` client bridge exposes
+  this as `window.__mcpRename(newLabel?)` — with no argument it opens a
+  `prompt()` pre-filled with the connection's current label, letting a
+  human relabel an auto-slugged connection (e.g. `mindfoo2`) from DevTools
+  without a reload. `computeSlugs`/`sync()` in `manifest-tools.ts` recompute
+  slugs fresh on every call from `conn.label`, so nothing needs manual
+  invalidation beyond the `sync()` the rename already triggers.
+- Dispatch never parses a prefix back out of a registered name — each
+  registered tool's handler closure captures the owning `connectionId`
+  directly at registration time and calls
+  `tenant().call(connectionId, originalName, args)`, which routes to that
+  one connection's socket only (`Tenant.call()`'s first param). The wire
+  message to the browser always carries the original, unprefixed name —
+  zero client-side change needed for dispatch itself.
+- Tenant-wide state (`tenant().store`, `applyState`/`broadcastUpdate`/
+  `broadcastReinit`) is unaffected by any of this — it stays a single
+  shared broadcast to every connection on the tenant, since it represents
+  one logical document/state per tenant, a different concern from "which
+  tab owns tool X."
 
 ### Not yet built
 

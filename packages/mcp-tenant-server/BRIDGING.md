@@ -68,6 +68,41 @@ running — you are not building a new package here.
    its summary) only connects and registers *after* the `McpServer` instance
    for that session already exists.
 
+   **Optional: `window.__mcpAppName`** — a short string (e.g. `"formalin"`,
+   `"htmlpaint"`) identifying this page/app. It only matters when the *same*
+   tenant ends up with more than one live connection — e.g. the same embed
+   snippet pasted into two browser tabs — in which case it's used to build a
+   readable tool-name prefix and connection label (see "Multiple connections
+   per tenant" below). Falls back to `document.title` if unset, and has no
+   effect at all with a single connection.
+
+   **Naming prompt on first connect.** The very first time the pasted
+   snippet connects (once per page load, not on later reconnects), the
+   bridge itself opens `prompt('Name this MCP connection...', <derived
+   label>)` — pre-filled with `window.__mcpAppName`/`document.title` —
+   before it ever registers tools. This is deliberate, not just a UX nicety:
+   an agent has no way to learn about a *later* rename (MCP has no
+   server-push for "the tool list changed"), so a rename after the agent
+   has already called `describe_tools` leaves it holding a stale, now-dead
+   prefix until it happens to re-call `describe_tools`. Asking once, up
+   front, means whatever label ends up registered is the only one any
+   connecting agent ever sees. Dismissing/cancelling the prompt (`Escape`,
+   Cancel button) is safe — it silently falls back to the derived label and
+   registration proceeds immediately, never blocking the connection.
+
+   **`window.__mcpRename(newLabel?)`** — defined by the embed snippet itself
+   (not something a page author sets), lets a human relabel an already-live
+   connection from DevTools later in the session, without a reload — e.g. to
+   fix a typo from the connect-time prompt, or rename mid-session. Call it
+   with no argument from the console and it opens a `prompt()` pre-filled
+   with the connection's current label; call it with a string
+   (`__mcpRename('mindfoo-dev')`) to skip the prompt entirely. Sends a
+   `rename_connection` message that updates the connection's label and
+   re-syncs tool-name prefixes immediately. Carries the same caveat as
+   above: an agent that already read the old prefix won't automatically
+   learn the new one, so this is best used before an agent starts relying
+   on this connection's tool names, not mid-task.
+
 2. **The embed snippet** — one line of executable JavaScript obtained by
    calling the server's `get_embed_snippet` tool (or equivalent), e.g.
    `import("http://localhost:8766/main.js?server=...&tenant=...");`.
@@ -135,6 +170,40 @@ individual tool gets called. `describe_tools` is a reserved name: a page
 tool with that name in `window.__mcpTools` is silently shadowed by the
 built-in one and never registered.
 
+When 2+ connections share a tenant (see "Multiple connections per tenant"
+below), the response shape changes to `{connections: [...]}` instead of the
+flat shape above — one entry per connection, each with its own
+`summary`/`tools`, plus `id`/`label`/`toolPrefix`.
+
+## Multiple connections per tenant
+
+The same embed snippet can be pasted into more than one browser tab — a
+different app in each, or several tabs of the same app — and both end up on
+the same tenant, since a `get_embed_snippet` result stays bound to one
+tenant id for its whole session. This is supported:
+
+- With 0-1 connections, tool names are unprefixed, exactly as documented
+  above — the common case is unaffected.
+- Once a **second** connection registers, every tool from every connection
+  gets an automatic prefix: `${slug}__${name}`. `slug` is derived from that
+  connection's `window.__mcpAppName` (or `document.title`), sanitized to
+  `[a-z0-9_]`, falling back to `tab` if absent/empty. Two connections
+  landing on the same slug (same app label, or both unlabeled) get
+  ordinal-suffixed by connection-open order: the first keeps the bare slug,
+  the next becomes `slug2`, then `slug3`, etc.
+- Calls are routed to exactly one connection's socket, resolved via the
+  registered tool's prefix — not broadcast to every connection on the
+  tenant, so a second tab never receives (or accidentally answers) a call
+  meant for the first.
+- Closing a tab removes its connection; if that leaves exactly one
+  connection, that one's tools go back to unprefixed names.
+- Cross-connection `name` reuse (two different pages/tabs both defining a
+  `submit` tool, say) is fine — see the next section for why this differs
+  from same-page reuse.
+- A connection's label isn't fixed at registration time — see
+  `window.__mcpRename` above to change it later from DevTools, which
+  re-slugs and re-prefixes that connection's tools immediately.
+
 ## Common mistakes
 
 - **Positional args instead of one args object.** `function insertTitle(title)`
@@ -144,8 +213,12 @@ built-in one and never registered.
   reads it once, synchronously, when it first connects — if the array isn't
   there yet (or is still empty) at that point, no tools get registered. Define
   it earlier in the page than wherever the embed snippet ends up.
-- **Reusing a `name` across two entries.** Registration is keyed purely on
-  `name`; a duplicate produces undefined/last-registered behavior.
+- **Reusing a `name` across two entries in the same page's own
+  `window.__mcpTools`.** Registration within one page is keyed purely on
+  `name`; a duplicate produces undefined/last-registered behavior. This is
+  different from two *separate* pages/tabs reusing the same tool `name` —
+  that's fine and expected now, each gets disambiguated automatically via a
+  connection prefix (see "Multiple connections per tenant" above).
 - **Expecting a live-edited tool list to take effect without a reload.**
   `window.__mcpTools` is read once per page load / bridge (re)connect, not
   polled. Editing it requires the page (and its bridge connection) to reload
@@ -179,3 +252,9 @@ Before telling the user the bridge is ready:
 4. Open a second, unrelated tenant/session (e.g. call `get_embed_snippet`
    again from a fresh MCP session) and confirm the new tools do **not**
    appear there — manifests are per-tenant, not global.
+5. Paste the *same* embed snippet into a second browser tab, deliberately
+   sharing the tenant. Call `describe_tools` and confirm it now reports two
+   connections with distinct labels/prefixes. Call one of the newly
+   prefixed tools and confirm only the intended tab updates. Close one tab
+   and confirm `describe_tools` reports a single connection again with that
+   connection's tools reachable unprefixed.

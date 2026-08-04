@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Tenant } from './tenant.js';
+import type { Tenant, TenantConnection } from './tenant.js';
 import type { ToolManifestEntry, ToolParamSpec } from './types.js';
 
 function paramSpecToZod(spec: ToolParamSpec): z.ZodTypeAny {
@@ -35,7 +35,42 @@ const DESCRIBE_TOOLS_DESCRIPTION =
   'page-authored summary (what kind of page/app this is, cross-tool sequencing rules, ' +
   'domain concepts) plus the current list of tool names and one-line descriptions. Call ' +
   'this once after connecting, before calling any other tool from this page, so you have ' +
-  'the shared context that individual tool descriptions don\'t repeat.';
+  'the shared context that individual tool descriptions don\'t repeat. When multiple ' +
+  'pages/tabs are connected to this session at once, tool names are prefixed per ' +
+  'connection (e.g. "formalin__submit_form", "htmlpaint__clear_canvas") and this tool\'s ' +
+  'response includes a `connections` array listing each connection\'s id, label, and ' +
+  'prefix — call it whenever you\'re unsure which prefix routes to which tab.';
+
+/**
+ * Derives a stable, unique tool-name prefix per connection: sanitized from
+ * `label` (falling back to "tab" when absent or empty after sanitizing),
+ * with a 1-based ordinal appended on collision (first connection to open
+ * keeps the bare slug; later ones sharing that slug get "2", "3", ...).
+ * Recomputed fresh on every call from `connections`' current iteration
+ * order (== connection-open order, since Map preserves insertion order and
+ * entries are only ever added/removed, never reordered) — no state to
+ * keep in sync separately.
+ */
+function computeSlugs(connections: TenantConnection[]): Map<string, string> {
+  const slugFor = new Map<string, string>();
+  const countSoFar = new Map<string, number>();
+  for (const conn of connections) {
+    const base = slugify(conn.label);
+    const n = (countSoFar.get(base) ?? 0) + 1;
+    countSoFar.set(base, n);
+    slugFor.set(conn.id, n === 1 ? base : `${base}${n}`);
+  }
+  return slugFor;
+}
+
+function slugify(label: string | undefined): string {
+  const cleaned = (label ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 24);
+  return cleaned || 'tab';
+}
 
 /**
  * Registers one MCP tool per entry in tenant().toolManifest, dispatching
@@ -63,9 +98,28 @@ export function createManifestToolRegistry<TSchema, TValues>(
       { description: DESCRIBE_TOOLS_DESCRIPTION, inputSchema: {} },
       async () => {
         const t = tenant();
+        const conns = [...t.connections.values()];
+
+        if (conns.length <= 1) {
+          const payload = {
+            summary: t.toolManifestSummary ?? null,
+            tools: t.toolManifest.map((e) => ({ name: e.name, description: e.description })),
+          };
+          return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+        }
+
+        const slugFor = computeSlugs(conns);
         const payload = {
-          summary: t.toolManifestSummary ?? null,
-          tools: t.toolManifest.map((e) => ({ name: e.name, description: e.description })),
+          connections: conns.map((c) => ({
+            id: c.id,
+            label: c.label ?? null,
+            toolPrefix: slugFor.get(c.id),
+            summary: c.summary ?? null,
+            tools: c.manifest.map((e) => ({
+              name: `${slugFor.get(c.id)}__${e.name}`,
+              description: e.description,
+            })),
+          })),
         };
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
       }
@@ -74,10 +128,32 @@ export function createManifestToolRegistry<TSchema, TValues>(
   }
 
   function sync() {
-    const manifest = tenant().toolManifest;
+    const conns = [...tenant().connections.values()];
+    const multi = conns.length >= 2;
+    const slugFor = multi ? computeSlugs(conns) : undefined;
+
+    // registeredName -> which connection/entry it dispatches to. With a
+    // single (or no) connection, registeredName === entry.name, exactly
+    // like before multi-connection support existed.
+    const registeredNow = new Map<string, { connectionId: string | undefined; entry: ToolManifestEntry }>();
+    if (multi) {
+      for (const conn of conns) {
+        for (const entry of conn.manifest) {
+          if (entry.name === DESCRIBE_TOOLS_NAME) continue;
+          registeredNow.set(`${slugFor!.get(conn.id)}__${entry.name}`, { connectionId: conn.id, entry });
+        }
+      }
+    } else {
+      const conn = conns[0];
+      for (const entry of tenant().toolManifest) {
+        if (entry.name === DESCRIBE_TOOLS_NAME) continue;
+        registeredNow.set(entry.name, { connectionId: conn?.id, entry });
+      }
+    }
+
     // A page tool named "describe_tools" would collide with the fixed tool
     // below - the fixed one always wins so agents can rely on the name.
-    const currentNames = new Set([DESCRIBE_TOOLS_NAME, ...manifest.map((e) => e.name)]);
+    const currentNames = new Set([DESCRIBE_TOOLS_NAME, ...registeredNow.keys()]);
 
     for (const [name, handle] of handles) {
       if (!currentNames.has(name)) {
@@ -88,22 +164,21 @@ export function createManifestToolRegistry<TSchema, TValues>(
 
     if (!handles.has(DESCRIBE_TOOLS_NAME)) registerDescribeTools();
 
-    for (const entry of manifest) {
-      if (entry.name === DESCRIBE_TOOLS_NAME) continue;
-      if (handles.has(entry.name)) continue;
+    for (const [registeredName, { connectionId, entry }] of registeredNow) {
+      if (handles.has(registeredName)) continue;
       const handle = mcp.registerTool(
-        entry.name,
+        registeredName,
         { description: entry.description, inputSchema: manifestEntryToZodShape(entry) },
         async (args: any) => {
           try {
-            const result = await tenant().call(entry.name, args);
+            const result = await tenant().call(connectionId, entry.name, args);
             return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
           } catch (err) {
             return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };
           }
         }
       );
-      handles.set(entry.name, handle);
+      handles.set(registeredName, handle);
     }
   }
 

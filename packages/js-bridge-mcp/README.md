@@ -119,6 +119,13 @@ Schema per entry:
   `name`/`description`/`params`/`example` and dispatches calls back by
   `name` against its local copy of `window.__mcpTools`.
 
+Optionally also set `window.__mcpAppName` (a short string, e.g. `"formalin"`
+or `"htmlpaint"`) before the embed snippet runs. It identifies this page/app
+when the *same* `get_embed_snippet` output gets pasted into more than one
+browser tab — see "Multiple tabs on one tenant" below. Falls back to
+`document.title` if omitted, and has no effect at all with a single
+connection.
+
 If the page is an ES module build rather than plain script tags, define
 `window.__mcpTools` in whichever module already has the real functions in
 scope — same shape, still a direct function reference, no string lookup.
@@ -216,7 +223,11 @@ depends on this package's build tooling.
 - Positional args instead of one args object (`fn({ rowId })`, not
   `fn(rowId)`).
 - Defining `window.__mcpTools` *after* the embed snippet already ran.
-- Reusing a `name` across two entries in the same page.
+- Reusing a `name` across two entries in the **same page**'s own
+  `window.__mcpTools` array — this is still a real bug (last one wins).
+  Reusing a `name` across two *different* pages/tabs sharing a tenant is
+  fine now — see "Multiple tabs on one tenant" below, each gets an
+  automatic per-connection prefix.
 - Expecting a live-edited `window.__mcpTools` to take effect without a page
   reload — it's read once per connect, not watched.
 - Pasting the embed snippet into the page **after** your MCP client already
@@ -225,6 +236,39 @@ depends on this package's build tooling.
   on the server's `tools/list_changed` notification mid-session. New tools
   may need a full MCP client restart to appear, even though the browser
   tenant is connected and the server registered them correctly.
+- Two tabs of the *same* page connected to the same tenant get
+  ordinal-suffixed prefixes (`tab__`, `tab2__`, ...) unless
+  `window.__mcpAppName`/`document.title` differ between them — call
+  `describe_tools` to see current prefixes rather than guessing.
+
+### Multiple tabs on one tenant
+
+`get_embed_snippet` returns the same tenant id for the life of an MCP
+session, so pasting that same snippet into more than one browser tab — a
+different app in each tab, or several tabs of the same app — connects all
+of them to the same tenant. This is supported, not just an edge case to
+avoid: it's how one MCP session can drive multiple pages at once (e.g.
+"read form data from tab A, use it to drive tab B").
+
+- Each WS connection is tracked separately server-side. As soon as a
+  **second** connection registers tools, every registered MCP tool name
+  gets an automatic prefix: `${slug}__${name}` — e.g. `formalin__submit_form`,
+  `htmlpaint__clear_canvas`. With only one connection, tool names stay
+  exactly as they'd be alone (`submit_form`), no prefix.
+- The slug comes from `window.__mcpAppName` (or `document.title` if unset),
+  sanitized to `[a-z0-9_]`. Two connections that land on the same slug (same
+  app, or both unlabeled) get ordinal-suffixed: the first to connect keeps
+  the bare slug, the next becomes `slug2`, then `slug3`, etc. — so "use the
+  first htmlpaint tab" maps to the plain `htmlpaint__...` tools, and "use
+  the second" maps to `htmlpaint2__...`.
+- Calling `describe_tools` with 2+ connections returns a `connections[]`
+  array (`id`, `label`, `toolPrefix`, `summary`, `tools[]`) instead of the
+  single-connection flat shape — call it whenever you're not sure which
+  prefix routes to which tab.
+- Calls are routed to exactly one connection's socket — the other
+  tab(s) never see or respond to a call meant for a different one.
+- Closing a tab drops its connection; if that leaves exactly one connection
+  behind, that one's tools become unprefixed again on the next call.
 
 ### Validation checklist before calling it done
 
@@ -235,6 +279,14 @@ depends on this package's build tooling.
 4. Open a second tenant (call `get_embed_snippet` again from a fresh MCP
    session) and confirm the new tools do **not** appear there — manifests
    are per-tenant, never global.
+5. Paste the *same* `get_embed_snippet` snippet into a second browser tab
+   (same tenant, deliberately). Call `describe_tools` — confirm it lists
+   two connections with distinct labels/prefixes (`tab`/`tab2` if neither
+   page set `window.__mcpAppName`/title). Call one of the newly prefixed
+   tools (e.g. `tab__insert_title`) and confirm only that tab updates, not
+   the other. Close one tab, call `describe_tools` again, confirm it now
+   reports a single connection and that connection's tools are reachable
+   unprefixed again.
 
 For the fuller version of this recipe (including how to scaffold a brand-new
 MCP server package, "Pattern A" vs "Pattern B") see

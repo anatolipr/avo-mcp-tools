@@ -3,6 +3,20 @@ import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import type { SubmitPayload, ToolManifestEntry, CallMessage } from './types.js';
 
+/**
+ * One WS connection's own tool manifest/summary/label, addressable
+ * independently of other connections sharing the same tenant (e.g. two
+ * browser tabs pasted the same embed snippet). See manifest-tools.ts for
+ * how multiple connections' tools get name-disambiguated.
+ */
+export interface TenantConnection {
+  id: string;
+  socket: WebSocket;
+  label?: string;
+  manifest: ToolManifestEntry[];
+  summary?: string;
+}
+
 export class Store<TValues> {
   #values: TValues;
   #subscribers = new Set<(name: string, value: unknown) => void>();
@@ -41,11 +55,31 @@ export class Tenant<TSchema, TValues> {
   store: Store<TValues>;
   submitBus: EventEmitter;
   wsClients: Set<WebSocket>;
+  connections = new Map<string, TenantConnection>();
+  #legacyManifest?: ToolManifestEntry[];
+  #legacySummary?: string;
   lastActivityAt: number;
-  toolManifest: ToolManifestEntry[] = [];
-  toolManifestSummary?: string;
   pendingCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   manifestToolRegistry?: { sync(): void };
+
+  /**
+   * Back-compat view over the per-connection manifests below: single flat
+   * array/summary, meaningful for the 0-1-connection case (the overwhelming
+   * majority — a single page/tab on this tenant). With 2+ connections this
+   * flattens everything, which loses which tool belongs to which
+   * connection — multi-connection-aware code (manifest-tools.ts) reads
+   * `connections` directly instead.
+   */
+  get toolManifest(): ToolManifestEntry[] {
+    if (this.connections.size === 0) return this.#legacyManifest ?? [];
+    if (this.connections.size === 1) return [...this.connections.values()][0]!.manifest;
+    return [...this.connections.values()].flatMap((c) => c.manifest);
+  }
+
+  get toolManifestSummary(): string | undefined {
+    if (this.connections.size === 1) return [...this.connections.values()][0]!.summary;
+    return this.#legacySummary;
+  }
 
   constructor(id: string, initialSchema: TSchema, initialValues: TValues) {
     this.id = id;
@@ -58,13 +92,62 @@ export class Tenant<TSchema, TValues> {
     this.store.onChange((field, value) => this.broadcastUpdate(field, value));
   }
 
+  /**
+   * Legacy/no-WS path: registers a manifest with no real connection behind
+   * it. Used directly by tests that construct a bare Tenant, and left in
+   * place for any caller that doesn't (yet) know about individual
+   * connections. Real WS-driven registration goes through
+   * registerConnection/updateConnectionManifest instead (see ws.ts).
+   */
   setToolManifest(manifest: ToolManifestEntry[], summary?: string) {
-    this.toolManifest = manifest;
-    this.toolManifestSummary = summary;
+    this.#legacyManifest = manifest;
+    this.#legacySummary = summary;
     this.manifestToolRegistry?.sync();
   }
 
-  call(name: string, args: unknown, timeoutMs = 10_000): Promise<unknown> {
+  registerConnection(id: string, socket: WebSocket) {
+    this.connections.set(id, { id, socket, manifest: [], summary: undefined, label: undefined });
+    this.wsClients.add(socket);
+  }
+
+  updateConnectionManifest(id: string, manifest: ToolManifestEntry[], summary?: string, label?: string) {
+    const conn = this.connections.get(id);
+    if (!conn) return; // connection closed/unknown — ignore a late message
+    conn.manifest = manifest;
+    conn.summary = summary;
+    conn.label = label;
+    this.manifestToolRegistry?.sync();
+  }
+
+  /**
+   * Updates only a connection's display label, leaving its manifest/summary
+   * untouched — used by RenameConnectionMessage so a page can rename itself
+   * (e.g. via __mcpRename) without resending its whole tool manifest.
+   * Re-syncs so tool-name prefixes (computeSlugs in manifest-tools.ts)
+   * reflect the new label immediately.
+   */
+  renameConnection(id: string, label: string) {
+    const conn = this.connections.get(id);
+    if (!conn) return; // connection closed/unknown — ignore a late message
+    conn.label = label;
+    this.manifestToolRegistry?.sync();
+  }
+
+  removeConnection(id: string) {
+    const conn = this.connections.get(id);
+    if (conn) this.wsClients.delete(conn.socket);
+    this.connections.delete(id);
+    this.manifestToolRegistry?.sync();
+  }
+
+  /**
+   * `connectionId` targets the call at one specific connection's socket
+   * (thrown if it's gone) — this is what lets multiple tabs share a tenant
+   * without racing on each other's responses. Passing `undefined`
+   * broadcasts to every socket on the tenant, same as the old behavior;
+   * kept for the legacy/no-connections test path.
+   */
+  call(connectionId: string | undefined, name: string, args: unknown, timeoutMs = 10_000): Promise<unknown> {
     const id = randomUUID();
     const promise = new Promise<unknown>((resolve, reject) => {
       this.pendingCalls.set(id, { resolve, reject });
@@ -75,8 +158,18 @@ export class Tenant<TSchema, TValues> {
     });
     const payload: CallMessage = { type: 'call', id, name, args };
     const raw = JSON.stringify(payload);
-    for (const client of this.wsClients) {
-      if (client.readyState === client.OPEN) client.send(raw);
+
+    if (connectionId) {
+      const conn = this.connections.get(connectionId);
+      if (!conn) {
+        this.pendingCalls.delete(id);
+        throw new Error(`connection "${connectionId}" is no longer connected`);
+      }
+      if (conn.socket.readyState === conn.socket.OPEN) conn.socket.send(raw);
+    } else {
+      for (const client of this.wsClients) {
+        if (client.readyState === client.OPEN) client.send(raw);
+      }
     }
     return promise;
   }
@@ -131,6 +224,7 @@ export class Tenant<TSchema, TValues> {
     this.pendingCalls.clear();
     for (const client of this.wsClients) client.close();
     this.wsClients.clear();
+    this.connections.clear();
   }
 }
 

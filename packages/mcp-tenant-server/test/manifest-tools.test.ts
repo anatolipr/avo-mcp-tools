@@ -18,7 +18,7 @@ test('Tenant.setToolManifest stores the manifest and is readable back', () => {
 
 test('Tenant call/resolveCall round-trip resolves with the page result', async () => {
   const t = new Tenant('t1', undefined, {});
-  const pending = t.call('insert_title', { title: 'hi' });
+  const pending = t.call(undefined, 'insert_title', { title: 'hi' });
   const id = [...t.pendingCalls.keys()][0]!;
   t.resolveCall(id, 'ok');
   assert.equal(await pending, 'ok');
@@ -26,7 +26,7 @@ test('Tenant call/resolveCall round-trip resolves with the page result', async (
 
 test('Tenant call/rejectCall round-trip rejects', async () => {
   const t = new Tenant('t1', undefined, {});
-  const pending = t.call('insert_title', { title: 'hi' });
+  const pending = t.call(undefined, 'insert_title', { title: 'hi' });
   const id = [...t.pendingCalls.keys()][0]!;
   t.rejectCall(id, 'boom');
   await assert.rejects(pending, /boom/);
@@ -47,11 +47,6 @@ test('createManifestToolRegistry registers a tool per manifest entry with correc
 
 test('calling a manifest tool sends a "call" WS message (by tool name) and resolves via resolveCall', async () => {
   const t = new Tenant('t1', undefined, {});
-  t.setToolManifest([
-    { name: 'insert_title', description: 'sets title', params: { title: { type: 'string' } } },
-  ]);
-  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
-  createManifestToolRegistry(mcp, () => t).sync();
 
   const fakeSocket = {
     readyState: 1,
@@ -64,10 +59,37 @@ test('calling a manifest tool sends a "call" WS message (by tool name) and resol
       }
     },
   };
+  t.registerConnection('conn1', fakeSocket as any);
+  t.updateConnectionManifest('conn1', [
+    { name: 'insert_title', description: 'sets title', params: { title: { type: 'string' } } },
+  ]);
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  createManifestToolRegistry(mcp, () => t).sync();
+
+  const result = await t.call('conn1', 'insert_title', { title: 'Hi' });
+  assert.equal(result, 'title set to "Hi"');
+});
+
+test('call(undefined, ...) broadcasts to every socket on the tenant (legacy path)', async () => {
+  const t = new Tenant('t1', undefined, {});
+  let received = 0;
+  const fakeSocket = {
+    readyState: 1,
+    OPEN: 1,
+    send(raw: string) {
+      const msg = JSON.parse(raw);
+      if (msg.type === 'call') {
+        received += 1;
+        queueMicrotask(() => t.resolveCall(msg.id, 'ok'));
+      }
+    },
+  };
   t.wsClients.add(fakeSocket as any);
 
-  const result = await t.call('insert_title', { title: 'Hi' });
-  assert.equal(result, 'title set to "Hi"');
+  const result = await t.call(undefined, 'insert_title', { title: 'Hi' });
+  assert.equal(result, 'ok');
+  assert.equal(received, 1);
 });
 
 test('unsupported param type throws a clear error', () => {
@@ -145,7 +167,8 @@ test('WS "register_tools" message updates the tenant manifest; "call_result" res
 
     assert.deepEqual(tenants.get('manifest-test')?.toolManifest, manifest);
 
-    const pending = tenants.get('manifest-test')!.call('insert_title', { title: 'hi' });
+    const connectionId = [...tenants.get('manifest-test')!.connections.keys()][0]!;
+    const pending = tenants.get('manifest-test')!.call(connectionId, 'insert_title', { title: 'hi' });
     const callMsg = await new Promise<any>((resolve) => ws.once('message', (raw) => resolve(JSON.parse(raw.toString()))));
     assert.equal(callMsg.type, 'call');
     assert.equal(callMsg.name, 'insert_title');
@@ -158,4 +181,164 @@ test('WS "register_tools" message updates the tenant manifest; "call_result" res
     tenants.delete('manifest-test');
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
   }
+});
+
+function fakeSocket(onCall: (msg: any) => void) {
+  return {
+    readyState: 1,
+    OPEN: 1,
+    send(raw: string) {
+      const msg = JSON.parse(raw);
+      if (msg.type === 'call') onCall(msg);
+    },
+  } as any;
+}
+
+test('two connections with non-overlapping tool names both get prefixed once a second connection registers', () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [{ name: 'submit_form', description: 'd', params: {} }], undefined, 'formalin');
+  t.registerConnection('b', fakeSocket(() => {}));
+  t.updateConnectionManifest('b', [{ name: 'clear_canvas', description: 'd', params: {} }], undefined, 'htmlpaint');
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  assert.ok(registry.handles.has('formalin__submit_form'));
+  assert.ok(registry.handles.has('htmlpaint__clear_canvas'));
+  assert.ok(!registry.handles.has('submit_form'), 'unprefixed name should not remain once multi-connection');
+});
+
+test('two connections with a colliding tool name both register under distinct prefixes', () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [{ name: 'get_state', description: 'd', params: {} }], undefined, 'formalin');
+  t.registerConnection('b', fakeSocket(() => {}));
+  t.updateConnectionManifest('b', [{ name: 'get_state', description: 'd', params: {} }], undefined, 'htmlpaint');
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  assert.ok(registry.handles.has('formalin__get_state'));
+  assert.ok(registry.handles.has('htmlpaint__get_state'));
+});
+
+test('connections with the same/no label get ordinal-suffixed slugs, first-connected keeps the bare slug', () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }], undefined, 'htmlpaint');
+  t.registerConnection('b', fakeSocket(() => {}));
+  t.updateConnectionManifest('b', [{ name: 'insert_title', description: 'd', params: {} }], undefined, 'htmlpaint');
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  assert.ok(registry.handles.has('htmlpaint__insert_title'));
+  assert.ok(registry.handles.has('htmlpaint2__insert_title'));
+});
+
+test('renameConnection re-slugs that connection\'s tool prefix without touching its manifest/summary', () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [{ name: 'get_document', description: 'd', params: {} }], 'orig summary', 'mindfoo');
+  t.registerConnection('b', fakeSocket(() => {}));
+  t.updateConnectionManifest('b', [{ name: 'get_document', description: 'd', params: {} }], undefined, 'mindfoo');
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  assert.ok(registry.handles.has('mindfoo__get_document'));
+  assert.ok(registry.handles.has('mindfoo2__get_document'));
+
+  t.renameConnection('b', 'mindfoo dev');
+  registry.sync();
+
+  assert.ok(registry.handles.has('mindfoo__get_document'));
+  assert.ok(!registry.handles.has('mindfoo2__get_document'));
+  assert.ok(registry.handles.has('mindfoo_dev__get_document'));
+  // manifest/summary of the renamed connection are untouched by the rename
+  assert.strictEqual(t.connections.get('b')!.manifest[0]!.name, 'get_document');
+  assert.strictEqual(t.connections.get('a')!.summary, 'orig summary');
+});
+
+test('unlabeled connections fall back to tab/tab2 slugs', () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }]);
+  t.registerConnection('b', fakeSocket(() => {}));
+  t.updateConnectionManifest('b', [{ name: 'insert_title', description: 'd', params: {} }]);
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  assert.ok(registry.handles.has('tab__insert_title'));
+  assert.ok(registry.handles.has('tab2__insert_title'));
+});
+
+test('a targeted call(connectionId, ...) reaches only that connection\'s socket', async () => {
+  const t = new Tenant('t1', undefined, {});
+  let aCalls = 0;
+  let bCalls = 0;
+  t.registerConnection('a', fakeSocket((msg) => { aCalls += 1; t.resolveCall(msg.id, 'from-a'); }));
+  t.registerConnection('b', fakeSocket(() => { bCalls += 1; }));
+
+  const result = await t.call('a', 'insert_title', { title: 'hi' });
+  assert.equal(result, 'from-a');
+  assert.equal(aCalls, 1);
+  assert.equal(bCalls, 0, 'the other connection should not have received the call');
+});
+
+test('removeConnection prunes that connection\'s tools and demotes a remaining solo connection back to unprefixed', () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }], undefined, 'formalin');
+  t.registerConnection('b', fakeSocket(() => {}));
+  t.updateConnectionManifest('b', [{ name: 'clear_canvas', description: 'd', params: {} }], undefined, 'htmlpaint');
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+  assert.ok(registry.handles.has('formalin__insert_title'));
+  assert.ok(registry.handles.has('htmlpaint__clear_canvas'));
+
+  t.removeConnection('b');
+  registry.sync();
+  assert.ok(!registry.handles.has('htmlpaint__clear_canvas'), 'removed connection\'s tool should be pruned');
+  assert.ok(!registry.handles.has('formalin__insert_title'), 'stale prefixed name should be removed');
+  assert.ok(registry.handles.has('insert_title'), 'remaining solo connection should be unprefixed again');
+});
+
+test('describe_tools reports a connections[] shape at 2+ connections, flat shape at 0-1', async () => {
+  const t = new Tenant('t1', undefined, {});
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  const flatBefore: any = await (registry.handles.get('describe_tools') as any).handler({}, {});
+  const flatPayload = JSON.parse(flatBefore.content[0].text);
+  assert.ok('summary' in flatPayload && 'tools' in flatPayload, 'no connections: flat shape');
+
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }], 'form summary', 'formalin');
+  t.registerConnection('b', fakeSocket(() => {}));
+  t.updateConnectionManifest('b', [{ name: 'clear_canvas', description: 'd', params: {} }], 'paint summary', 'htmlpaint');
+  registry.sync();
+
+  const multi: any = await (registry.handles.get('describe_tools') as any).handler({}, {});
+  const payload = JSON.parse(multi.content[0].text);
+  assert.equal(payload.connections.length, 2);
+  const formalin = payload.connections.find((c: any) => c.label === 'formalin');
+  assert.equal(formalin.toolPrefix, 'formalin');
+  assert.equal(formalin.summary, 'form summary');
+  assert.ok(formalin.tools.some((tool: any) => tool.name === 'formalin__insert_title'));
+});
+
+test('call() to a connection id that no longer exists rejects cleanly', () => {
+  const t = new Tenant('t1', undefined, {});
+  assert.throws(() => t.call('missing', 'insert_title', {}), /no longer connected/);
 });

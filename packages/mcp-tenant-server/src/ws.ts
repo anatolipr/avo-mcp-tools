@@ -1,4 +1,5 @@
 import type { Server } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import type { ClientMessage } from './types.js';
 import { getOrCreateTenant, tenants } from './tenant.js';
@@ -21,7 +22,8 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
     const tenantId = requestedTenantId || 'default';
     const t = getOrCreateTenant(tenantId, initialSchema, initialValues);
 
-    t.wsClients.add(ws);
+    const connectionId = randomUUID();
+    t.registerConnection(connectionId, ws);
     ws.send(JSON.stringify({ type: 'init', schema: t.schema, state: t.store.snapshot() }));
 
     ws.on('message', (raw) => {
@@ -42,7 +44,11 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
       }
 
       if (msg.type === 'register_tools') {
-        t.setToolManifest(msg.tools, msg.summary);
+        t.updateConnectionManifest(connectionId, msg.tools, msg.summary, msg.appLabel);
+      }
+
+      if (msg.type === 'rename_connection') {
+        t.renameConnection(connectionId, msg.appLabel);
       }
 
       if (msg.type === 'call_result') {
@@ -52,7 +58,7 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
     });
 
     ws.on('close', () => {
-      t.wsClients.delete(ws);
+      t.removeConnection(connectionId);
     });
   });
 
