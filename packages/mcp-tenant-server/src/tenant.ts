@@ -61,6 +61,17 @@ export class Tenant<TSchema, TValues> {
   lastActivityAt: number;
   pendingCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   manifestToolRegistry?: { sync(): void };
+  /**
+   * Emits a 'connected' event with a TenantConnection the first time that
+   * connection registers a non-empty tool manifest (see
+   * updateConnectionManifest below) — i.e. the moment a pasted embed
+   * snippet has actually finished handshaking, not just opened a socket.
+   * wait_for_connection (js-bridge-mcp) blocks on this so an agent that
+   * just handed out get_embed_snippet can learn what connected and
+   * immediately follow up with describe_tools, instead of the connection
+   * happening silently in the background.
+   */
+  connectionBus: EventEmitter;
 
   /**
    * Back-compat view over the per-connection manifests below: single flat
@@ -87,6 +98,8 @@ export class Tenant<TSchema, TValues> {
     this.store = new Store(initialValues);
     this.submitBus = new EventEmitter();
     this.submitBus.setMaxListeners(0);
+    this.connectionBus = new EventEmitter();
+    this.connectionBus.setMaxListeners(0);
     this.wsClients = new Set();
     this.lastActivityAt = Date.now();
     this.store.onChange((field, value) => this.broadcastUpdate(field, value));
@@ -113,10 +126,12 @@ export class Tenant<TSchema, TValues> {
   updateConnectionManifest(id: string, manifest: ToolManifestEntry[], summary?: string, label?: string) {
     const conn = this.connections.get(id);
     if (!conn) return; // connection closed/unknown — ignore a late message
+    const isFirstRegister = conn.manifest.length === 0;
     conn.manifest = manifest;
     conn.summary = summary;
     conn.label = label;
     this.manifestToolRegistry?.sync();
+    if (isFirstRegister) this.connectionBus.emit('connected', conn);
   }
 
   /**
@@ -218,6 +233,8 @@ export class Tenant<TSchema, TValues> {
     this.submitBus.emit('submit', { __interrupted: true, __disposed: true, ...(this.store.snapshot() as object) } as SubmitPayload);
     this.store.dispose();
     this.submitBus.removeAllListeners();
+    this.connectionBus.emit('disposed');
+    this.connectionBus.removeAllListeners();
     for (const [, pending] of this.pendingCalls) {
       pending.reject(new Error('tenant disposed'));
     }

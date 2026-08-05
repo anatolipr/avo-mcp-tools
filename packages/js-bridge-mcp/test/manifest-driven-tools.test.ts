@@ -78,7 +78,7 @@ async function waitForTool(client: Client, name: string, timeoutMs = 3000) {
 test('a fresh session only has get_embed_snippet and describe_tools until a page pushes its manifest', async () => {
   const a = await connectClient();
   const names = await toolNames(a.client);
-  assert.deepEqual(names.sort(), ['describe_tools', 'get_embed_snippet']);
+  assert.deepEqual(names.sort(), ['describe_tools', 'get_embed_snippet', 'wait_for_connection']);
   await a.client.close();
 });
 
@@ -147,9 +147,33 @@ test('manifests are isolated per tenant — a second session with no manifest st
   await waitForTool(a.client, 'insert_title');
 
   const bNames = await toolNames(b.client);
-  assert.deepEqual(bNames.sort(), ['describe_tools', 'get_embed_snippet']);
+  assert.deepEqual(bNames.sort(), ['describe_tools', 'get_embed_snippet', 'wait_for_connection']);
 
   wsA.close();
   await a.client.close();
   await b.client.close();
+});
+
+test('wait_for_connection resolves once a page registers its manifest, with its label/summary/tools', async () => {
+  const a = await connectClient();
+  const tenantId = requireSessionId(a.transport);
+
+  const waitPromise = a.client.callTool({ name: 'wait_for_connection', arguments: {} });
+
+  const ws = await connectWs(tenantId);
+  ws.send(JSON.stringify({
+    type: 'register_tools',
+    tools: [{ name: 'insert_title', description: 'Sets the title', params: { title: { type: 'string' } } }],
+    summary: 'This page is a mind-mapping tool.',
+    appLabel: 'mindfoo',
+  }));
+
+  const result = await waitPromise;
+  const payload = JSON.parse(textOf(result));
+  assert.equal(payload.label, 'mindfoo');
+  assert.equal(payload.summary, 'This page is a mind-mapping tool.');
+  assert.ok(payload.tools.some((t: any) => t.name === 'insert_title'));
+
+  ws.close();
+  await a.client.close();
 });
