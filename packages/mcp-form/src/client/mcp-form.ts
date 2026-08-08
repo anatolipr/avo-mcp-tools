@@ -433,16 +433,27 @@ export class McpForm extends LitElement {
       ? location.pathname.slice('/t/'.length).split('/')[0]
       : '';
     const wsPath = tenantId ? `/ws?tenant=${encodeURIComponent(tenantId)}` : '/ws';
-    const ws = new WebSocket(`ws://${location.host}${wsPath}`);
+    const wsUrl = `ws://${location.host}${wsPath}`;
+    console.log(`[mcp-ws] connecting: ${wsUrl}`);
+    const ws = new WebSocket(wsUrl);
     this._ws = ws;
-    ws.onopen  = () => { this._connected = true; };
+    ws.onopen  = () => {
+      console.log('[mcp-ws] connected');
+      this._connected = true;
+    };
     ws.onclose = (event) => {
+      console.log(`[mcp-ws] disconnected: code=${event.code} reason=${event.reason || '(none)'} wasClean=${event.wasClean}`);
       this._connected = false;
       if (event.code === 4404) {
+        console.log('[mcp-ws] tenant unknown/expired (4404) — not retrying');
         return;
       }
       // simple reconnect after 2 s
+      console.log('[mcp-ws] retrying in 2s');
       setTimeout(() => this._connect(), 2000);
+    };
+    ws.onerror = () => {
+      console.log('[mcp-ws] socket error (see close event for details)');
     };
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data) as ServerMessage<FormDef, FieldValues>;

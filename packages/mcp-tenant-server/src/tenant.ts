@@ -4,6 +4,15 @@ import type { WebSocket } from 'ws';
 import type { SubmitPayload, ToolManifestEntry, CallMessage } from './types.js';
 
 /**
+ * How long Tenant.call waits for some connection to reappear on a tenant
+ * before giving up, when the connection it was targeting has already
+ * vanished (see Tenant.call). Set comfortably above the client's 2s
+ * reconnect retry (client-bridge.ts) so a single dropped-then-reconnected
+ * socket doesn't surface as a failed call.
+ */
+const RECONNECT_GRACE_MS = 4_000;
+
+/**
  * One WS connection's own tool manifest/summary/label, addressable
  * independently of other connections sharing the same tenant (e.g. two
  * browser tabs pasted the same embed snippet). See manifest-tools.ts for
@@ -60,18 +69,20 @@ export class Tenant<TSchema, TValues> {
   #legacySummary?: string;
   lastActivityAt: number;
   pendingCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-  manifestToolRegistry?: { sync(): void };
   /**
-   * Emits a 'connected' event with a TenantConnection the first time that
-   * connection registers a non-empty tool manifest (see
-   * updateConnectionManifest below) — i.e. the moment a pasted embed
-   * snippet has actually finished handshaking, not just opened a socket.
-   * wait_for_connection (js-bridge-mcp) blocks on this so an agent that
-   * just handed out get_embed_snippet can learn what connected and
-   * immediately follow up with describe_tools, instead of the connection
-   * happening silently in the background.
+   * One entry per MCP session currently bound to this tenant (each session
+   * builds its own McpServer + registry via registerFn — see register.ts).
+   * Under defaultTenantMode: 'shared' (http.ts), multiple concurrent MCP
+   * sessions legitimately share one tenant, so this can't be a single
+   * slot: overwriting it on each new session used to silently stop
+   * syncing every *other* session's tool list on the next WS manifest
+   * change, freezing their tools/list stale. addManifestToolRegistry /
+   * removeManifestToolRegistry (called from mcp.ts around session
+   * connect/close) keep this in sync with which sessions are live;
+   * syncManifestToolRegistries() (called wherever the single sync() call
+   * used to happen) fans out to all of them.
    */
-  connectionBus: EventEmitter;
+  #manifestToolRegistries = new Set<{ sync(): void }>();
 
   /**
    * Back-compat view over the per-connection manifests below: single flat
@@ -98,8 +109,6 @@ export class Tenant<TSchema, TValues> {
     this.store = new Store(initialValues);
     this.submitBus = new EventEmitter();
     this.submitBus.setMaxListeners(0);
-    this.connectionBus = new EventEmitter();
-    this.connectionBus.setMaxListeners(0);
     this.wsClients = new Set();
     this.lastActivityAt = Date.now();
     this.store.onChange((field, value) => this.broadcastUpdate(field, value));
@@ -115,7 +124,7 @@ export class Tenant<TSchema, TValues> {
   setToolManifest(manifest: ToolManifestEntry[], summary?: string) {
     this.#legacyManifest = manifest;
     this.#legacySummary = summary;
-    this.manifestToolRegistry?.sync();
+    this.syncManifestToolRegistries();
   }
 
   registerConnection(id: string, socket: WebSocket) {
@@ -126,12 +135,10 @@ export class Tenant<TSchema, TValues> {
   updateConnectionManifest(id: string, manifest: ToolManifestEntry[], summary?: string, label?: string) {
     const conn = this.connections.get(id);
     if (!conn) return; // connection closed/unknown — ignore a late message
-    const isFirstRegister = conn.manifest.length === 0;
     conn.manifest = manifest;
     conn.summary = summary;
     conn.label = label;
-    this.manifestToolRegistry?.sync();
-    if (isFirstRegister) this.connectionBus.emit('connected', conn);
+    this.syncManifestToolRegistries();
   }
 
   /**
@@ -145,24 +152,49 @@ export class Tenant<TSchema, TValues> {
     const conn = this.connections.get(id);
     if (!conn) return; // connection closed/unknown — ignore a late message
     conn.label = label;
-    this.manifestToolRegistry?.sync();
+    this.syncManifestToolRegistries();
   }
 
   removeConnection(id: string) {
     const conn = this.connections.get(id);
     if (conn) this.wsClients.delete(conn.socket);
     this.connections.delete(id);
-    this.manifestToolRegistry?.sync();
+    this.syncManifestToolRegistries();
+  }
+
+  addManifestToolRegistry(registry: { sync(): void }) {
+    this.#manifestToolRegistries.add(registry);
+    registry.sync();
+  }
+
+  removeManifestToolRegistry(registry: { sync(): void }) {
+    this.#manifestToolRegistries.delete(registry);
+  }
+
+  syncManifestToolRegistries() {
+    for (const registry of this.#manifestToolRegistries) registry.sync();
   }
 
   /**
-   * `connectionId` targets the call at one specific connection's socket
-   * (thrown if it's gone) — this is what lets multiple tabs share a tenant
-   * without racing on each other's responses. Passing `undefined`
-   * broadcasts to every socket on the tenant, same as the old behavior;
-   * kept for the legacy/no-connections test path.
+   * `connectionId` targets the call at one specific connection's socket —
+   * this is what lets multiple tabs share a tenant without racing on each
+   * other's responses. Passing `undefined` broadcasts to every socket on
+   * the tenant, same as the old behavior; kept for the legacy/no-connections
+   * test path.
+   *
+   * A reconnecting tab always gets a brand-new `connectionId` (see ws.ts),
+   * so a call already in flight when its socket drops has no old id to
+   * reconnect to. Rather than failing it immediately (the client's own 2s
+   * reconnect loop — see client-bridge.ts — would very likely have
+   * succeeded a moment later), we give it a short grace window to see if
+   * *some* connection reappears on this tenant before giving up. This only
+   * matters for the target-one-connection path: with a single-tab tenant
+   * (the overwhelming common case) any reappearing connection is the same
+   * tab; with multiple tabs the caller only reaches this path once the
+   * specific one it wanted has already vanished, so re-targeting the sole
+   * survivor (if there's exactly one) is still the best available guess.
    */
-  call(connectionId: string | undefined, name: string, args: unknown, timeoutMs = 10_000): Promise<unknown> {
+  call(connectionId: string | undefined, name: string, args: unknown, timeoutMs = 10_000, reconnectGraceMs = RECONNECT_GRACE_MS): Promise<unknown> {
     const id = randomUUID();
     const promise = new Promise<unknown>((resolve, reject) => {
       this.pendingCalls.set(id, { resolve, reject });
@@ -171,22 +203,57 @@ export class Tenant<TSchema, TValues> {
       }, timeoutMs);
       timer.unref();
     });
-    const payload: CallMessage = { type: 'call', id, name, args };
-    const raw = JSON.stringify(payload);
 
-    if (connectionId) {
-      const conn = this.connections.get(connectionId);
-      if (!conn) {
-        this.pendingCalls.delete(id);
-        throw new Error(`connection "${connectionId}" is no longer connected`);
+    const send = (targetConnectionId: string | undefined) => {
+      const payload: CallMessage = { type: 'call', id, name, args };
+      const raw = JSON.stringify(payload);
+
+      if (targetConnectionId) {
+        const conn = this.connections.get(targetConnectionId);
+        if (conn && conn.socket.readyState === conn.socket.OPEN) conn.socket.send(raw);
+      } else {
+        for (const client of this.wsClients) {
+          if (client.readyState === client.OPEN) client.send(raw);
+        }
       }
-      if (conn.socket.readyState === conn.socket.OPEN) conn.socket.send(raw);
-    } else {
-      for (const client of this.wsClients) {
-        if (client.readyState === client.OPEN) client.send(raw);
-      }
+    };
+
+    if (connectionId && !this.connections.has(connectionId)) {
+      this.waitForReconnect(reconnectGraceMs).then((revivedConnectionId) => {
+        const pending = this.pendingCalls.get(id);
+        if (!pending) return; // already timed out/resolved while we waited
+
+        if (!revivedConnectionId) {
+          this.pendingCalls.delete(id);
+          pending.reject(new Error(`connection "${connectionId}" is no longer connected`));
+          return;
+        }
+        send(revivedConnectionId);
+      });
+      return promise;
     }
+
+    send(connectionId);
     return promise;
+  }
+
+  /**
+   * Resolves with a live connection id once `this.connections` becomes
+   * non-empty again within `graceMs`, or `undefined` on timeout. Polls
+   * instead of hooking registerConnection directly to keep this
+   * self-contained and cheap for the rare/short-lived window it's used in.
+   */
+  private waitForReconnect(graceMs: number): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      const deadline = Date.now() + graceMs;
+      const poll = () => {
+        const [first] = this.connections.keys();
+        if (first) { resolve(first); return; }
+        if (Date.now() >= deadline) { resolve(undefined); return; }
+        setTimeout(poll, 250).unref();
+      };
+      poll();
+    });
   }
 
   resolveCall(id: string, result: unknown) {
@@ -233,8 +300,6 @@ export class Tenant<TSchema, TValues> {
     this.submitBus.emit('submit', { __interrupted: true, __disposed: true, ...(this.store.snapshot() as object) } as SubmitPayload);
     this.store.dispose();
     this.submitBus.removeAllListeners();
-    this.connectionBus.emit('disposed');
-    this.connectionBus.removeAllListeners();
     for (const [, pending] of this.pendingCalls) {
       pending.reject(new Error('tenant disposed'));
     }

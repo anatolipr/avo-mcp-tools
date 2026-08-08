@@ -338,7 +338,20 @@ test('describe_tools reports a connections[] shape at 2+ connections, flat shape
   assert.ok(formalin.tools.some((tool: any) => tool.name === 'formalin__insert_title'));
 });
 
-test('call() to a connection id that no longer exists rejects cleanly', () => {
+test('call() to a connection id that no longer exists rejects cleanly after the reconnect grace window', async () => {
   const t = new Tenant('t1', undefined, {});
-  assert.throws(() => t.call('missing', 'insert_title', {}), /no longer connected/);
+  await assert.rejects(() => t.call('missing', 'insert_title', {}, 10_000, 20), /no longer connected/);
+});
+
+test('call() to a connection id that no longer exists resolves against a connection that reconnects within the grace window', async () => {
+  const t = new Tenant('t1', undefined, {});
+  const socket = { readyState: 1, OPEN: 1, send: (raw: string) => {
+    const { id } = JSON.parse(raw);
+    setImmediate(() => t.resolveCall(id, 'ok'));
+  } } as any;
+
+  const callPromise = t.call('missing', 'insert_title', {}, 10_000, 200);
+  setTimeout(() => t.registerConnection('revived', socket), 50);
+
+  assert.equal(await callPromise, 'ok');
 });

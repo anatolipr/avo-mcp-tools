@@ -84,6 +84,7 @@ export function connectStateSocket<TSchema, TValues>(
 ) {
   let ws: WebSocket | undefined;
   let closedByCaller = false;
+  let reconnectAttempts = 0;
 
   const connect = () => {
     const tenantId = options.tenant ?? (location.pathname.startsWith('/t/')
@@ -93,13 +94,29 @@ export function connectStateSocket<TSchema, TValues>(
     const wsOrigin = options.serverUrl
       ? options.serverUrl.replace(/^http/, 'ws')
       : `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
-    ws = new WebSocket(`${wsOrigin}${wsPath}`);
+    const wsUrl = `${wsOrigin}${wsPath}`;
+    console.log(`[mcp-ws] connecting (attempt ${reconnectAttempts + 1}): ${wsUrl}`);
+    ws = new WebSocket(wsUrl);
 
-    ws.onopen = () => handlers.onConnect?.();
+    ws.onopen = () => {
+      console.log(`[mcp-ws] connected${reconnectAttempts > 0 ? ` after ${reconnectAttempts} reconnect attempt(s)` : ''}`);
+      reconnectAttempts = 0;
+      handlers.onConnect?.();
+    };
     ws.onclose = (event) => {
+      console.log(`[mcp-ws] disconnected: code=${event.code} reason=${event.reason || '(none)'} wasClean=${event.wasClean}`);
       handlers.onDisconnect?.();
-      if (closedByCaller || event.code === 4404) return;
+      if (closedByCaller) return;
+      if (event.code === 4404) {
+        console.log('[mcp-ws] tenant unknown/expired (4404) — not retrying');
+        return;
+      }
+      reconnectAttempts++;
+      console.log(`[mcp-ws] retrying in 2s (attempt ${reconnectAttempts + 1})`);
       setTimeout(connect, 2000);
+    };
+    ws.onerror = () => {
+      console.log('[mcp-ws] socket error (see close event for details)');
     };
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data) as ServerMessage<TSchema, TValues>;

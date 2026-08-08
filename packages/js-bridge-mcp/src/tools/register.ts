@@ -9,6 +9,12 @@ export function registerHelloTools(mcp: McpServer, tenant: () => Tenant<undefine
     mcp.tool(tool.name, tool.description, tool.schema, (args: any) => tool.handler(args, tenant, port));
   }
   const registry = createManifestToolRegistry(mcp, tenant);
-  tenant().manifestToolRegistry = registry;
-  registry.sync();
+  // addManifestToolRegistry syncs immediately and keeps this registry
+  // subscribed to future tenant.syncManifestToolRegistries() calls (see
+  // tenant.ts) — required under defaultTenantMode: 'shared', where
+  // multiple concurrent MCP sessions' McpServer/registry pairs can be
+  // bound to the same tenant at once and all need to stay in sync, not
+  // just whichever one connected last.
+  tenant().addManifestToolRegistry(registry);
+  mcp.server.onclose = () => tenant().removeManifestToolRegistry(registry);
 }

@@ -14,12 +14,6 @@ function textOf(result: Record<string, unknown>): string {
   return content[0]!.text;
 }
 
-function requireSessionId(transport: StreamableHTTPClientTransport): string {
-  const id = transport.sessionId;
-  if (!id) throw new Error('expected transport to have a sessionId');
-  return id;
-}
-
 before(async () => {
   serverProcess = spawn('npx', ['tsx', 'src/server.ts'], {
     cwd: new URL('..', import.meta.url).pathname,
@@ -78,13 +72,20 @@ async function waitForTool(client: Client, name: string, timeoutMs = 3000) {
 test('a fresh session only has get_embed_snippet and describe_tools until a page pushes its manifest', async () => {
   const a = await connectClient();
   const names = await toolNames(a.client);
-  assert.deepEqual(names.sort(), ['describe_tools', 'get_embed_snippet', 'wait_for_connection']);
+  assert.deepEqual(names.sort(), ['describe_tools', 'get_embed_snippet']);
   await a.client.close();
 });
 
 test('pushing a manifest over WS makes new named tools appear in tools/list, and calling one round-trips through the page', async () => {
   const a = await connectClient();
-  const tenantId = requireSessionId(a.transport);
+  // js-bridge-mcp runs with defaultTenantMode: 'shared' (src/server.ts) so
+  // that an MCP client reconnecting with no ?tenant= (observed with VS Code
+  // Copilot, which does this routinely) doesn't orphan an already-bridged
+  // browser tab by landing on a fresh empty tenant each time. That means an
+  // unpinned session's real tenant is 'default', not its own session id —
+  // get_embed_snippet (hello-tools.ts) reflects this by embedding
+  // tenant().id, which is 'default' here, not requireSessionId(a.transport).
+  const tenantId = 'default';
 
   const ws = await connectWs(tenantId);
   const manifest = [
@@ -114,7 +115,7 @@ test('pushing a manifest over WS makes new named tools appear in tools/list, and
 
 test('a manifest\'s summary is readable via describe_tools once registered', async () => {
   const a = await connectClient();
-  const tenantId = requireSessionId(a.transport);
+  const tenantId = 'default'; // see comment in the previous test — shared-tenant mode
 
   const ws = await connectWs(tenantId);
   ws.send(JSON.stringify({
@@ -134,46 +135,29 @@ test('a manifest\'s summary is readable via describe_tools once registered', asy
   await a.client.close();
 });
 
-test('manifests are isolated per tenant — a second session with no manifest still only sees get_embed_snippet', async () => {
+test('two unpinned MCP sessions share the default tenant — a manifest registered from one is visible to the other', async () => {
+  // This intentionally documents the opposite of what per-session-tenant
+  // isolation would give you: js-bridge-mcp runs with defaultTenantMode:
+  // 'shared' (see comment on the earlier WS tests) specifically so that a
+  // client reconnecting with no ?tenant= keeps landing on the same tenant
+  // as the browser tab that's already bridged there, instead of each
+  // reconnect minting a fresh empty one. The tradeoff is that two
+  // different unpinned agent sessions now see each other's tools rather
+  // than staying isolated — get_embed_snippet's description was updated
+  // to say so explicitly (hello-tools.ts).
   const a = await connectClient();
   const b = await connectClient();
 
-  const wsA = await connectWs(requireSessionId(a.transport));
+  const wsA = await connectWs('default');
   wsA.send(JSON.stringify({
     type: 'register_tools',
     tools: [{ name: 'insert_title', description: 'd', params: { title: { type: 'string' } } }],
   }));
 
   await waitForTool(a.client, 'insert_title');
-
-  const bNames = await toolNames(b.client);
-  assert.deepEqual(bNames.sort(), ['describe_tools', 'get_embed_snippet', 'wait_for_connection']);
+  await waitForTool(b.client, 'insert_title');
 
   wsA.close();
   await a.client.close();
   await b.client.close();
-});
-
-test('wait_for_connection resolves once a page registers its manifest, with its label/summary/tools', async () => {
-  const a = await connectClient();
-  const tenantId = requireSessionId(a.transport);
-
-  const waitPromise = a.client.callTool({ name: 'wait_for_connection', arguments: {} });
-
-  const ws = await connectWs(tenantId);
-  ws.send(JSON.stringify({
-    type: 'register_tools',
-    tools: [{ name: 'insert_title', description: 'Sets the title', params: { title: { type: 'string' } } }],
-    summary: 'This page is a mind-mapping tool.',
-    appLabel: 'mindfoo',
-  }));
-
-  const result = await waitPromise;
-  const payload = JSON.parse(textOf(result));
-  assert.equal(payload.label, 'mindfoo');
-  assert.equal(payload.summary, 'This page is a mind-mapping tool.');
-  assert.ok(payload.tools.some((t: any) => t.name === 'insert_title'));
-
-  ws.close();
-  await a.client.close();
 });

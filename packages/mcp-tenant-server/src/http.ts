@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { getOrCreateTenant, tenants } from './tenant.js';
+import { getOrCreateTenant } from './tenant.js';
 import { buildMcpServer, type RegisterToolsFn, type McpServerIdentity } from './mcp.js';
 
 const UPLOAD_DIR = path.join(os.tmpdir(), 'mcp-form-uploads');
@@ -21,9 +21,30 @@ export interface CreateHttpServerOptions<TSchema, TValues> {
   initialValues: TValues;
   identity: McpServerIdentity;
   registerFn: RegisterToolsFn<TSchema, TValues>;
+  /**
+   * Which tenant an MCP session with no ?tenant= param on its server URL
+   * lands on:
+   *
+   * - 'per-session' (default): a fresh randomUUID() tenant per session,
+   *   same as every session getting its own isolated state — what
+   *   mcp-form relies on so concurrent agents don't share form state
+   *   (see tenant-isolation.test.ts).
+   *
+   * - 'shared': every unpinned session lands on the single 'default'
+   *   tenant (same one the WS side and both packages' boot-time
+   *   getOrCreateTenant('default') call already use for plain browser
+   *   access). Appropriate when there's exactly one browser page bridged
+   *   per server and MCP clients aren't expected to pin a tenant
+   *   explicitly — some clients (observed with VS Code Copilot) open a
+   *   brand-new MCP session on every reconnect/idle DELETE cycle with no
+   *   ?tenant=, and under 'per-session' each such reconnect mints a new,
+   *   empty tenant that orphans whatever browser tab was already bridged
+   *   to the previous one.
+   */
+  defaultTenantMode?: 'per-session' | 'shared';
 }
 
-export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSchema, initialValues, identity, registerFn }: CreateHttpServerOptions<TSchema, TValues>) {
+export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSchema, initialValues, identity, registerFn, defaultTenantMode = 'per-session' }: CreateHttpServerOptions<TSchema, TValues>) {
   const getTenant = (id: string) => {
     const t = getOrCreateTenant(id, initialSchema, initialValues);
     t.touch();
@@ -43,21 +64,41 @@ export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSch
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
       if (req.method === 'POST' && !sessionId) {
-        const tenantId = randomUUID();
+        // An MCP client that wants a stable identity across reconnects (its
+        // own idle timeouts, extension host restarts, etc.) can always pin
+        // one explicitly by including ?tenant=<id> on its configured server
+        // URL — same convention the WS bridge already uses. Without that,
+        // which tenant the session lands on depends on defaultTenantMode
+        // (see CreateHttpServerOptions for the tradeoff).
+        //
+        // The MCP *session id* itself is always a fresh randomUUID() —
+        // sessionIdGenerator must stay unique per transport (the `sessions`
+        // map is keyed on it) so concurrent clients don't collide; only
+        // which *tenant* the session operates on varies by mode.
+        const requestedTenantId = url.searchParams.get('tenant');
+        const tenantId = requestedTenantId || (defaultTenantMode === 'shared' ? 'default' : randomUUID());
         const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => tenantId,
+          sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {
             sessions.set(id, transport);
-            getOrCreateTenant(id, initialSchema, initialValues);
-            console.error(`[mcp] session opened: ${id}`);
+            getOrCreateTenant(tenantId, initialSchema, initialValues);
+            console.error(`[mcp] session opened: ${id} (tenant=${tenantId})`);
           },
         });
         transport.onclose = () => {
+          // The transport closing only means this particular HTTP/SSE
+          // connection ended — it does NOT mean the tenant (and any
+          // browser tabs bridged to it over /ws) should be torn down.
+          // Disposing here used to force-close every connected browser
+          // tab the instant an MCP client reconnected/recycled its
+          // connection, even though the tenant itself was still healthy.
+          // Tenant disposal is now solely driven by the idle sweep (see
+          // startIdleSweep) or an explicit DELETE (below), so a tenant —
+          // and its live browser connections — survives MCP-side session
+          // churn as long as it keeps seeing activity from either side.
           if (transport.sessionId) {
             sessions.delete(transport.sessionId);
-            tenants.get(transport.sessionId)?.dispose();
-            tenants.delete(transport.sessionId);
-            console.error(`[mcp] session closed: ${transport.sessionId}`);
+            console.error(`[mcp] session detached: ${transport.sessionId}`);
           }
         };
         const mcpInstance = buildMcpServer(identity, tenantId, getTenant, port, registerFn);
@@ -68,14 +109,26 @@ export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSch
 
       if (sessionId && sessions.has(sessionId)) {
         if (req.method === 'DELETE') {
-          tenants.get(sessionId)?.dispose();
-          tenants.delete(sessionId);
-          await new Promise((resolve) => setImmediate(resolve));
+          // Mirrors transport.onclose above: a client-initiated DELETE ends
+          // *this* MCP session, but some clients (observed with Copilot)
+          // send it routinely between turns / on idle, not just on final
+          // teardown. Disposing the tenant here used to force-close every
+          // bridged browser tab and wipe its tool manifest on every such
+          // DELETE, which surfaced to the agent as tools vanishing
+          // ("Tool X not found") the moment it tried to call something
+          // right after a DELETE-triggered reconnect cycle. Tenant
+          // disposal is left to the idle sweep (see startIdleSweep) so
+          // browser state survives MCP-side session churn from either
+          // close path — the DELETE still reaches the transport below so
+          // its own session bookkeeping (and transport.onclose, which
+          // removes it from `sessions`) runs normally.
+          console.error(`[mcp] session closing (explicit DELETE): ${sessionId}`);
         }
         await sessions.get(sessionId)!.handleRequest(req, res);
         return;
       }
 
+      console.error(`[mcp] rejected ${req.method} for unknown session: ${sessionId ?? '(none)'}${url.searchParams.get('tenant') ? ` tenant=${url.searchParams.get('tenant')}` : ''}`);
       res.writeHead(404); res.end('Unknown session');
       return;
     }

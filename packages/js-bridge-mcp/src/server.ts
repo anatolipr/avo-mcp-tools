@@ -26,6 +26,13 @@ const httpServer = createHttpServer({
   initialValues: initialHelloState,
   identity: { name: 'js-bridge-mcp', version: '0.1.0' },
   registerFn: registerHelloTools,
+  // js-bridge-mcp typically bridges a single browser page per server; MCP
+  // clients aren't expected to pin ?tenant= themselves (some, like VS Code
+  // Copilot, open a fresh MCP session with no ?tenant= on every
+  // reconnect/idle DELETE cycle). Sharing the one 'default' tenant keeps
+  // every such session pointed at the same already-bridged browser tab
+  // instead of each reconnect minting a new, empty tenant.
+  defaultTenantMode: 'shared',
 });
 
 attachWebSocketServer(httpServer, PORT, undefined, initialHelloState);
