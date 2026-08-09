@@ -1,0 +1,11 @@
+import { chromium } from 'playwright';
+let browser = await chromium.launch();
+let context = await browser.newContext({ viewport: { width: 1000, height: 800 } });
+let page = await context.newPage();
+await page.goto('http://localhost:8799');
+await page.waitForFunction(() => Array.isArray(window.__mcpTools) && window.__mcpTools.length > 0, { timeout: 10000 });
+await page.waitForFunction(() => customElements.get('human-mcp-relay') !== undefined, { timeout: 10000 });
+await page.keyboard.down('Meta'); await page.keyboard.down('Shift'); await page.keyboard.press('A'); await page.keyboard.up('Shift'); await page.keyboard.up('Meta');
+await page.locator('human-mcp-relay textarea').first().waitFor({ state: 'visible' });
+await page.screenshot({ path: process.argv[2] });
+await browser.close();
