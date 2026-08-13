@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { applyPatch, parsePatch } from 'diff';
 import type { Sandbox } from '../sandbox.js';
 import type { ToolDef } from '../types.js';
 
@@ -87,6 +88,78 @@ export function buildFilesystemTools(sandbox: Sandbox): ToolDef[] {
         await fs.mkdir(path.dirname(file), { recursive: true });
         await fs.writeFile(file, args.content as string, 'utf8');
         return `wrote ${Buffer.byteLength(args.content as string, 'utf8')} bytes to ${sandbox.relative(file)}`;
+      },
+    },
+    {
+      name: 'write_files',
+      description: 'Writes (overwrites, or creates if missing) many text files in one call - a whole tree ' +
+        'at once instead of one write_file round-trip per file. Creates parent directories automatically. ' +
+        'Each entry OVERWRITES its whole file, same as write_file. Files are written in array order; if one ' +
+        'fails (e.g. a sandbox violation) the error names which entry it was and files written before it ' +
+        'are NOT rolled back - check the returned "written" list to see what succeeded.',
+      params: {
+        files: {
+          type: 'string',
+          description: 'JSON-encoded array of {"path": string, "content": string} objects, e.g. ' +
+            '\'[{"path":"src/a.ts","content":"..."},{"path":"src/b.ts","content":"..."}]\'',
+        },
+      },
+      example: { files: JSON.stringify([{ path: 'src/a.ts', content: 'export const a = 1;\n' }, { path: 'src/b.ts', content: 'export const b = 2;\n' }]) },
+      destructive: true,
+      fn: async (args) => {
+        let entries = parseFilesArg(args.files as string);
+        let written: string[] = [];
+        for (let i = 0; i < entries.length; i++) {
+          let entry = entries[i];
+          if (typeof entry.path !== 'string' || typeof entry.content !== 'string') {
+            throw new Error(`files[${i}] must have string "path" and "content" fields`);
+          }
+          let file: string;
+          try {
+            file = sandbox.resolve(entry.path);
+          } catch (err) {
+            throw new Error(`files[${i}] ("${entry.path}"): ${(err as Error).message}`);
+          }
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, entry.content, 'utf8');
+          written.push(sandbox.relative(file));
+        }
+        return { written, count: written.length };
+      },
+    },
+    {
+      name: 'apply_patch',
+      description: 'Applies a unified diff (as produced by `diff -u` or `git diff`) to one or more files ' +
+        'already in the sandbox. Supports multi-file patches (multiple "--- a/... +++ b/..." hunks in one ' +
+        'string). Paths in the patch headers are resolved relative to the sandbox root (a/, b/ prefixes are ' +
+        'stripped automatically). Fails the whole call if any hunk does not apply cleanly (no partial/fuzzy ' +
+        'apply) - re-read the current file content and regenerate the diff if context has drifted.',
+      params: {
+        patch: { type: 'string', description: 'Unified diff text, one or more files' },
+      },
+      example: { patch: '--- a/src/hello.js\n+++ b/src/hello.js\n@@ -1 +1 @@\n-console.log("hi");\n+console.log("hello");\n' },
+      destructive: true,
+      fn: async (args) => {
+        let patchText = args.patch as string;
+        let files = parsePatch(patchText);
+        if (files.length === 0) throw new Error('patch text did not contain any recognizable unified-diff hunks');
+        let applied: string[] = [];
+        for (let filePatch of files) {
+          let rawPath = filePatch.newFileName ?? filePatch.oldFileName;
+          if (!rawPath) throw new Error('a hunk in the patch is missing both old and new file names');
+          let relPath = stripDiffPrefix(rawPath);
+          let file = sandbox.resolve(relPath);
+          let original = existsSync(file) ? await fs.readFile(file, 'utf8') : '';
+          let patched = applyPatch(original, filePatch);
+          if (patched === false) {
+            throw new Error(`patch for "${relPath}" did not apply cleanly against the current file content ` +
+              '(context mismatch) - re-read the file and regenerate the diff');
+          }
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, patched, 'utf8');
+          applied.push(sandbox.relative(file));
+        }
+        return { applied, count: applied.length };
       },
     },
     {
@@ -188,6 +261,23 @@ export function buildFilesystemTools(sandbox: Sandbox): ToolDef[] {
       },
     },
   ];
+}
+
+function parseFilesArg(raw: string): { path: string; content: string }[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`"files" is not valid JSON: ${(err as Error).message}`);
+  }
+  if (!Array.isArray(parsed)) throw new Error('"files" must be a JSON array of {path, content} objects');
+  return parsed as { path: string; content: string }[];
+}
+
+// Strips git-style "a/"/"b/" diff prefixes so patch headers written the way
+// `git diff`/`diff -u` emit them ("a/src/foo.ts") resolve to the real path.
+function stripDiffPrefix(p: string): string {
+  return p.replace(/^[ab]\//, '');
 }
 
 function globToRegex(pattern: string): RegExp {

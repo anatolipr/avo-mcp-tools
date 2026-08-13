@@ -23,6 +23,8 @@ set and its safety envelope are identical either way.
 | `list_dir` | List entries in a directory, optionally recursive |
 | `read_file` | Read a text file (paginated via `offset`) |
 | `write_file` | Overwrite/create a text file |
+| `write_files` | Overwrite/create many text files in one call (a whole tree at once) |
+| `apply_patch` | Apply a unified diff (`diff -u`/`git diff` style) to one or more files |
 | `mkdir` | Create a directory (like `mkdir -p`) |
 | `move_path` | Move/rename a file or directory |
 | `delete_path` | Delete a file or directory (irreversible) |
@@ -43,7 +45,7 @@ set and its safety envelope are identical either way.
   binaries). It throws immediately unless the process was started with
   `--allow-exec`. Output is capped (100 KB) and time-limited (default 60s,
   max 10 min) so a hanging/runaway command can't wedge the session.
-- **`delete_path`/`move_path`/`write_file`/`run_command`** are flagged
+- **`delete_path`/`move_path`/`write_file`/`write_files`/`apply_patch`/`run_command`** are flagged
   `destructive: true` in the tool manifest so any UI (or client policy) can
   surface a confirmation step before calling them.
 - Every session's first message to the agent (the MCP `instructions` field,
