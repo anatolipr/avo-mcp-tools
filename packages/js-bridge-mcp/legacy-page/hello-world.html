@@ -40,12 +40,63 @@
       return 'main content updated';
     }
 
+    // run_transient: a pilot for letting an agent define a one-off JS
+    // function for THIS session only, run it once, and get the result -
+    // instead of either (a) hand-authoring a new fixed tool for every
+    // possible aggregate/computation ahead of time, or (b) making the
+    // agent do it itself in-context, which gets unreliable for anything
+    // past simple sums once the input list gets long (averages, mixed-unit
+    // parsing, multi-step filters - LLM-does-arithmetic-in-its-head degrades
+    // with scale even though it looks confident either way).
+    //
+    // Deliberately NOT persisted anywhere (not localStorage, not appended
+    // to window.__mcpTools) and NOT registered as a new MCP tool name - it
+    // compiles and calls `code` synchronously inside this one call and
+    // discards it immediately after. Two reasons this shape, not a new
+    // tool per definition:
+    //   1. The bridge (see client/main.ts) reads window.__mcpTools ONCE at
+    //      connect and does not poll, so a page tool array mutated
+    //      mid-session wouldn't reach the CURRENT session's MCP client
+    //      without a reconnect anyway.
+    //   2. Even when the server-side manifest sync (see
+    //      mcp-tenant-server/src/manifest-tools.ts) picks up a changed
+    //      manifest and fires tools/list_changed, several real MCP clients
+    //      (Claude Code included, see js-bridge-mcp's README) fetch
+    //      tools/list once at initialize and never re-poll on that
+    //      notification - a "new tool appears mid-session" design is
+    //      fragile per-client in a way a single fixed dispatcher isn't.
+    //
+    // Still full code execution in this page's origin under the hood
+    // (`new Function` is not meaningfully safer than `eval`) - session-
+    // scoping only bounds PERSISTENCE risk (nothing survives to the next
+    // page load), not capability. Fine for a page with no auth/secrets
+    // like this demo; any page carrying real session state should treat
+    // enabling this tool as a deliberate, visible grant, not a default.
+    // The call itself (name, code string, args, result) is an ordinary
+    // logged MCP tool call/result, same as any other tool - so even though
+    // the code is agent-authored, what ran is auditable after the fact.
+    function runTransient({ code, args }) {
+      let parsedArgs;
+      try {
+        parsedArgs = typeof args === 'string' && args ? JSON.parse(args) : undefined;
+      } catch (e) {
+        throw new Error(`args must be a JSON string (or omitted) — failed to parse: ${e.message}`);
+      }
+      // eslint-disable-next-line no-new-func -- deliberate: this tool's whole
+      // purpose is running agent-authored code for one call, see comment above.
+      const fn = new Function('args', 'document', 'window', code);
+      const result = fn(parsedArgs, document, window);
+      return typeof result === 'string' ? result : JSON.stringify(result);
+    }
+
     // Optional: shared context read once alongside window.__mcpTools below.
     // Surfaced to agents via the describe_tools tool the bridge always
     // registers — use it for cross-tool rules or domain concepts that
     // don't belong in any single tool's own description.
     window.__mcpSummary = 'This is a bare demo page with an <h1> title and a <main> body. ' +
-      'insert_title and insert_main are independent — no ordering requirement between them.';
+      'insert_title and insert_main are independent — no ordering requirement between them. ' +
+      'run_transient is a pilot tool for defining a throwaway JS computation for this session ' +
+      'only — see its own description for when to reach for it instead of insert_title/insert_main.';
 
     // window.__mcpTools is the contract the injected bridge script looks
     // for: an array of { name, description, params, example, fn } — real
@@ -65,6 +116,30 @@
         params: { main: { type: 'string', description: 'New body text' } },
         example: { main: 'Here is your daily summary...' },
         fn: insertMain,
+      },
+      {
+        name: 'run_transient',
+        description: 'Compiles and immediately runs a one-off JS function body for THIS session ' +
+          'only, then discards it — nothing persists to the next page load or the next MCP session. ' +
+          'Use this instead of doing arithmetic/aggregation yourself in-context when the input is ' +
+          'large or the computation is more than a simple sum (averages, min/max over many items, ' +
+          'multi-step filtering, parsing many mixed-format values) — an LLM doing that kind of ' +
+          'reduction over a long list in its head gets unreliable with scale even though the answer ' +
+          'looks confident either way; a few lines of real JS is deterministic. Do NOT use this for ' +
+          'anything a fixed tool already does (insert_title/insert_main here) — those are cheaper ' +
+          'and don\'t require writing/debugging code. "code" is a JS function BODY (not a full ' +
+          'function declaration): it receives (args, document, window) and its RETURN VALUE becomes ' +
+          'the tool result — e.g. "return args.numbers.reduce((a,b) => a+b, 0) / args.numbers.length" ' +
+          'for an average. "args" is a JSON string (or omit it) matching whatever shape your code ' +
+          'expects — encode the data to operate on there rather than re-fetching it inside code. ' +
+          'Full same-origin DOM/window access, same as any other tool on this page — do not treat it ' +
+          'as sandboxed.',
+        params: {
+          code: { type: 'string', description: 'JS function body; receives (args, document, window), return value becomes the result' },
+          args: { type: 'string', description: 'JSON string passed as `args` to code; omit if code takes no input', optional: true },
+        },
+        example: { code: 'return args.values.reduce((a, b) => a + b, 0) / args.values.length;', args: '{"values":[12,18,9,21]}' },
+        fn: runTransient,
       },
     ];
   </script>

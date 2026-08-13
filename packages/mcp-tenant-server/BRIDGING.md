@@ -129,7 +129,11 @@ Each entry in `window.__mcpTools`:
   what it does, any preconditions ("call X first"), and side effects. For
   calibration, look at `get_embed_snippet`'s description in
   `packages/js-bridge-mcp/src/tools/hello-tools.ts` — it explains not just
-  what the tool returns but what to do with the result and why.
+  what the tool returns but what to do with the result and why. **If you add
+  a `run_transient`-style tool (see below), this bar matters even more than
+  usual** — a vague description gets silently ignored by the calling agent,
+  which just falls back to doing the computation badly in-context instead,
+  and nothing about that failure is visible to anyone.
 - **`params`** — a flat object. Each value is `{ type, description?, optional? }`
   where `type` is `"string"`, `"number"`, or `"boolean"`. **No nested objects
   or arrays** — the server's JSON→zod converter only supports these three
@@ -146,6 +150,50 @@ Each entry in `window.__mcpTools`:
   server only ever sees `name`/`description`/`params`/`example`, and dispatches
   calls back to the browser by `name`, which the bridge resolves against its
   own local copy of `window.__mcpTools`.
+
+## Optional: `run_transient` for one-off computations
+
+Consider adding this one alongside your page's regular fixed tools whenever
+the page exposes any kind of list/collection an agent might need to
+*aggregate* over (sums, averages, min/max, multi-step filters) — durations,
+prices, temperatures, row counts, anything numeric or otherwise reducible.
+See `packages/js-bridge-mcp/legacy-page/hello-world.html` (`runTransient`)
+for the full worked pilot, and `packages/js-bridge-mcp/README.md`'s
+"Optional: `run_transient` for one-off computations" section for the
+complete rationale and security tradeoffs (still real code execution in the
+page's origin — session-scoped, not sandboxed). Short version: it compiles
+and immediately runs an agent-authored JS function body once, for the
+current session only, and discards it — no persistence, no new tool
+registration.
+
+**If you add this tool, its `description` is the entire mechanism by which
+an agent knows to reach for it.** There is no other signal. An agent with no
+`run_transient` tool in front of it will happily sum/average/max a list in
+its head and report a confident, wrong number — that failure is silent, it
+does not throw or flag itself, and nobody will notice until the number is
+visibly off. If `run_transient` exists but its description doesn't make the
+"use me for this" case unmistakable, you get the exact same silent failure
+back, just with an unused tool sitting next to it. So the description MUST,
+explicitly:
+
+1. **State which situations call for it**, concretely — "large lists",
+   "averages/min/max/multi-step aggregation", not just "run JS". Naming the
+   specific domain data this page has (e.g. "durations", "line items") beats
+   a generic description every time.
+2. **State when NOT to use it** — never for something a fixed tool already
+   does; never as a first resort for a handful of items an agent can just
+   read and compare directly.
+3. **Explain the exact calling contract** — `code` is a function *body*
+   (not a declaration), it receives `(args, document, window)`, and its
+   *return value* becomes the result. Agents will get this wrong (write a
+   full `function(){}` wrapper, forget `return`, expect console output
+   instead of a return value) if the description doesn't spell it out with
+   an example, which is why `example` on this entry matters as much as the
+   description itself.
+
+Copy the pilot's description in `hello-world.html` as the floor, not a
+ceiling — adapt the "use this for" language to your page's actual data
+shape (see the `run_transient` entry there for the exact wording used).
 
 ## The `describe_tools` tool
 
@@ -258,3 +306,12 @@ Before telling the user the bridge is ready:
    prefixed tools and confirm only the intended tab updates. Close one tab
    and confirm `describe_tools` reports a single connection again with that
    connection's tools reachable unprefixed.
+6. If you added `run_transient`: don't just call it yourself with a
+   correct, pre-written `code` string — that only proves the dispatch
+   mechanics work. Separately confirm the *description* actually does its
+   job: ask a fresh agent (or yourself, reading only `describe_tools`'
+   output cold) to compute some aggregate over the page's real data with no
+   other hints, and check that it reaches for `run_transient` unprompted
+   rather than trying to eyeball the answer in-context. If it doesn't,
+   the description is the bug — strengthen it per the "Optional:
+   `run_transient`" section above, don't just move on.

@@ -218,6 +218,70 @@ Run this repo's copy of it via `npm run start:static` (see "Run it" above),
 or drop the equivalent markup into any other project's page — nothing here
 depends on this package's build tooling.
 
+### Optional: `run_transient` for one-off computations
+
+A page can optionally define one more tool, alongside its regular fixed
+ones, that lets an agent write and immediately run a throwaway JS
+computation for the current session only — see `legacy-page/hello-world.html`
+for the full worked pilot (`runTransient` + its manifest entry). The
+motivating case: a page exposes some data (e.g. a big list of numbers,
+durations, or other values via a `get_*` tool), and the agent needs an
+aggregate over it — sum, average, max/min, a multi-step filter. Doing that
+arithmetic itself, in-context, token by token, gets unreliable as the list
+grows — it produces a plausible-looking wrong number with no error signal.
+Real JS run against the real data is deterministic.
+
+```js
+function runTransient({ code, args }) {
+  const parsedArgs = typeof args === 'string' && args ? JSON.parse(args) : undefined;
+  // eslint-disable-next-line no-new-func -- deliberate, see hello-world.html for the full rationale
+  const fn = new Function('args', 'document', 'window', code);
+  const result = fn(parsedArgs, document, window);
+  return typeof result === 'string' ? result : JSON.stringify(result);
+}
+
+window.__mcpTools.push({
+  name: 'run_transient',
+  description: '...(see hello-world.html for the bar to hit — must state clearly this is ' +
+    'for large/complex computations only, not a replacement for fixed tools, and that "code" ' +
+    'is a function BODY whose return value becomes the result)',
+  params: {
+    code: { type: 'string', description: 'JS function body; receives (args, document, window), return value becomes the result' },
+    args: { type: 'string', description: 'JSON string passed as `args`; omit if code takes no input', optional: true },
+  },
+  fn: runTransient,
+});
+```
+
+Deliberately **not** a new registered MCP tool per definition, and
+**not** persisted anywhere (not `localStorage`, not appended to
+`window.__mcpTools`) — each call compiles `code`, runs it once, and
+discards it:
+
+- The bridge reads `window.__mcpTools` once at connect and does not poll
+  (see "Common mistakes" above) — a page tool array mutated mid-session
+  wouldn't reach the *current* session's MCP client without a reconnect
+  anyway, so "register a new tool name per definition" doesn't reliably
+  work today even where the server-side sync supports it in principle.
+- Persisting agent-authored code across page loads is a materially
+  different, larger risk than running it once in the current tab: it turns
+  into arbitrary code that runs automatically on every future load with no
+  review step. Keep it session-scoped; if a computation turns out to be
+  worth reusing, promote it to a normal hand-authored, reviewed tool in the
+  page's own source instead of auto-persisting what the agent wrote.
+
+**This is still full code execution in the page's own origin** —
+`new Function` is not meaningfully safer than `eval`; session-scoping
+bounds *persistence*, not *capability*. Fine for a page with no
+auth/secrets (like the demo page here). A page carrying real session state,
+cookies, or API access should treat adding this tool as a deliberate,
+visible grant — document it clearly in `window.__mcpSummary` — not a
+default to copy onto every bridged page. The call itself (tool name, the
+`code` string, `args`, and the result) is an ordinary logged MCP
+call/result like any other tool call, so even though the code is
+agent-authored, what actually ran is auditable after the fact from the
+session transcript.
+
 ### Common mistakes
 
 - Positional args instead of one args object (`fn({ rowId })`, not
