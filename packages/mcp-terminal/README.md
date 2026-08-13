@@ -21,10 +21,12 @@ set and its safety envelope are identical either way.
 | Tool | Description |
 |---|---|
 | `list_dir` | List entries in a directory, optionally recursive |
+| `stat` | Check whether a path exists and get its type/size/mtime, without reading it |
 | `read_file` | Read a text file (paginated via `offset`) |
+| `read_files` | Read many text files in one call, given a list of paths |
 | `write_file` | Overwrite/create a text file |
 | `write_files` | Overwrite/create many text files in one call (a whole tree at once) |
-| `apply_patch` | Apply a unified diff (`diff -u`/`git diff` style) to one or more files |
+| `apply_patch` | Apply a unified diff (`diff -u`/`git diff` style) to one or more files. Good for small, precisely-counted hunks; for large or repeatedly-failing patches, fall back to `read_file` + `write_file` with the full new content instead of hand-counting hunk lines |
 | `mkdir` | Create a directory (like `mkdir -p`) |
 | `move_path` | Move/rename a file or directory |
 | `delete_path` | Delete a file or directory (irreversible) |

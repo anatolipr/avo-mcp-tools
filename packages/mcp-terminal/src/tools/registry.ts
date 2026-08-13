@@ -27,8 +27,8 @@ export class ToolRegistry {
       (runCommandOpts.enabled
         ? 'run_command is ENABLED for this session.'
         : 'run_command is DISABLED for this session (started without --allow-exec) - every call to it will throw; ' +
-          'file tools (list_dir/read_file/write_file/write_files/apply_patch/mkdir/move_path/delete_path/' +
-          'find_files/grep) still work.') +
+          'file tools (list_dir/stat/read_file/read_files/write_file/write_files/apply_patch/mkdir/' +
+          'move_path/delete_path/find_files/grep) still work.') +
       ' Prefer the specific tool over run_command when one exists (e.g. read_file over "cat", find_files ' +
       'over "find", list_dir over "ls") - it is cheaper and returns structured data instead of raw text ' +
       'you have to parse. Reach for run_command for things with no dedicated tool: installing dependencies, ' +

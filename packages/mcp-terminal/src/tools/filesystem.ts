@@ -7,6 +7,7 @@ import type { ToolDef } from '../types.js';
 
 const MAX_READ_BYTES = 200_000; // ~ a couple thousand lines of code; big enough for source files, small enough to not blow out a chat context
 const MAX_FIND_RESULTS = 500;
+const MAX_BULK_READ_FILES = 50;
 
 // Directories that get skipped by default in find/grep/list_dir(recursive) -
 // crawling into these is almost never what an agent wants and node_modules
@@ -38,6 +39,28 @@ export function buildFilesystemTools(sandbox: Sandbox): ToolDef[] {
       },
     },
     {
+      name: 'stat',
+      description: 'Checks whether a path exists and reports its type (file/dir/symlink), size in bytes ' +
+        '(files only), and modified time, without reading its content. Cheaper than list_dir or read_file ' +
+        'when you only need to know whether something exists before writing/moving/deleting it. Does not ' +
+        'throw for a missing path - check the "exists" field instead.',
+      params: { path: { type: 'string', description: 'Path to check, relative to sandbox root' } },
+      example: { path: 'src/index.ts' },
+      fn: async (args) => {
+        let target = sandbox.resolve(args.path as string);
+        let st = await fs.lstat(target).catch(() => null);
+        if (!st) return { path: sandbox.relative(target), exists: false };
+        let type = st.isDirectory() ? 'dir' : st.isSymbolicLink() ? 'symlink' : 'file';
+        return {
+          path: sandbox.relative(target),
+          exists: true,
+          type,
+          size: type === 'file' ? st.size : undefined,
+          mtime: st.mtime.toISOString(),
+        };
+      },
+    },
+    {
       name: 'read_file',
       description: `Reads a text file's contents. Returns up to ${MAX_READ_BYTES} bytes starting at ` +
         '"offset" (default 0); if the file is larger, the result is marked truncated and you should ' +
@@ -49,27 +72,45 @@ export function buildFilesystemTools(sandbox: Sandbox): ToolDef[] {
       example: { path: 'src/index.ts' },
       fn: async (args) => {
         let file = sandbox.resolve(args.path as string);
-        let stat = await fs.stat(file).catch(() => null);
-        if (!stat) throw new Error(`no such file: "${args.path}"`);
-        if (stat.isDirectory()) throw new Error(`"${args.path}" is a directory - use list_dir instead`);
         let offset = Number(args.offset) || 0;
-        let fh = await fs.open(file, 'r');
-        try {
-          let buf = Buffer.alloc(Math.min(MAX_READ_BYTES, Math.max(0, stat.size - offset)));
-          let { bytesRead } = await fh.read(buf, 0, buf.length, offset);
-          let text = buf.subarray(0, bytesRead).toString('utf8');
-          let truncated = offset + bytesRead < stat.size;
-          return {
-            path: sandbox.relative(file),
-            size: stat.size,
-            offset,
-            bytesRead,
-            truncated,
-            content: truncated ? text + truncateNote(stat.size) : text,
-          };
-        } finally {
-          await fh.close();
+        return readOneFile(file, sandbox, offset);
+      },
+    },
+    {
+      name: 'read_files',
+      description: 'Reads many text files in one call - a whole set of files at once instead of one ' +
+        `read_file round-trip per file. Each file is capped at ${MAX_READ_BYTES} bytes starting at offset ` +
+        `0 (use read_file with an offset if one is truncated). Reads up to ${MAX_BULK_READ_FILES} paths per ` +
+        'call. Results are returned in the same order as the input paths; if one path fails (e.g. missing ' +
+        'file or sandbox violation) its entry contains an "error" field instead of "content", and the rest ' +
+        'of the paths are still read.',
+      params: {
+        paths: {
+          type: 'string',
+          description: 'JSON-encoded array of file path strings, relative to sandbox root, e.g. ' +
+            '\'["src/a.ts","src/b.ts"]\'',
+        },
+      },
+      example: { paths: JSON.stringify(['src/a.ts', 'src/b.ts']) },
+      fn: async (args) => {
+        let paths = parsePathsArg(args.paths as string);
+        if (paths.length > MAX_BULK_READ_FILES) {
+          throw new Error(`"paths" has ${paths.length} entries, max is ${MAX_BULK_READ_FILES} per call`);
         }
+        let results: Array<Record<string, unknown>> = [];
+        for (let p of paths) {
+          if (typeof p !== 'string') {
+            results.push({ path: p, error: '"paths" entries must be strings' });
+            continue;
+          }
+          try {
+            let file = sandbox.resolve(p);
+            results.push(await readOneFile(file, sandbox, 0));
+          } catch (err) {
+            results.push({ path: p, error: (err as Error).message });
+          }
+        }
+        return { files: results, count: results.length };
       },
     },
     {
@@ -133,7 +174,14 @@ export function buildFilesystemTools(sandbox: Sandbox): ToolDef[] {
         'already in the sandbox. Supports multi-file patches (multiple "--- a/... +++ b/..." hunks in one ' +
         'string). Paths in the patch headers are resolved relative to the sandbox root (a/, b/ prefixes are ' +
         'stripped automatically). Fails the whole call if any hunk does not apply cleanly (no partial/fuzzy ' +
-        'apply) - re-read the current file content and regenerate the diff if context has drifted.',
+        'apply) - re-read the current file content and regenerate the diff if context has drifted. Hunk line ' +
+        'counts (the "@@ -a,b +c,d @@" numbers and the count of context/+/- lines) are validated strictly, so ' +
+        'hand-written hunks with more than ~10-15 changed lines - especially with nested braces/strings - ' +
+        'commonly miscount and fail with an "Unknown line" error that looks like a tool bug but is just a ' +
+        'malformed hunk. If a large insertion fails more than once, stop hand-counting: use read_file to get ' +
+        'the current content, construct the new full content yourself, and call write_file (or write_files) ' +
+        'instead - then verify with read_file or grep rather than assuming it applied. Prefer apply_patch for ' +
+        'small, precisely-counted edits; fall back to write_file for large or repeatedly-failing patches.',
       params: {
         patch: { type: 'string', description: 'Unified diff text, one or more files' },
       },
@@ -249,7 +297,7 @@ export function buildFilesystemTools(sandbox: Sandbox): ToolDef[] {
           let stat = await fs.stat(entryPath).catch(() => null);
           if (!stat || !stat.isFile() || stat.size > MAX_READ_BYTES) return true;
           let text = await fs.readFile(entryPath, 'utf8').catch(() => null);
-          if (text === null || text.includes(' ')) return true; // skip binary
+          if (text === null || text.includes('\0')) return true; // skip binary
           let lines = text.split('\n');
           for (let i = 0; i < lines.length && results.length < MAX_FIND_RESULTS; i++) {
             let hit = pattern ? pattern.test(lines[i]) : lines[i].includes(query);
@@ -272,6 +320,40 @@ function parseFilesArg(raw: string): { path: string; content: string }[] {
   }
   if (!Array.isArray(parsed)) throw new Error('"files" must be a JSON array of {path, content} objects');
   return parsed as { path: string; content: string }[];
+}
+
+function parsePathsArg(raw: string): unknown[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`"paths" is not valid JSON: ${(err as Error).message}`);
+  }
+  if (!Array.isArray(parsed)) throw new Error('"paths" must be a JSON array of file path strings');
+  return parsed;
+}
+
+async function readOneFile(file: string, sandbox: Sandbox, offset: number) {
+  let stat = await fs.stat(file).catch(() => null);
+  if (!stat) throw new Error(`no such file: "${sandbox.relative(file)}"`);
+  if (stat.isDirectory()) throw new Error(`"${sandbox.relative(file)}" is a directory - use list_dir instead`);
+  let fh = await fs.open(file, 'r');
+  try {
+    let buf = Buffer.alloc(Math.min(MAX_READ_BYTES, Math.max(0, stat.size - offset)));
+    let { bytesRead } = await fh.read(buf, 0, buf.length, offset);
+    let text = buf.subarray(0, bytesRead).toString('utf8');
+    let truncated = offset + bytesRead < stat.size;
+    return {
+      path: sandbox.relative(file),
+      size: stat.size,
+      offset,
+      bytesRead,
+      truncated,
+      content: truncated ? text + truncateNote(stat.size) : text,
+    };
+  } finally {
+    await fh.close();
+  }
 }
 
 // Strips git-style "a/"/"b/" diff prefixes so patch headers written the way
