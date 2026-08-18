@@ -81,6 +81,7 @@ export class DetailPanel extends LitElement {
   updated(changed: Map<string, unknown>) {
     if (changed.has('selected') && this.selected) {
       this.#load();
+      this.scrollTop = 0;
     }
   }
 
@@ -88,6 +89,9 @@ export class DetailPanel extends LitElement {
     const { table, id } = this.selected!;
     const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}`);
     this._doc = res.ok ? ((await res.json()) as EntryDetail) : null;
+    await this.updateComplete;
+    this.shadowRoot?.querySelector('.markdown-body')?.scrollTo(0, 0);
+    this.shadowRoot?.querySelector('pre')?.scrollTo(0, 0);
   }
 
   #copyPath() {

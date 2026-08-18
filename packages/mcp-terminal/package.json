@@ -1,6 +1,6 @@
 {
   "name": "avo-mcp-terminal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Sandboxed filesystem/terminal tools for agents, exposed both as a real MCP stdio server and as a human-relay TUI (copy/paste bridge) for agents with no direct tool access.",
   "repository": {

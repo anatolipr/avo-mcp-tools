@@ -30,6 +30,18 @@ to write one for a new page.
 
 ## Run it
 
+### Via npx
+
+```bash
+npx js-bridge-mcp
+```
+
+Starts the MCP + WS + `main.js` server on port 8766. Point an MCP client at
+`http://localhost:8766/mcp`, then serve `legacy-page/hello-world.html` (or
+your own page) with any static file server.
+
+### From this repo
+
 ```bash
 npm run build        # bundle src/client/main.ts -> dist/client/main.js
 npm run start:mcp     # MCP + WS + main.js server, port 8766

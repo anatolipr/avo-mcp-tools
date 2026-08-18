@@ -18,6 +18,21 @@ root for the full design plan.
 
 ## Run
 
+### Via npx
+
+No install needed — runs the published package directly:
+
+```sh
+npx mcp-memory-bucket
+# or, with the flags described below:
+npx mcp-memory-bucket --memory-dir /path/to/dir
+```
+
+This is the simplest way to point an MCP client at a memory bucket
+without cloning this repo.
+
+### From source
+
 ```sh
 npm install
 npm run build
@@ -28,6 +43,30 @@ Starts a stateless StreamableHTTP MCP server at `http://localhost:8767/mcp`
 (override with `PORT`). This is a long-lived process, not a one-shot CLI —
 the SQLite cache is kept current by a file watcher for as long as the
 server runs.
+
+### How the cache stays fresh
+
+The cache is a single SQLite file, `.memory-bucket-cache.sqlite`, written
+next to `memory-bucket.config.json` in the base directory (cwd by default,
+or `MEMORY_BUCKET_DIR`/`--memory-dir` — see Configuration below). It's a
+scan cache, not the source of truth — the markdown files on disk always
+are, and the cache can be safely deleted; it's rebuilt on next startup.
+
+- **On startup**, every configured root is fully walked and each file is
+  upserted into the cache, keyed by mtime — a file whose mtime hasn't
+  changed since it was last cached is skipped, so restarting is cheap
+  even with a large root.
+- **While running**, each root is watched (via `chokidar`) for `add`,
+  `change`, and `unlink` events on matching files, and the cache is
+  updated incrementally as they happen — no polling, no manual reindex.
+  Only `SKILL.md` files count for skill roots; any `.md` file counts for
+  memory roots. The watcher only looks 10 directories deep. A rename
+  arrives as a delete-then-add, not a single rename event.
+- **Adding a root** (via the web UI, or a `skill_sources`/`memory_sources`
+  entry present at startup) triggers a scan of just that root, not a
+  full rescan of every root already cached.
+- **Removing a root** (via the web UI) drops its rows from the cache and
+  search index immediately — it never touches files on disk.
 
 The same process also serves a browser UI at `http://localhost:8767/` for
 searching/filtering skills and memory docs by tag, root, status, owner,

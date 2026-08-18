@@ -57,6 +57,19 @@ set and its safety envelope are identical either way.
 
 ## Run it
 
+### Via npx
+
+Direct MCP (stdio) only — point an MCP client at this command:
+
+```bash
+npx avo-mcp-terminal --dir ./my-project --allow-exec
+```
+
+(Relay mode isn't part of the published package yet — run it from a clone
+of this repo, below.)
+
+### From this repo
+
 ```bash
 npm install
 

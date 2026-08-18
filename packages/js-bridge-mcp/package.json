@@ -1,6 +1,6 @@
 {
   "name": "js-bridge-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Generic bridge: exposes MCP tools discovered from a connected page's own JSON tool manifest, dispatched over a cross-origin WebSocket. Ships a hello-world example page under legacy-page/.",
   "repository": {
