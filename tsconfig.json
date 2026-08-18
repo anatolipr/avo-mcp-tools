@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/mcp-tenant-server" },
-    { "path": "./packages/mcp-form" }
+    { "path": "./packages/mcp-form" },
+    { "path": "./packages/mcp-memory-bucket" }
   ]
 }

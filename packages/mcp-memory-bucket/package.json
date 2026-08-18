@@ -1,0 +1,33 @@
+{
+  "name": "@avo-mcp-tools/mcp-memory-bucket",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server exposing skill_* (reusable coding patterns) and memory_* (point-in-time working context) tools over a markdown+frontmatter source, cached into SQLite at runtime.",
+  "bin": {
+    "mcp-memory-bucket": "./bin/mcp-memory-bucket.js"
+  },
+  "main": "src/server.ts",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test test/**/*.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "better-sqlite3": "^11.8.0",
+    "chokidar": "^4.0.0",
+    "express": "^4.21.0",
+    "gray-matter": "^4.0.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/express": "^4.17.0",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
