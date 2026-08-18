@@ -5,13 +5,14 @@ import type Database from 'better-sqlite3';
 import { readMarkdownFile } from './markdown-file.js';
 import { flattenTags } from './db.js';
 import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
+import type { NamedRoot } from '../config.js';
 
 export interface TableSyncSpec<TFrontmatter> {
   table: 'skills' | 'memory_docs';
-  sources: string[];
+  sources: NamedRoot[];
   /** Which files under `sources` count as this table's docs — skills only match SKILL.md, memory matches any .md. */
   matchesFile: (filePath: string) => boolean;
-  columns: string[]; // column names in insert order, excluding body/mtime_ms/source_path
+  columns: string[]; // column names in insert order, excluding body/mtime_ms/source_path/root
   getId: (fm: TFrontmatter) => string | undefined;
   toRow: (fm: TFrontmatter, sourcePath: string) => Record<string, unknown>;
 }
@@ -19,7 +20,7 @@ export interface TableSyncSpec<TFrontmatter> {
 const skillColumns = ['id', 'description', 'owner', 'status', 'tags', 'trigger_phrases', 'extends'];
 const memoryColumns = ['id', 'key', 'key_type', 'description', 'doc_type', 'tags', 'status', 'related_to'];
 
-export function skillSyncSpec(sources: string[]): TableSyncSpec<SkillFrontmatter> {
+export function skillSyncSpec(sources: NamedRoot[]): TableSyncSpec<SkillFrontmatter> {
   return {
     table: 'skills',
     sources,
@@ -38,7 +39,7 @@ export function skillSyncSpec(sources: string[]): TableSyncSpec<SkillFrontmatter
   };
 }
 
-export function memorySyncSpec(sources: string[]): TableSyncSpec<MemoryFrontmatter> {
+export function memorySyncSpec(sources: NamedRoot[]): TableSyncSpec<MemoryFrontmatter> {
   return {
     table: 'memory_docs',
     sources,
@@ -64,6 +65,19 @@ export function memorySyncSpec(sources: string[]): TableSyncSpec<MemoryFrontmatt
  * synchronously right after their own writes — the watcher's own event for
  * that same write becomes a harmless no-op re-check once mtime matches.
  */
+/** Which configured root a file lives under, by longest matching path prefix. */
+function rootForFile(sources: NamedRoot[], filePath: string): string {
+  const resolved = path.resolve(filePath);
+  let best: NamedRoot | undefined;
+  for (const root of sources) {
+    const rootPath = path.resolve(root.path);
+    if (resolved === rootPath || resolved.startsWith(rootPath + path.sep)) {
+      if (!best || rootPath.length > path.resolve(best.path).length) best = root;
+    }
+  }
+  return best?.name ?? '';
+}
+
 export function upsertFile<TFrontmatter>(
   db: Database.Database,
   spec: TableSyncSpec<TFrontmatter>,
@@ -83,8 +97,9 @@ export function upsertFile<TFrontmatter>(
   }
 
   const row = spec.toRow(parsed.frontmatter, filePath);
-  const cols = [...spec.columns, 'source_path', 'body', 'mtime_ms'];
-  const values = [...spec.columns.map((c) => row[c]), filePath, parsed.body, parsed.mtimeMs];
+  const root = rootForFile(spec.sources, filePath);
+  const cols = [...spec.columns, 'source_path', 'root', 'body', 'mtime_ms'];
+  const values = [...spec.columns.map((c) => row[c]), filePath, root, parsed.body, parsed.mtimeMs];
   const placeholders = cols.map(() => '?').join(', ');
   const updateClause = cols
     .filter((c) => c !== 'id')
@@ -114,9 +129,9 @@ export function removeFile(db: Database.Database, table: 'skills' | 'memory_docs
 
 /** Full scan of all configured source dirs — used once at startup before the watcher takes over. */
 export function initialScan<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): void {
-  for (const dir of spec.sources) {
-    if (!fs.existsSync(dir)) continue;
-    for (const file of walkMarkdownFiles(dir)) {
+  for (const root of spec.sources) {
+    if (!fs.existsSync(root.path)) continue;
+    for (const file of walkMarkdownFiles(root.path)) {
       if (!spec.matchesFile(file)) continue;
       try {
         upsertFile(db, spec, file);
@@ -124,6 +139,32 @@ export function initialScan<TFrontmatter>(db: Database.Database, spec: TableSync
         console.error(`[memory-bucket] failed to index ${file}:`, err);
       }
     }
+  }
+}
+
+/** Full scan of a single dir — used when a new root is added live, after registering it in spec.sources. */
+export function scanSingleRoot<TFrontmatter>(
+  db: Database.Database,
+  spec: TableSyncSpec<TFrontmatter>,
+  dirPath: string
+): void {
+  if (!fs.existsSync(dirPath)) return;
+  for (const file of walkMarkdownFiles(dirPath)) {
+    if (!spec.matchesFile(file)) continue;
+    try {
+      upsertFile(db, spec, file);
+    } catch (err) {
+      console.error(`[memory-bucket] failed to index ${file}:`, err);
+    }
+  }
+}
+
+/** Drops all cached rows (and search index entries) belonging to a removed root. Never touches files on disk. */
+export function unregisterRoot(db: Database.Database, table: 'skills' | 'memory_docs', rootName: string): void {
+  const rows = db.prepare(`SELECT id FROM ${table} WHERE root = ?`).all(rootName) as Array<{ id: string }>;
+  db.prepare(`DELETE FROM ${table} WHERE root = ?`).run(rootName);
+  for (const row of rows) {
+    db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(table, row.id);
   }
 }
 
@@ -139,11 +180,10 @@ function* walkMarkdownFiles(dir: string): Generator<string> {
 }
 
 export function watchSources<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): FSWatcher {
-  const watcher = chokidar.watch(spec.sources, {
-    ignoreInitial: true,
-    persistent: true,
-    depth: 10,
-  });
+  const watcher = chokidar.watch(
+    spec.sources.map((r) => r.path),
+    { ignoreInitial: true, persistent: true, depth: 10 }
+  );
 
   watcher
     .on('add', (filePath) => {

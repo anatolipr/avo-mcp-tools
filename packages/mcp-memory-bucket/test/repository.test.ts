@@ -17,8 +17,9 @@ function makeTmpDir(): string {
 test('skill create/get/list/update/delete round-trip, including nested subdirectories', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const spec = skillSyncSpec([skillDir]);
-  const repo = new SkillRepository(db, skillDir);
+  const roots = [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }];
+  const spec = skillSyncSpec(roots);
+  const repo = new SkillRepository(db, roots);
 
   const created = repo.create(
     { name: 'demo-skill', description: 'Demo skill. Use when testing.', owner: null, status: 'unreviewed', tags: ['demo'], trigger_phrases: ['demo'] },
@@ -57,7 +58,7 @@ test('skill create/get/list/update/delete round-trip, including nested subdirect
 test('memory create with folder param + getByKey exact match', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, memDir);
+  const repo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
 
   const doc = repo.create({
     key: 'rmxs-14',
@@ -70,7 +71,7 @@ test('memory create with folder param + getByKey exact match', () => {
   assert.equal(doc.key, 'RMXS-14');
   assert.ok(doc.source_path.includes(path.join('rmxs', '')));
 
-  const spec = memorySyncSpec([memDir]);
+  const spec = memorySyncSpec([{ name: 'root', path: memDir }]);
   initialScan(db, spec);
 
   const found = repo.getByKey('rmxs-14');
@@ -84,7 +85,7 @@ test('memory create with folder param + getByKey exact match', () => {
 test('resolveWithinBase rejects folder traversal', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, memDir);
+  const repo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
 
   assert.throws(() =>
     repo.create({
@@ -119,8 +120,8 @@ test('relocate moves a file into memory and skips a repeat bulk relocate', () =>
   const memDir = makeTmpDir();
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const memoryRepo = new MemoryRepository(db, memDir);
-  const skillRepo = new SkillRepository(db, skillDir);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
 
   const srcDir = makeTmpDir();
   const srcFile = path.join(srcDir, '2026-08-12-pde-433-partner-configuration-management-v3.md');
@@ -146,8 +147,8 @@ test('relocate to skill requires an explicit description, but infers a valid nam
   const memDir = makeTmpDir();
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const memoryRepo = new MemoryRepository(db, memDir);
-  const skillRepo = new SkillRepository(db, skillDir);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
 
   const srcDir = makeTmpDir();
   const srcFile = path.join(srcDir, 'Lit Dropdown Pattern.md');

@@ -8,6 +8,7 @@ export interface Entry {
   owner: string | null;
   doc_type: string | null;
   key_type: string | null;
+  root: string;
   mtime_ms: number;
 }
 
@@ -21,6 +22,7 @@ export interface EntryDetail {
   owner?: string | null;
   body: string;
   source_path: string;
+  root: string;
 }
 
 export interface Facets {
@@ -29,6 +31,18 @@ export interface Facets {
   owners: string[];
   doc_types: string[];
   key_types: string[];
+  roots: string[];
+}
+
+export interface Root {
+  name: string;
+  path: string;
+  kind: 'skill' | 'memory';
+}
+
+export interface RootsResponse {
+  skill: Root[];
+  memory: Root[];
 }
 
 export interface Selection {

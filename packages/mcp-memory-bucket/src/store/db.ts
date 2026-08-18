@@ -14,6 +14,7 @@ export function openCache(dbPath: string): Database.Database {
       trigger_phrases TEXT NOT NULL,  -- JSON array
       extends TEXT,
       source_path TEXT NOT NULL UNIQUE, -- path to SKILL.md
+      root TEXT NOT NULL DEFAULT '',  -- name of the configured root this file lives under
       body TEXT NOT NULL,
       mtime_ms INTEGER NOT NULL
     );
@@ -28,6 +29,7 @@ export function openCache(dbPath: string): Database.Database {
       status TEXT NOT NULL,
       related_to TEXT,
       source_path TEXT NOT NULL UNIQUE,
+      root TEXT NOT NULL DEFAULT '',  -- name of the configured root this file lives under
       body TEXT NOT NULL,
       mtime_ms INTEGER NOT NULL
     );
@@ -44,9 +46,18 @@ export function openCache(dbPath: string): Database.Database {
     );
   `);
 
+  addRootColumnIfMissing(db, 'skills');
+  addRootColumnIfMissing(db, 'memory_docs');
   backfillSearchIndex(db);
 
   return db;
+}
+
+/** Migration for cache files created before the `root` column existed. */
+function addRootColumnIfMissing(db: Database.Database, table: 'skills' | 'memory_docs'): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'root')) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN root TEXT NOT NULL DEFAULT ''`);
 }
 
 /** One-time backfill for existing rows the first time search_index is introduced into a cache file. */

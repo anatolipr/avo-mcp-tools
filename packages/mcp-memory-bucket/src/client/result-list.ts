@@ -4,10 +4,12 @@ import type { Entry } from './types.js';
 export class ResultList extends LitElement {
   static properties = {
     results: { attribute: false },
+    showRoot: { attribute: false },
     onSelect: { attribute: false },
   };
 
   declare results: Entry[];
+  declare showRoot: boolean;
   declare onSelect: (entry: Entry) => void;
 
   static styles = css`
@@ -21,6 +23,10 @@ export class ResultList extends LitElement {
     .tags { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
     .tag { font-size: 10px; border: 1px solid #8886; border-radius: 999px; padding: 1px 6px; }
     .type-badge { font-size: 10px; text-transform: uppercase; opacity: 0.6; }
+    .root-badge {
+      font-size: 10px; text-transform: uppercase; opacity: 0.75; border: 1px solid #7c3aed88;
+      color: #7c3aed; border-radius: 4px; padding: 0 4px;
+    }
     .empty { padding: 24px; opacity: 0.6; font-size: 13px; }
   `;
 
@@ -39,6 +45,7 @@ export class ResultList extends LitElement {
             <div class="desc">${r.description}</div>
             <div class="tags">
               <span class="type-badge">${r._table === 'skills' ? 'skill' : 'memory'}</span>
+              ${this.showRoot && r.root ? html`<span class="root-badge">${r.root}</span>` : ''}
               ${r.tags.map((t) => html`<span class="tag">${t}</span>`)}
             </div>
           </div>

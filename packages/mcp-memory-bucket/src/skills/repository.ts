@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
+import type { FSWatcher } from 'chokidar';
 import { writeMarkdownFile } from '../store/markdown-file.js';
 import { assertValidSkillName } from '../store/skill-name.js';
 import { resolveWithinBase } from '../store/safe-path.js';
-import { upsertFile, removeFile, skillSyncSpec, type TableSyncSpec } from '../store/sync.js';
+import { upsertFile, removeFile, scanSingleRoot, unregisterRoot, skillSyncSpec, type TableSyncSpec } from '../store/sync.js';
+import type { NamedRoot } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
 
 interface SkillRow {
@@ -16,6 +18,7 @@ interface SkillRow {
   trigger_phrases: string; // JSON
   extends: string | null;
   source_path: string;
+  root: string;
   body: string;
 }
 
@@ -27,6 +30,7 @@ function rowToDoc(row: SkillRow): SkillDoc {
     trigger_phrases: JSON.parse(row.trigger_phrases),
     metadata: { owner: row.owner, status: row.status, extends: row.extends },
     source_path: row.source_path,
+    root: row.root,
     body: row.body,
   };
 }
@@ -37,19 +41,71 @@ export interface SkillListItem {
   owner: string | null;
   status: SkillStatus;
   tags: string[];
+  root: string;
 }
 
 export class SkillRepository {
   private syncSpec: TableSyncSpec<SkillFrontmatter>;
+  private watcher?: FSWatcher;
 
-  constructor(private db: Database.Database, private sourceDir: string) {
-    this.syncSpec = skillSyncSpec([sourceDir]);
+  /** `roots[0]` is always the builtin skills dir — never exposed for create()/removal. */
+  constructor(private db: Database.Database, private roots: NamedRoot[]) {
+    this.syncSpec = skillSyncSpec(roots);
   }
 
-  list(query?: string): SkillListItem[] {
-    const rows = this.db
-      .prepare(`SELECT id, description, owner, status, tags, trigger_phrases FROM skills`)
-      .all() as Array<Pick<SkillRow, 'id' | 'description' | 'owner' | 'status' | 'tags' | 'trigger_phrases'>>;
+  /** Attaches the live chokidar watcher so addRoot/removeRoot can mutate it without a restart. */
+  setWatcher(watcher: FSWatcher): void {
+    this.watcher = watcher;
+  }
+
+  /** User-addable roots — excludes the always-present builtin skills dir at roots[0]. */
+  listRoots(): NamedRoot[] {
+    return this.roots.slice(1);
+  }
+
+  private resolveRoot(rootName: string | undefined): NamedRoot {
+    const userRoots = this.listRoots();
+    if (rootName) {
+      const found = userRoots.find((r) => r.name === rootName);
+      if (!found) {
+        throw new Error(`unknown skill root "${rootName}" — valid roots: ${userRoots.map((r) => r.name).join(', ') || '(none configured)'}`);
+      }
+      return found;
+    }
+    if (userRoots.length === 1) return userRoots[0]!;
+    if (userRoots.length === 0) {
+      throw new Error('no skill root configured — add one first (see bucket_open_ui)');
+    }
+    throw new Error(`multiple skill roots configured — specify root: one of ${userRoots.map((r) => r.name).join(', ')}`);
+  }
+
+  /** Registers a new root: appends it, scans it once, and starts watching it live. */
+  addRoot(root: NamedRoot): void {
+    if (this.roots.some((r) => r.name === root.name)) {
+      throw new Error(`a skill root named "${root.name}" already exists`);
+    }
+    this.roots.push(root);
+    scanSingleRoot(this.db, this.syncSpec, root.path);
+    this.watcher?.add(root.path);
+  }
+
+  /** Unregisters a root: stops watching it and drops its cached rows. Never touches files on disk. */
+  removeRoot(name: string): void {
+    const idx = this.roots.findIndex((r) => r.name === name);
+    if (idx <= 0) throw new Error(`skill root "${name}" not found or is not removable`); // index 0 is builtin
+    const [removed] = this.roots.splice(idx, 1);
+    this.watcher?.unwatch(removed!.path);
+    unregisterRoot(this.db, 'skills', name);
+  }
+
+  list(query?: string, root?: string): SkillListItem[] {
+    const rows = root
+      ? (this.db
+          .prepare(`SELECT id, description, owner, status, tags, trigger_phrases, root FROM skills WHERE root = ?`)
+          .all(root) as Array<Pick<SkillRow, 'id' | 'description' | 'owner' | 'status' | 'tags' | 'trigger_phrases' | 'root'>>)
+      : (this.db
+          .prepare(`SELECT id, description, owner, status, tags, trigger_phrases, root FROM skills`)
+          .all() as Array<Pick<SkillRow, 'id' | 'description' | 'owner' | 'status' | 'tags' | 'trigger_phrases' | 'root'>>);
 
     const needle = query?.trim().toLowerCase();
     const items = rows.map((r) => ({
@@ -59,6 +115,7 @@ export class SkillRepository {
       status: r.status,
       tags: JSON.parse(r.tags) as string[],
       triggerPhrases: JSON.parse(r.trigger_phrases) as string[],
+      root: r.root,
     }));
 
     const filtered = needle
@@ -79,8 +136,10 @@ export class SkillRepository {
   }
 
   /**
-   * Creates <sourceDir>/[folder/]<name>/SKILL.md — folder-per-skill, per the
+   * Creates <root>/[folder/]<name>/SKILL.md — folder-per-skill, per the
    * agentskills.io spec (`name` must equal the containing folder's name).
+   * `root` selects which configured skill root to write into; required only
+   * when more than one user root is configured.
    */
   create(
     frontmatter: { name: string; description: string; license?: string; compatibility?: string; tags?: string[]; trigger_phrases?: string[] } & {
@@ -89,13 +148,15 @@ export class SkillRepository {
       extends?: string | null;
     },
     body: string,
-    folder?: string
+    folder?: string,
+    root?: string
   ): SkillDoc {
     assertValidSkillName(frontmatter.name);
     if (this.get(frontmatter.name)) {
       throw new Error(`skill with name "${frontmatter.name}" already exists`);
     }
-    const skillDir = resolveWithinBase(this.sourceDir, folder, frontmatter.name);
+    const targetRoot = this.resolveRoot(root);
+    const skillDir = resolveWithinBase(targetRoot.path, folder, frontmatter.name);
     if (fs.existsSync(skillDir)) {
       throw new Error(`skill directory already exists at ${skillDir}`);
     }
@@ -115,6 +176,7 @@ export class SkillRepository {
         extends: frontmatter.extends ?? null,
       },
       source_path: filePath,
+      root: targetRoot.name,
     };
     writeMarkdownFile(filePath, stripSourcePath(fm), body);
     upsertFile(this.db, this.syncSpec, filePath);
@@ -188,7 +250,7 @@ export class SkillRepository {
   }
 }
 
-function stripSourcePath<T extends { source_path: string }>(fm: T): Omit<T, 'source_path'> {
-  const { source_path: _sp, ...rest } = fm;
+function stripSourcePath<T extends { source_path: string; root: string }>(fm: T): Omit<T, 'source_path' | 'root'> {
+  const { source_path: _sp, root: _root, ...rest } = fm;
   return rest;
 }

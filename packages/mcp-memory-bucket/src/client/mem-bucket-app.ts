@@ -3,7 +3,8 @@ import { Signal, Computed, SignalWatcher } from 'avosignals';
 
 import './result-list.js';
 import './detail-panel.js';
-import type { Entry, Facets, Selection, TypeFilter } from './types.js';
+import './add-root-modal.js';
+import type { Entry, Facets, Selection, TypeFilter, RootsResponse, Root } from './types.js';
 
 const TYPE_OPTIONS: Array<{ value: TypeFilter; label: string }> = [
   { value: 'all', label: 'All' },
@@ -11,7 +12,8 @@ const TYPE_OPTIONS: Array<{ value: TypeFilter; label: string }> = [
   { value: 'memory', label: 'Memories' },
 ];
 
-const EMPTY_FACETS: Facets = { tags: [], statuses: [], owners: [], doc_types: [], key_types: [] };
+const EMPTY_FACETS: Facets = { tags: [], statuses: [], owners: [], doc_types: [], key_types: [], roots: [] };
+const EMPTY_ROOTS: RootsResponse = { skill: [], memory: [] };
 
 export class MemBucketApp extends LitElement {
   static styles = css`
@@ -31,6 +33,7 @@ export class MemBucketApp extends LitElement {
       box-sizing: border-box;
     }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .filter-label { font-size: 12px; opacity: 0.6; font-weight: 600; }
     .chip {
       border: 1px solid #8886;
       border-radius: 999px;
@@ -56,14 +59,40 @@ export class MemBucketApp extends LitElement {
     result-list { flex: 1 1 40%; overflow-y: auto; border-right: 1px solid #8883; }
     detail-panel { flex: 1 1 60%; overflow-y: auto; }
     label.small { font-size: 12px; opacity: 0.7; }
+    .roots-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .root-chip {
+      border: 1px solid #8886; border-radius: 999px; padding: 3px 8px 3px 10px; font-size: 12px;
+      cursor: pointer; background: none; color: inherit; display: inline-flex; align-items: center; gap: 6px;
+    }
+    .root-chip.active { background: #7c3aed; border-color: #7c3aed; color: white; }
+    .root-chip .remove {
+      opacity: 0.6; font-size: 12px; line-height: 1; padding: 2px; border-radius: 50%;
+    }
+    .root-chip .remove:hover { opacity: 1; background: #0002; }
+    .add-root-btn {
+      border: 1px dashed #8886; border-radius: 999px; padding: 3px 10px; font-size: 12px;
+      cursor: pointer; background: none; color: inherit; opacity: 0.75;
+    }
+    .add-root-btn:hover { opacity: 1; }
+    .first-run {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100vh; gap: 16px; text-align: center; padding: 24px;
+    }
+    .first-run h1 { font-size: 18px; margin: 0; }
+    .first-run p { opacity: 0.7; font-size: 13px; max-width: 420px; margin: 0; }
   `;
 
   #query = new Signal('');
   #typeFilter = new Signal<TypeFilter>('all');
   #activeTags = new Signal<string[]>([]);
+  #activeRoots = new Signal<string[]>([]);
   #results = new Signal<Entry[]>([]);
   #facets = new Signal<Facets>(EMPTY_FACETS);
   #selected = new Signal<Selection | null>(null);
+  #roots = new Signal<RootsResponse>(EMPTY_ROOTS);
+  #showAddRoot = new Signal<boolean>(false);
+  #removingRoot = new Signal<string>('');
+  #rootsLoaded = new Signal<boolean>(false);
 
   constructor() {
     super();
@@ -75,6 +104,7 @@ export class MemBucketApp extends LitElement {
     if (this.#typeFilter.value !== 'all') params.set('type', this.#typeFilter.value);
     if (this.#query.value.trim()) params.set('q', this.#query.value.trim());
     for (const tag of this.#activeTags.value) params.append('tag', tag);
+    for (const root of this.#activeRoots.value) params.append('root', root);
     return params.toString();
   });
 
@@ -82,6 +112,7 @@ export class MemBucketApp extends LitElement {
     super.connectedCallback();
     this.#refetch();
     this.#refetchFacets();
+    this.#refetchRoots();
   }
 
   async #refetch() {
@@ -93,6 +124,43 @@ export class MemBucketApp extends LitElement {
     const type = this.#typeFilter.value === 'all' ? '' : `?type=${this.#typeFilter.value}`;
     const res = await fetch(`/api/facets${type}`);
     this.#facets.set((await res.json()) as Facets);
+  }
+
+  async #refetchRoots() {
+    const res = await fetch('/api/roots');
+    this.#roots.set((await res.json()) as RootsResponse);
+    this.#rootsLoaded.set(true);
+  }
+
+  #toggleRoot(name: string) {
+    const current = this.#activeRoots.value;
+    this.#activeRoots.set(current.includes(name) ? current.filter((r) => r !== name) : [...current, name]);
+    this.#refetch();
+  }
+
+  async #removeRoot(root: Root, e: Event) {
+    e.stopPropagation();
+    const confirmed = window.prompt(`Type "${root.name}" to remove this ${root.kind} root (files on disk are untouched):`);
+    if (confirmed !== root.name) return;
+    this.#removingRoot.set(root.name);
+    try {
+      await fetch(`/api/roots/${root.kind}/${encodeURIComponent(root.name)}`, { method: 'DELETE' });
+      this.#activeRoots.set(this.#activeRoots.value.filter((r) => r !== root.name));
+      await Promise.all([this.#refetchRoots(), this.#refetchFacets(), this.#refetch()]);
+    } finally {
+      this.#removingRoot.set('');
+    }
+  }
+
+  #onRootAdded() {
+    this.#showAddRoot.set(false);
+    this.#refetchRoots();
+    this.#refetchFacets();
+    this.#refetch();
+  }
+
+  #allRoots(): Root[] {
+    return [...this.#roots.value.skill, ...this.#roots.value.memory];
   }
 
   #setType(type: TypeFilter) {
@@ -119,6 +187,29 @@ export class MemBucketApp extends LitElement {
 
   render() {
     const facets = this.#facets.value;
+    const allRoots = this.#allRoots();
+
+    if (this.#rootsLoaded.value && allRoots.length === 0 && !this.#showAddRoot.value) {
+      return html`
+        <div class="first-run">
+          <h1>No roots configured yet</h1>
+          <p>
+            Add a folder of skills or memory docs to get started. You can add more roots later —
+            e.g. a personal skills repo plus a shared company repo.
+          </p>
+          <button class="add-root-btn" @click=${() => this.#showAddRoot.set(true)}>+ Add your first root</button>
+        </div>
+        ${this.#showAddRoot.value
+          ? html`<add-root-modal
+              .defaultKind=${'skill'}
+              .lockKind=${false}
+              .onAdded=${() => this.#onRootAdded()}
+              .onCancel=${() => this.#showAddRoot.set(false)}
+            ></add-root-modal>`
+          : ''}
+      `;
+    }
+
     return html`
       <div class="filters">
         <input
@@ -140,6 +231,7 @@ export class MemBucketApp extends LitElement {
           )}
         </div>
         <div class="row">
+          <span class="filter-label">Tags:</span>
           ${facets.tags.length === 0
             ? html`<label class="small">no tags yet</label>`
             : facets.tags.map(
@@ -153,11 +245,41 @@ export class MemBucketApp extends LitElement {
                 `
               )}
         </div>
+        <div class="roots-bar">
+          <span class="filter-label">Roots:</span>
+          ${allRoots.map(
+            (root) => html`
+              <button class="root-chip ${this.#activeRoots.value.includes(root.name) ? 'active' : ''}" @click=${() =>
+                this.#toggleRoot(root.name)}>
+                ${root.name}
+                <span
+                  class="remove"
+                  title="Remove root"
+                  @click=${(e: Event) => this.#removeRoot(root, e)}
+                >${this.#removingRoot.value === root.name ? '…' : '✕'}</span
+                >
+              </button>
+            `
+          )}
+          <button class="add-root-btn" @click=${() => this.#showAddRoot.set(true)}>+ Add root</button>
+        </div>
       </div>
       <div class="body-region">
-        <result-list .results=${this.#results.value} .onSelect=${(e: Entry) => this.#onSelect(e)}></result-list>
+        <result-list
+          .results=${this.#results.value}
+          .showRoot=${allRoots.length > 1}
+          .onSelect=${(e: Entry) => this.#onSelect(e)}
+        ></result-list>
         <detail-panel .selected=${this.#selected.value}></detail-panel>
       </div>
+      ${this.#showAddRoot.value
+        ? html`<add-root-modal
+            .defaultKind=${'skill'}
+            .lockKind=${false}
+            .onAdded=${() => this.#onRootAdded()}
+            .onCancel=${() => this.#showAddRoot.set(false)}
+          ></add-root-modal>`
+        : ''}
     `;
   }
 }

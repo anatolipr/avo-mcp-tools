@@ -9,12 +9,18 @@ const AUTHORING_SKILL_HINT =
   "Before your first call in a session, run skill_get(\"memory-bucket-authoring\") to learn the exact frontmatter schema and conventions — don't guess the shape.";
 
 export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void {
+  const roots = repo.listRoots();
+  const multiRoot = roots.length > 1;
+  const rootNames = roots.map((r) => r.name).join(', ');
+
   mcp.tool(
     'skill_list',
     'Lists skills (reusable coding patterns, one SKILL.md per folder per the agentskills.io open standard), optionally filtered by a keyword matched against description/tags/trigger phrases.',
-    { query: z.string().optional() },
-    async ({ query }) => {
-      const items = repo.list(query);
+    multiRoot
+      ? { query: z.string().optional(), root: z.string().optional().describe(`filter to one root: ${rootNames}`) }
+      : { query: z.string().optional() },
+    async ({ query, root }: { query?: string; root?: string }) => {
+      const items = repo.list(query, root);
       return { content: [{ type: 'text', text: JSON.stringify(items, null, 2) }] };
     }
   );
@@ -34,7 +40,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_create',
-    `Creates a new skill as <sourceDir>/[folder/]<name>/SKILL.md, per the agentskills.io open standard — a folder containing SKILL.md, optionally alongside scripts/references/assets subfolders you create separately on disk. ${AUTHORING_SKILL_HINT}`,
+    `Creates a new skill as <root>/[folder/]<name>/SKILL.md, per the agentskills.io open standard — a folder containing SKILL.md, optionally alongside scripts/references/assets subfolders you create separately on disk. ${AUTHORING_SKILL_HINT}`,
     {
       name: z.string().describe(SKILL_NAME_DESCRIPTION),
       description: z
@@ -49,14 +55,16 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       tags: z.array(z.string()).optional(),
       trigger_phrases: z.array(z.string()).optional(),
       extends: z.string().optional().describe('reserved for a future overlay mechanism — stored in frontmatter.metadata'),
-      folder: z.string().optional().describe('optional subdirectory under the skill source dir, e.g. "frontend"'),
+      folder: z.string().optional().describe('optional subdirectory under the skill root, e.g. "frontend"'),
+      ...(multiRoot ? { root: z.string().describe(`which configured skill root to write into: ${rootNames}`) } : {}),
     },
-    async ({ name, description, body, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId, folder }) => {
+    async ({ name, description, body, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId, folder, root }: any) => {
       try {
         const doc = repo.create(
           { name, description, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId },
           body,
-          folder
+          folder,
+          root
         );
         return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
       } catch (err) {

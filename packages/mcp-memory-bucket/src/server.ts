@@ -14,6 +14,10 @@ import { registerRelocateTool } from './shared/relocate-tool.js';
 import { buildWebRouter } from './web/routes.js';
 import { registerUiTool } from './web/ui-tool.js';
 
+// server.ts is rebuilt from `buildMcpServer()` on every /mcp request (see below),
+// so tool schemas (which conditionally include `root` based on root count) always
+// reflect the current roots — no restart needed after an add/remove-root call.
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // __dirname is <pkg>/src when run via tsx (dev/test) and <pkg>/dist/src once
 // built — either way dist/client (the Vite output) sits one level above the
@@ -31,16 +35,24 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 8767;
 const config = loadConfig();
 const db = openCache(config.cacheDbPath);
 
-const skillSpec = skillSyncSpec([builtinSkillsDir, ...config.skillSources]);
-const memorySpec = memorySyncSpec(config.memorySources);
+const skillSpec = skillSyncSpec([{ name: 'builtin', path: builtinSkillsDir }, ...config.skillRoots]);
+const memorySpec = memorySyncSpec(config.memoryRoots);
 
 initialScan(db, skillSpec);
 initialScan(db, memorySpec);
-watchSources(db, skillSpec);
-watchSources(db, memorySpec);
+const skillWatcher = watchSources(db, skillSpec);
+const memoryWatcher = watchSources(db, memorySpec);
 
-const skillRepo = new SkillRepository(db, config.skillSources[0]!);
-const memoryRepo = new MemoryRepository(db, config.memorySources[0]!);
+const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: builtinSkillsDir }, ...config.skillRoots]);
+const memoryRepo = new MemoryRepository(db, config.memoryRoots);
+skillRepo.setWatcher(skillWatcher);
+memoryRepo.setWatcher(memoryWatcher);
+
+if (config.skillRoots.length === 0 && config.memoryRoots.length === 0) {
+  console.error(
+    `[memory-bucket] no roots configured — open http://localhost:${PORT} to add one`
+  );
+}
 
 // If the user refers to "mem bucket", "mem bucket mcp", "memory bucket", or
 // "skill bucket" (its working-title predecessor) in conversation, they mean
@@ -64,7 +76,7 @@ function buildMcpServer(): McpServer {
 
 const app = express();
 app.use(express.json());
-app.use(buildWebRouter(db));
+app.use(buildWebRouter(db, config, skillRepo, memoryRepo));
 app.use(express.static(path.join(packageRoot, 'dist', 'client')));
 
 app.post('/mcp', async (req, res) => {
@@ -93,8 +105,8 @@ app.delete('/mcp', methodNotAllowed);
 
 app.listen(PORT, () => {
   console.error(`[memory-bucket] MCP server listening on http://localhost:${PORT}/mcp`);
-  console.error(`[memory-bucket] skill sources: ${config.skillSources.join(', ')}`);
-  console.error(`[memory-bucket] memory sources: ${config.memorySources.join(', ')}`);
+  console.error(`[memory-bucket] skill roots: ${config.skillRoots.map((r) => `${r.name}=${r.path}`).join(', ') || '(none)'}`);
+  console.error(`[memory-bucket] memory roots: ${config.memoryRoots.map((r) => `${r.name}=${r.path}`).join(', ') || '(none)'}`);
 });
 
 process.on('SIGINT', () => {

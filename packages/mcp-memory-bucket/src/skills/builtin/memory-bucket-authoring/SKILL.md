@@ -164,6 +164,30 @@ If the user asks to save the current conversation/session as memory, use
 **summary**, not a raw transcript. If `key` or `description` weren't
 given, ask for both before calling it; don't guess a key from context.
 
+## Multiple roots
+
+A server can be configured with more than one skill root and/or memory
+root at once — e.g. a personal skills folder plus a shared company repo.
+When exactly one root of a given kind is configured, everything above
+works unchanged: `skill_create`/`memory_create`/`relocate` write into it
+with no extra parameter needed.
+
+Once **two or more** roots of a kind are configured, `skill_create`,
+`memory_create`, `memory_save_session`, and `relocate`'s `overrides` gain
+a required (or, for `memory_save_session`, optional) `root` parameter —
+its tool description lists the valid root names. Match a root by name
+from what the user said ("save this to my personal skills", "put this in
+the company repo") rather than guessing; if it's unclear which root they
+mean, ask. `skill_list`/`memory_list` also gain an optional `root` filter
+to narrow results to one root once multiple exist.
+
+Roots (for both skills and memory) are managed through the web UI
+(`bucket_open_ui`) — add one via its "+ Add root" folder browser, or
+remove one via the ✕ on its chip (this only unregisters it and drops its
+cached rows; it never deletes files on disk). If the server has zero
+roots configured, the UI opens straight into a first-run "add your first
+root" screen instead of the normal search view.
+
 ## relocate: pulling in an existing file
 
 If there's already a local markdown file that should become a skill or

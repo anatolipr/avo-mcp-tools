@@ -27,6 +27,7 @@ export interface SkillFrontmatter {
     [key: string]: string | null; // spec allows arbitrary additional string-valued keys
   };
   source_path: string; // filled in at runtime, not authored — path to the SKILL.md file
+  root: string; // filled in at runtime, not authored — name of the configured root this file lives under
 }
 
 export type SkillDoc = SkillFrontmatter & { body: string };
@@ -52,6 +53,7 @@ export interface MemoryFrontmatter {
   status: MemoryStatus;
   related_to: string | null;
   source_path: string;
+  root: string;
 }
 
 export type MemoryDoc = MemoryFrontmatter & { body: string };
