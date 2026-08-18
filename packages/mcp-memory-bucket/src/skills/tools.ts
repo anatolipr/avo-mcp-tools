@@ -67,7 +67,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_update',
-    `Edits an existing skill in place — frontmatter fields and/or body. Only provided fields change. The skill's name/folder cannot be changed (delete + recreate instead). ${AUTHORING_SKILL_HINT}`,
+    `Edits an existing skill in place — frontmatter fields and/or body. Only provided fields change. Use skill_rename to change the name/folder. ${AUTHORING_SKILL_HINT}`,
     {
       name: z.string(),
       description: z.string().max(1024).optional(),
@@ -83,6 +83,23 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     async ({ name, body, ...frontmatterFields }) => {
       try {
         const doc = repo.update(name, frontmatterFields, body);
+        return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
+      }
+    }
+  );
+
+  mcp.tool(
+    'skill_rename',
+    'Renames a skill: moves its folder to the new name and updates the frontmatter `name` field to match, preserving any scripts/references/assets alongside SKILL.md.',
+    {
+      name: z.string().describe('current skill name'),
+      new_name: z.string().describe(SKILL_NAME_DESCRIPTION),
+    },
+    async ({ name, new_name }) => {
+      try {
+        const doc = repo.rename(name, new_name);
         return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };

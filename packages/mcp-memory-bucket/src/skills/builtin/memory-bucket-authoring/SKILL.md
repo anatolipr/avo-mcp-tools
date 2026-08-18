@@ -54,6 +54,17 @@ to trigger reliably; "Builds a dropdown component in Lit with keyboard
 navigation... use when the user asks for a dropdown, select, or combobox
 component" gives an agent something to pattern-match against.
 
+**Always write the description in third person** — "Processes X" or
+"Builds Y", never "I can help you..." or "You can use this to...". It's
+injected into the system prompt alongside every other skill's
+description, and an inconsistent point of view degrades discovery.
+
+**Naming**: prefer gerund form (`processing-pdfs`, `writing-tests`) or a
+plain noun phrase (`pdf-processing`, `lit-dropdown-component`) — both are
+fine, pick whichever reads more naturally for the pattern. Avoid vague or
+generic names a skill list can't be scanned by: `helper`, `utils`,
+`tools`, `data`, `files`.
+
 Optional frontmatter this project also supports:
 
 - `license`, `compatibility` — standard fields, rarely needed.
@@ -70,10 +81,57 @@ it under a subdirectory (e.g. `folder: "frontend"`) if the skill source
 tree is organized that way — check `skill_list()` or ask the user if
 you're not sure of the convention in this repo.
 
+### Writing the body
+
+The agent reading a skill is already capable — don't explain things it
+already knows (what a PDF is, how a for-loop works). Before adding a
+sentence, ask "does this justify its token cost?" A concise 3-line code
+snippet beats a paragraph of preamble around it.
+
+Match how prescriptive you are to how fragile the task is:
+
+- **High freedom** (numbered steps, heuristics) — when multiple valid
+  approaches exist and judgment matters, e.g. "review this code for
+  bugs."
+- **Medium freedom** (a template or parameterized snippet) — when a
+  preferred pattern exists but some variation is fine.
+- **Low freedom** (an exact command, "do not modify this") — when the
+  operation is fragile or must run in an exact sequence, e.g. a
+  migration script.
+
+Other things that reliably improve a skill:
+
+- Use one term for one concept throughout (always "field", never a mix
+  of "field"/"box"/"control") — inconsistent vocabulary makes the
+  instructions harder to follow.
+- Avoid time-sensitive claims ("before/after March 2026, use X") since
+  they silently rot; if a pattern is genuinely deprecated, name the
+  current approach first and fold the old one into a clearly-labeled
+  "legacy" aside instead of a date-gated branch.
+- Don't enumerate every possible library/approach — give one good
+  default plus, if truly needed, a named escape hatch for the exception
+  case. "You can use pypdf, or pdfplumber, or PyMuPDF, or..." is worse
+  than just picking one.
+- If the body instructs calling another MCP server's tool, use the fully
+  qualified `ServerName:tool_name` form so it isn't ambiguous which
+  server owns it.
+
+### Keeping SKILL.md small (progressive disclosure)
+
 Keep the `SKILL.md` body itself under ~500 lines; it's loaded in full
 once the skill is activated, so move anything long (detailed reference
 tables, big code samples) into files the body links to, if the host
 environment supports bundling extra files alongside `SKILL.md`.
+
+When you do split content out:
+
+- **Link only one level deep from `SKILL.md` itself.** A reference file
+  that links to another reference file risks a shallow partial read (the
+  agent may `head` it instead of reading in full) and losing information.
+  Put every reference file's link directly in `SKILL.md`, even if that
+  means `SKILL.md` links to several files.
+- If a linked-out reference file runs past ~100 lines, put a short table
+  of contents at its top so a partial read still reveals what's there.
 
 ## Authoring a memory doc
 

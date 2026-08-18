@@ -150,6 +150,34 @@ export class SkillRepository {
     return { ...merged, body: newBody };
   }
 
+  /**
+   * Renames a skill: moves <sourceDir>/[folder/]<oldName>/ to .../<newName>/ (keeping any
+   * scripts/references/assets alongside SKILL.md) and updates the `name` frontmatter field to match.
+   */
+  rename(name: string, newName: string): SkillDoc {
+    assertValidSkillName(newName);
+    const existing = this.get(name);
+    if (!existing) throw new Error(`skill with name "${name}" not found`);
+    if (newName === name) return existing;
+    if (this.get(newName)) {
+      throw new Error(`skill with name "${newName}" already exists`);
+    }
+
+    const oldDir = path.dirname(existing.source_path);
+    const newDir = path.join(path.dirname(oldDir), newName);
+    if (fs.existsSync(newDir)) {
+      throw new Error(`skill directory already exists at ${newDir}`);
+    }
+    fs.renameSync(oldDir, newDir);
+    const newFilePath = path.join(newDir, 'SKILL.md');
+
+    const merged: SkillFrontmatter = { ...existing, name: newName };
+    writeMarkdownFile(newFilePath, stripSourcePath(merged), existing.body);
+    removeFile(this.db, 'skills', existing.source_path);
+    upsertFile(this.db, this.syncSpec, newFilePath);
+    return { ...merged, body: existing.body };
+  }
+
   /** Removes the whole skill directory, including any scripts/references/assets alongside SKILL.md. */
   delete(name: string): void {
     const existing = this.get(name);

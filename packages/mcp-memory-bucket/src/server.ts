@@ -22,12 +22,16 @@ const packageRoot = __dirname.endsWith(`${path.sep}dist${path.sep}src`)
   ? path.join(__dirname, '..', '..')
   : path.join(__dirname, '..');
 
+// Always present regardless of --memory-dir/cwd, so skill_get("memory-bucket-authoring")
+// works no matter where this server is run from (e.g. via `npx` in any project).
+const builtinSkillsDir = path.join(__dirname, 'skills', 'builtin');
+
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8767;
 
 const config = loadConfig();
 const db = openCache(config.cacheDbPath);
 
-const skillSpec = skillSyncSpec(config.skillSources);
+const skillSpec = skillSyncSpec([builtinSkillsDir, ...config.skillSources]);
 const memorySpec = memorySyncSpec(config.memorySources);
 
 initialScan(db, skillSpec);

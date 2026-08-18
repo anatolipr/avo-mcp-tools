@@ -17,10 +17,11 @@ Both share one `relocate` tool for pulling an existing local file into
 either namespace.
 
 This same guidance is also published as the `memory-bucket-authoring`
-skill in `skills/memory-bucket-authoring/SKILL.md` — call
-`skill_get("memory-bucket-authoring")` to pull it into context from
-inside an MCP session on any repo with this server connected, without
-needing this file directly.
+skill in `src/skills/builtin/memory-bucket-authoring/SKILL.md` — it's
+built into the server (always scanned regardless of `--memory-dir`/cwd),
+so call `skill_get("memory-bucket-authoring")` to pull it into context
+from inside an MCP session on any repo with this server connected,
+without needing this file directly.
 
 ## Skills
 
@@ -83,7 +84,8 @@ decide relevance before ever reading the body.
 - `skill_create(name, description, body, license?, compatibility?, owner?, status?, tags?, trigger_phrases?, extends?, folder?)`
   — writes `<sourceDir>/[folder/]<name>/SKILL.md`. `folder` is an optional
   subdirectory (e.g. `folder: "frontend"` → `skills/frontend/<name>/SKILL.md`).
-- `skill_update(name, ...fields?, body?)` — only provided fields change; `name` itself is immutable (delete + recreate to rename).
+- `skill_update(name, ...fields?, body?)` — only provided fields change; use `skill_rename` to change `name`.
+- `skill_rename(name, new_name)` — moves the skill folder to `new_name` and updates frontmatter `name` to match, preserving scripts/references/assets.
 - `skill_delete(name)` — hard delete, removes the whole skill folder (including any scripts/references/assets), no undo.
 
 ## Memory

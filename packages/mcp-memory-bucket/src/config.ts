@@ -30,9 +30,7 @@ export function loadConfig(cwd: string = process.cwd(), argv: string[] = process
   const baseDir = explicitDir ? path.resolve(cwd, explicitDir) : cwd;
 
   const skillSources = (overrides.skill_sources ?? ['./skills']).map((p) => path.resolve(baseDir, p));
-  const memorySources = (
-    overrides.memory_sources ?? ['./docs/plans', './docs/specs']
-  ).map((p) => path.resolve(baseDir, p));
+  const memorySources = (overrides.memory_sources ?? ['./docs']).map((p) => path.resolve(baseDir, p));
 
   return {
     skillSources,

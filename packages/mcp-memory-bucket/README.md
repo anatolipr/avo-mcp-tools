@@ -9,7 +9,8 @@ runtime.
 See [AGENTS.md](./AGENTS.md) for the frontmatter schemas, tool reference,
 and how an agent should use this — the same content is also published as
 the `memory-bucket-authoring` skill
-(`skills/memory-bucket-authoring/SKILL.md`), fetchable via
+(`src/skills/builtin/memory-bucket-authoring/SKILL.md`), built in so it's
+always available regardless of `--memory-dir`/cwd, fetchable via
 `skill_get("memory-bucket-authoring")` from any MCP session connected to
 this server. See
 [skill-bucket-v0-plan.md](../../skill-bucket-v0-plan.md) at the workspace
@@ -49,7 +50,7 @@ memory/skill sources. Override that with one of:
   ```json
   {
     "skill_sources": ["./skills"],
-    "memory_sources": ["./docs/plans", "./docs/specs"]
+    "memory_sources": ["./docs"]
   }
   ```
 
