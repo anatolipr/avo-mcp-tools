@@ -15,7 +15,7 @@ tools, per `skill-bucket-v0-plan.md` with the following deviations agreed
 during scaffolding:
 
 - Package renamed skill-bucket → memory-bucket.
-- Skipped `@avo-mcp-tools/mcp-tenant-server` for V0 — no UI/live browser
+- Skipped `@avo-mcp-tools/mcp-tenant-lib` for V0 — no UI/live browser
   state needed yet (that's fast-follow 3); plain
   `StreamableHTTPServerTransport` from `@modelcontextprotocol/sdk` instead.
 - `better-sqlite3` chosen over `node:sqlite` per user preference.

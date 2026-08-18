@@ -3,7 +3,7 @@
 A generic bridge: MCP tools are discovered at runtime from a connected
 page's own JSON tool manifest, and dispatched to that page's `window.*`
 functions over a cross-origin WebSocket. This package ships a worked
-"hello world" example of `@avo-mcp-tools/mcp-tenant-server`'s
+"hello world" example of `@avo-mcp-tools/mcp-tenant-lib`'s
 **Pattern B**: AI-enabling an existing static page that this stack
 doesn't own or build.
 
@@ -25,7 +25,7 @@ which is the expected workflow for a developer today. It can also be
 wrapped in a `<script type="module">...</script>` tag and baked into the
 page's HTML if preferred. Once connected, the page pushes its own
 `#mcp-tools` JSON manifest over that socket, and the server registers the
-tools it describes — see `packages/mcp-tenant-server/BRIDGING.md` for how
+tools it describes — see `packages/mcp-tenant-lib/BRIDGING.md` for how
 to write one for a new page.
 
 ## Run it
@@ -354,9 +354,9 @@ avoid: it's how one MCP session can drive multiple pages at once (e.g.
 
 For the fuller version of this recipe (including how to scaffold a brand-new
 MCP server package, "Pattern A" vs "Pattern B") see
-`packages/mcp-tenant-server/BRIDGING.md` and `AGENTS.md`.
+`packages/mcp-tenant-lib/BRIDGING.md` and `AGENTS.md`.
 
 ## Why this shape
 
-See `packages/mcp-tenant-server/AGENTS.md`, "Pattern B" section, for the
+See `packages/mcp-tenant-lib/AGENTS.md`, "Pattern B" section, for the
 general recipe this example follows.

@@ -65,7 +65,7 @@ export interface StateSocketHandlers<TSchema, TValues> {
 
 export interface StateSocketOptions {
   /**
-   * Origin of the mcp-tenant-server instance to connect to, e.g.
+   * Origin of the mcp-tenant-lib instance to connect to, e.g.
    * 'http://localhost:8766'. Omit when the page is served by the same
    * server it's connecting to (same-origin) — defaults to location.host.
    * Required for the cross-origin "AI-enable an existing page" pattern.

@@ -1,4 +1,4 @@
-# Building a new MCP package on `@avo-mcp-tools/mcp-tenant-server`
+# Building a new MCP package on `@avo-mcp-tools/mcp-tenant-lib`
 
 This package handles everything project-agnostic: MCP session/tenant
 bookkeeping, the HTTP + WebSocket server, static file serving, and a
@@ -7,7 +7,7 @@ tool definitions, your state shape, and a page.
 
 Two patterns are documented here:
 
-- **Pattern A** (below) — you own the page. `mcp-tenant-server` serves
+- **Pattern A** (below) — you own the page. `mcp-tenant-lib` serves
   both the MCP/WS endpoints and the static UI from one origin. Use this
   when building a UI from scratch (see `packages/mcp-form`).
 - **Pattern B** (end of this doc) — you don't own the page. An existing,
@@ -46,7 +46,7 @@ packages/<your-name>/
     server.ts                 wiring (step 5)
 ```
 
-`package.json` needs `@avo-mcp-tools/mcp-tenant-server": "*"` as a
+`package.json` needs `@avo-mcp-tools/mcp-tenant-lib": "*"` as a
 dependency (npm workspaces resolve it locally — no publishing required).
 
 ### 2. Define your state shape
@@ -77,7 +77,7 @@ One file, plain data objects: `{ name, description, schema, handler }`.
 // src/tools/hello-tools.ts
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Tenant } from '@avo-mcp-tools/mcp-tenant-server';
+import type { Tenant } from '@avo-mcp-tools/mcp-tenant-lib';
 import type { HelloState } from '../types.js';
 
 export interface ToolDef {
@@ -120,7 +120,7 @@ plumbing.
 ```ts
 // src/tools/register.ts
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Tenant } from '@avo-mcp-tools/mcp-tenant-server';
+import type { Tenant } from '@avo-mcp-tools/mcp-tenant-lib';
 import type { HelloState } from '../types.js';
 import { helloTools } from './hello-tools.js';
 
@@ -141,7 +141,7 @@ guessing what a consumer's server is called.
 // src/server.ts
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getOrCreateTenant as getOrCreateTenantFor, tenants, startIdleSweep, createHttpServer, attachWebSocketServer } from '@avo-mcp-tools/mcp-tenant-server';
+import { getOrCreateTenant as getOrCreateTenantFor, tenants, startIdleSweep, createHttpServer, attachWebSocketServer } from '@avo-mcp-tools/mcp-tenant-lib';
 import { initialHelloState } from './types.js';
 import { registerHelloTools } from './tools/register.js';
 
@@ -200,7 +200,7 @@ the WS state stream and dispatches into `window` globals:
 
 ```ts
 // src/client/main.ts
-import { connectStateSocket } from '@avo-mcp-tools/mcp-tenant-server/client';
+import { connectStateSocket } from '@avo-mcp-tools/mcp-tenant-lib/client';
 import type { HelloState } from '../types.js';
 
 function insertTitle(title: string) {
@@ -248,7 +248,7 @@ if you'd rather dispatch by tool name generically instead of hand-matching
 - Publishing packages to a real npm registry — workspace-local only.
 - Changing `ClientMessage` verbs (`set`/`submit`/`interrupt`/`register_tools`/
   `call_result`/`rename_connection`) — these are fixed today. If your
-  project needs different verbs, that's a change to `mcp-tenant-server`
+  project needs different verbs, that's a change to `mcp-tenant-lib`
   itself, not something you can override per-package.
 
 ## Pattern B: AI-enabling an existing static page (cross-origin)

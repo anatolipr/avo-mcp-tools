@@ -1,7 +1,7 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/mcp-tenant-server" },
+    { "path": "./packages/mcp-tenant-lib" },
     { "path": "./packages/mcp-form" },
     { "path": "./packages/mcp-memory-bucket" }
   ]

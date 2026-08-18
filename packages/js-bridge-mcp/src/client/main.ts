@@ -1,4 +1,4 @@
-import { connectStateSocket, splitPageTools, type PageToolDef } from '@avo-mcp-tools/mcp-tenant-server/client';
+import { connectStateSocket, splitPageTools, type PageToolDef } from '@avo-mcp-tools/mcp-tenant-lib/client';
 
 // The page itself defines its tools (function + manifest entry together,
 // see legacy-page/hello-world.html's inline <script>) and exposes them as

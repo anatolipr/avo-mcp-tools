@@ -14,7 +14,7 @@
 </head>
 <body>
   <!--
-    This page has zero build-step dependency on mcp-tenant-server or
+    This page has zero build-step dependency on mcp-tenant-lib or
     js-bridge-mcp. It defines its own functions and its own tool manifest
     below, in plain JS, before any bridge script exists. An MCP agent
     connected to js-bridge-mcp will call the get_embed_snippet tool, which
@@ -59,7 +59,7 @@
     //      mid-session wouldn't reach the CURRENT session's MCP client
     //      without a reconnect anyway.
     //   2. Even when the server-side manifest sync (see
-    //      mcp-tenant-server/src/manifest-tools.ts) picks up a changed
+    //      mcp-tenant-lib/src/manifest-tools.ts) picks up a changed
     //      manifest and fires tools/list_changed, several real MCP clients
     //      (Claude Code included, see js-bridge-mcp's README) fetch
     //      tools/list once at initialize and never re-poll on that

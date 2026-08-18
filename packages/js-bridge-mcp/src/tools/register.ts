@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Tenant } from '@avo-mcp-tools/mcp-tenant-server';
-import { createManifestToolRegistry } from '@avo-mcp-tools/mcp-tenant-server';
+import type { Tenant } from '@avo-mcp-tools/mcp-tenant-lib';
+import { createManifestToolRegistry } from '@avo-mcp-tools/mcp-tenant-lib';
 import type { HelloState } from '../types.js';
 import { helloTools } from './hello-tools.js';
 

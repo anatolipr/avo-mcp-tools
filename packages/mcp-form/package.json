@@ -18,7 +18,7 @@
     "stop": "kill -9 $(lsof -ti :${PORT:-8765}) 2>/dev/null && echo 'Server stopped' || echo 'No server running'"
   },
   "dependencies": {
-    "@avo-mcp-tools/mcp-tenant-server": "*",
+    "@avo-mcp-tools/mcp-tenant-lib": "*",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "avosignals": "^1.0.16",
     "lit": "^3.3.3",

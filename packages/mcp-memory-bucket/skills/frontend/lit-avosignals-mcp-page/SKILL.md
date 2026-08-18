@@ -39,12 +39,12 @@ body: |-
     `packages/mcp-form/src/client/mcp-form.ts:1-2` for the real import, and
     `node_modules/avosignals/README.md` for the full API (`Signal.get()`/
     `.set()`/`.update()`/`.value`, `Computed`, `effect`).
-  - **`@avo-mcp-tools/mcp-tenant-server`** — workspace-local, at
-    `packages/mcp-tenant-server/`. Owns tenant bookkeeping, the HTTP+WS
+  - **`@avo-mcp-tools/mcp-tenant-lib`** — workspace-local, at
+    `packages/mcp-tenant-lib/`. Owns tenant bookkeeping, the HTTP+WS
     server, static file serving, and the client-side WS bridge. See its
     `AGENTS.md` for the full Pattern A/B walkthrough this skill summarizes.
-    `avosignals` is NOT wired into `mcp-tenant-server` itself — the two are
-    independent. `mcp-tenant-server`'s `tenant().store.set(field, value)`
+    `avosignals` is NOT wired into `mcp-tenant-lib` itself — the two are
+    independent. `mcp-tenant-lib`'s `tenant().store.set(field, value)`
     broadcasts a `{type: 'update', field, value}` WS message; it's the
     **client** code that chooses to mirror incoming field updates into
     `avosignals` `Signal`s for reactive Lit rendering. You could swap in
@@ -53,7 +53,7 @@ body: |-
 
   ## Pattern
 
-  Follow `packages/mcp-tenant-server/AGENTS.md` Pattern A; concretely, per
+  Follow `packages/mcp-tenant-lib/AGENTS.md` Pattern A; concretely, per
   the working `mcp-form` example:
 
   1. Scaffold `packages/<name>/` copying `packages/mcp-form` as a template
@@ -68,7 +68,7 @@ body: |-
   4. Register tools via `registerXTools(mcp, tenant, port)`
      (`packages/mcp-form/src/tools/register.ts`).
   5. Wire `src/server.ts` with `createHttpServer` + `attachWebSocketServer`
-     from `@avo-mcp-tools/mcp-tenant-server` (copy
+     from `@avo-mcp-tools/mcp-tenant-lib` (copy
      `packages/mcp-form/src/server.ts`).
   6. Client entry (`src/client/main.ts` / the root `LitElement`, e.g.
      `packages/mcp-form/src/client/mcp-form.ts`):
@@ -76,8 +76,8 @@ body: |-
        path `/ws?tenant=<id>` derived from `location.pathname`) — see
        `mcp-form.ts:431-468` `_connect()` for the exact reconnect-on-close
        pattern used today, or use `connectStateSocket` from
-       `@avo-mcp-tools/mcp-tenant-server/client` for the same thing
-       pre-wired (per `mcp-tenant-server/AGENTS.md` step 6).
+       `@avo-mcp-tools/mcp-tenant-lib/client` for the same thing
+       pre-wired (per `mcp-tenant-lib/AGENTS.md` step 6).
      - Call `new SignalWatcher(this)` once in the component constructor —
        this makes the Lit component re-render automatically whenever any
        `Signal` it reads during `render()` changes (`mcp-form.ts:422`).
@@ -107,7 +107,7 @@ body: |-
     // or jsdelivr's ESM build:
     // import { LitElement, html, css } from 'https://cdn.jsdelivr.net/npm/lit@3/+esm';
 
-    // avosignals the same way, when pairing with a real mcp-tenant-server backend:
+    // avosignals the same way, when pairing with a real mcp-tenant-lib backend:
     // import { Signal, SignalWatcher } from 'https://esm.sh/avosignals@1';
     // import { Signal, SignalWatcher } from 'https://cdn.jsdelivr.net/npm/avosignals@1/+esm';
   </script>
@@ -124,7 +124,7 @@ body: |-
     granular per-export chunks; jsdelivr's `+esm` endpoint is a simpler
     single-file bundle. Either is fine for a demo — pick one and stay
     consistent within a file.
-  - This variant has no real WebSocket to an `mcp-tenant-server` tenant
+  - This variant has no real WebSocket to an `mcp-tenant-lib` tenant
     unless you stand one up separately; for a fully offline demo, simulate
     server pushes locally (e.g. a `setInterval` calling `.set()` on a
     `Signal`) in place of the WS `update` handler described above.
@@ -134,7 +134,7 @@ body: |-
 
   ## Why
 
-  `mcp-tenant-server` already handles tenant bookkeeping, WS broadcast, and
+  `mcp-tenant-lib` already handles tenant bookkeeping, WS broadcast, and
   static file serving — don't hand-roll a new HTTP/WS layer per package.
   `avosignals` gives fine-grained per-field reactivity without diffing the
   whole form on every WS message. Only reach for this combination when the

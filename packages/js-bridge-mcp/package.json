@@ -18,7 +18,7 @@
     "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {
-    "@avo-mcp-tools/mcp-tenant-server": "*",
+    "@avo-mcp-tools/mcp-tenant-lib": "*",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "ws": "^8.18.0",
     "zod": "^3.23.8"

@@ -7,16 +7,16 @@ same store, so an agent and a human can both read and write the same field
 live.
 
 ```
- browser tab (Lit) <--WS--> [ mcp-tenant-server ]  <--MCP/HTTP--> agent (Claude, etc.)
+ browser tab (Lit) <--WS--> [ mcp-tenant-lib ]  <--MCP/HTTP--> agent (Claude, etc.)
                               Store (single
                               source of truth)
 ```
 
 This repo is an npm workspace with two packages:
-- `packages/mcp-tenant-server/` — generic tenant/session bookkeeping + MCP/HTTP/WS
+- `packages/mcp-tenant-lib/` — generic tenant/session bookkeeping + MCP/HTTP/WS
   wiring, reusable across projects.
 - `packages/mcp-form/` — this form app: field config, MCP tool definitions,
-  and the Lit UI. Depends on `mcp-tenant-server`.
+  and the Lit UI. Depends on `mcp-tenant-lib`.
 
 Fields are declared once, in `packages/mcp-form/config/fields.json` — the
 UI and the MCP tools are both generated from that file. Add a field there and
@@ -93,8 +93,8 @@ enum is generated from this file at startup).
 - **Swap the transport** — the `Store` class doesn't know or care whether
   it's being driven by streamable-HTTP MCP, WebMCP
   (`navigator.modelContext`), or a browser-extension bridge — only
-  `packages/mcp-tenant-server/src/http.ts` would change.
+  `packages/mcp-tenant-lib/src/http.ts` would change.
 - **Reuse the server for another project** — see
   `docs/refactor-plan.md` for the in-progress plan to make
-  `mcp-tenant-server` pluggable into non-form projects (e.g. adding MCP
+  `mcp-tenant-lib` pluggable into non-form projects (e.g. adding MCP
   tools to an existing TODO app).

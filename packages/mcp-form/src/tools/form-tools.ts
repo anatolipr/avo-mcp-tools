@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Tenant, SubmitPayload } from '@avo-mcp-tools/mcp-tenant-server';
+import type { Tenant, SubmitPayload } from '@avo-mcp-tools/mcp-tenant-lib';
 import type { FormDef, FieldValues } from '../types.js';
 import { initialValuesFor } from '../types.js';
 
