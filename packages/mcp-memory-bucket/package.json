@@ -1,13 +1,26 @@
 {
-  "name": "@avo-mcp-tools/mcp-memory-bucket",
+  "name": "mcp-memory-bucket",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "MCP server exposing skill_* (reusable coding patterns) and memory_* (point-in-time working context) tools over a markdown+frontmatter source, cached into SQLite at runtime.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anatolipr/avo-mcp-tools.git",
+    "directory": "packages/mcp-memory-bucket"
+  },
+  "license": "MIT",
   "bin": {
     "mcp-memory-bucket": "./bin/mcp-memory-bucket.js"
   },
-  "main": "src/server.ts",
+  "main": "dist/src/server.js",
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "dev": "npm-run-all --parallel dev:client dev:server",
     "dev:client": "vite build --watch",

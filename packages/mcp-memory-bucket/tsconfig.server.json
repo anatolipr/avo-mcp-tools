@@ -16,6 +16,6 @@
     "declaration": false,
     "verbatimModuleSyntax": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "include": ["src/**/*.ts"],
   "exclude": ["src/client/**/*.ts"]
 }
