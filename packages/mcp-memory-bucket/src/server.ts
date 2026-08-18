@@ -1,7 +1,7 @@
 import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { loadConfig } from './config.js';
+import { loadConfig, MissingMemoryDirError } from './config.js';
 import { openCache } from './store/db.js';
 import { initialScan, watchSources, skillSyncSpec, memorySyncSpec } from './store/sync.js';
 import { SkillRepository } from './skills/repository.js';
@@ -12,7 +12,16 @@ import { registerRelocateTool } from './shared/relocate-tool.js';
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8767;
 
-const config = loadConfig();
+let config;
+try {
+  config = loadConfig();
+} catch (err) {
+  if (err instanceof MissingMemoryDirError) {
+    console.error(`[memory-bucket] ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
 const db = openCache(config.cacheDbPath);
 
 const skillSpec = skillSyncSpec(config.skillSources);

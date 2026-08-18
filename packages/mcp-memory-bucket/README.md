@@ -30,17 +30,36 @@ server runs.
 
 ### Configuration
 
-Optional `memory-bucket.config.json` in the working directory:
+The server refuses to start unless it's told explicitly which folder to use
+for memory — it will not silently default to whatever directory it happens
+to be launched from. Provide one of:
 
-```json
-{
-  "skill_sources": ["./skills"],
-  "memory_sources": ["./docs/superpowers/plans", "./docs/superpowers/specs"]
-}
-```
+- a `memory-bucket.config.json` file in the working directory:
 
-Paths are resolved relative to the working directory. Defaults match the
-example above if no config file is present.
+  ```json
+  {
+    "skill_sources": ["./skills"],
+    "memory_sources": ["./docs/superpowers/plans", "./docs/superpowers/specs"]
+  }
+  ```
+
+  Paths are resolved relative to the working directory. Defaults match the
+  example above if no `skill_sources`/`memory_sources` key is present.
+
+- the `MEMORY_BUCKET_DIR` environment variable, or the `--memory-dir <path>`
+  CLI flag — either sets the base directory that the (still-defaultable)
+  `skill_sources`/`memory_sources` are resolved against.
+
+  ```sh
+  npm start -- --memory-dir ./
+  # or: MEMORY_BUCKET_DIR=./ npm start
+  ```
+
+  Note the `--` before `--memory-dir` — without it, npm swallows the flag
+  itself instead of passing it through to the script.
+
+If none of these are present, the server exits immediately with an error
+instead of starting against the wrong folder.
 
 ## Test
 
