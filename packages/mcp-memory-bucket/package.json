@@ -27,6 +27,7 @@
     "dev:server": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.server.json && vite build && npm run copy:builtin-skills",
     "copy:builtin-skills": "mkdir -p dist/src/skills/builtin && cp -r src/skills/builtin/. dist/src/skills/builtin/",
+    "prepublishOnly": "npm run build",
     "start": "tsx src/server.ts",
     "start_in_folder": "tsx src/server.ts --memory-dir",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.client.json",
