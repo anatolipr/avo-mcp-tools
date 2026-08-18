@@ -28,18 +28,28 @@ Starts a stateless StreamableHTTP MCP server at `http://localhost:8767/mcp`
 the SQLite cache is kept current by a file watcher for as long as the
 server runs.
 
+The same process also serves a read-only browser UI at
+`http://localhost:8767/` for searching/filtering skills and memory docs by
+tag, status, owner, and fulltext (SQLite FTS5) — a way to review what's in
+the index without going through an agent. It has no write access; all
+edits still go through the `skill_*`/`memory_*` tools or the files
+directly. From an MCP session connected to this server, call
+`bucket_open_ui` to get the URL. The UI is a Lit + `avosignals` app built
+with Vite (`src/client/`, bundled to `dist/client/`) — `npm run build`
+builds it (along with the server); `npm start` does **not** rebuild it, so
+run `npm run build` again after changing anything under `src/client/`.
+`npm run dev` rebuilds the client on change alongside the server, for active
+UI development.
+
 ### Configuration
 
-The server refuses to start unless it's told explicitly which folder to use
-for memory — it will not silently default to whatever directory it happens
-to be launched from. Provide one of:
-
-- a `memory-bucket.config.json` file in the working directory:
+By default the server uses the current working directory as the base for
+memory/skill sources. Override that with one of:
 
   ```json
   {
     "skill_sources": ["./skills"],
-    "memory_sources": ["./docs/superpowers/plans", "./docs/superpowers/specs"]
+    "memory_sources": ["./docs/plans", "./docs/specs"]
   }
   ```
 
@@ -47,19 +57,16 @@ to be launched from. Provide one of:
   example above if no `skill_sources`/`memory_sources` key is present.
 
 - the `MEMORY_BUCKET_DIR` environment variable, or the `--memory-dir <path>`
-  CLI flag — either sets the base directory that the (still-defaultable)
+  CLI flag — either overrides the base directory that the (still-defaultable)
   `skill_sources`/`memory_sources` are resolved against.
 
   ```sh
-  npm start -- --memory-dir ./
-  # or: MEMORY_BUCKET_DIR=./ npm start
+  npm start -- --memory-dir /path/to/other/dir
+  # or: MEMORY_BUCKET_DIR=/path/to/other/dir npm start
   ```
 
   Note the `--` before `--memory-dir` — without it, npm swallows the flag
   itself instead of passing it through to the script.
-
-If none of these are present, the server exits immediately with an error
-instead of starting against the wrong folder.
 
 ## Test
 

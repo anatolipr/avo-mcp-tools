@@ -167,6 +167,15 @@ relocate(path, target: "skill" | "memory", keep_original?, overrides?)
   description already exists, it reports `moved: false` with a reason
   instead of duplicating.
 
+## Browser UI
+
+`bucket_open_ui` (no args) returns the URL of a read-only web viewer for
+browsing what's in the index — fulltext search, tag/status/owner filters,
+a result list, and a detail panel showing the raw body and source path.
+It's for a human reviewing the index, not for agent use beyond fetching
+the URL; it has no write endpoints, so all creation/edits still go through
+the tools above.
+
 ## Source layout
 
 Both namespaces support nested subdirectories — a skill discovered at
@@ -176,11 +185,11 @@ by path. (Skills are one folder per skill; memory docs are still flat
 `.md` files, nested or not.) Configure source directories via
 `memory-bucket.config.json` in the working directory (`skill_sources`,
 `memory_sources` — see `config.ts`); defaults are `./skills` and
-`./docs/superpowers/{plans,specs}`.
+`./docs/{plans,specs}`.
 
 ## What's not here yet
 
 No squad/company overlay resolution (`extends` is captured but inert), no
-ratings/pins, no bundles, no push-based discovery, no UI. See
+ratings/pins, no bundles, no push-based discovery. See
 `skill-bucket-v0-plan.md` at the workspace root for the full V0 plan and
 deferred fast-follow roadmap.

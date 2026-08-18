@@ -3,6 +3,7 @@ import path from 'node:path';
 import chokidar, { type FSWatcher } from 'chokidar';
 import type Database from 'better-sqlite3';
 import { readMarkdownFile } from './markdown-file.js';
+import { flattenTags } from './db.js';
 import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
 
 export interface TableSyncSpec<TFrontmatter> {
@@ -94,10 +95,21 @@ export function upsertFile<TFrontmatter>(
     `INSERT INTO ${spec.table} (${cols.join(', ')}) VALUES (${placeholders})
      ON CONFLICT(id) DO UPDATE SET ${updateClause}`
   ).run(...values);
+
+  db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(spec.table, id);
+  db.prepare(
+    `INSERT INTO search_index (ref_table, ref_id, description, body, tags) VALUES (?, ?, ?, ?, ?)`
+  ).run(spec.table, id, String(row.description ?? ''), parsed.body, flattenTags(String(row.tags ?? '[]')));
 }
 
 export function removeFile(db: Database.Database, table: 'skills' | 'memory_docs', filePath: string): void {
+  const existing = db.prepare(`SELECT id FROM ${table} WHERE source_path = ?`).get(filePath) as
+    | { id: string }
+    | undefined;
   db.prepare(`DELETE FROM ${table} WHERE source_path = ?`).run(filePath);
+  if (existing) {
+    db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(table, existing.id);
+  }
 }
 
 /** Full scan of all configured source dirs — used once at startup before the watcher takes over. */

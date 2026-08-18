@@ -33,7 +33,59 @@ export function openCache(dbPath: string): Database.Database {
     );
 
     CREATE INDEX IF NOT EXISTS idx_memory_docs_key ON memory_docs(key);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+      ref_table UNINDEXED,
+      ref_id UNINDEXED,
+      description,
+      body,
+      tags,
+      tokenize = 'porter unicode61'
+    );
   `);
 
+  backfillSearchIndex(db);
+
   return db;
+}
+
+/** One-time backfill for existing rows the first time search_index is introduced into a cache file. */
+function backfillSearchIndex(db: Database.Database): void {
+  const { count: indexed } = db.prepare(`SELECT COUNT(*) as count FROM search_index`).get() as { count: number };
+  if (indexed > 0) return;
+
+  const skillRows = db.prepare(`SELECT id, description, body, tags FROM skills`).all() as Array<{
+    id: string;
+    description: string;
+    body: string;
+    tags: string;
+  }>;
+  const memoryRows = db.prepare(`SELECT id, description, body, tags FROM memory_docs`).all() as Array<{
+    id: string;
+    description: string;
+    body: string;
+    tags: string;
+  }>;
+  if (skillRows.length === 0 && memoryRows.length === 0) return;
+
+  const insert = db.prepare(
+    `INSERT INTO search_index (ref_table, ref_id, description, body, tags) VALUES (?, ?, ?, ?, ?)`
+  );
+  const insertAll = db.transaction(() => {
+    for (const row of skillRows) {
+      insert.run('skills', row.id, row.description, row.body, flattenTags(row.tags));
+    }
+    for (const row of memoryRows) {
+      insert.run('memory_docs', row.id, row.description, row.body, flattenTags(row.tags));
+    }
+  });
+  insertAll();
+}
+
+export function flattenTags(tagsJson: string): string {
+  try {
+    return (JSON.parse(tagsJson) as string[]).join(' ');
+  } catch {
+    return '';
+  }
 }

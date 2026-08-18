@@ -1,7 +1,9 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { loadConfig, MissingMemoryDirError } from './config.js';
+import { loadConfig } from './config.js';
 import { openCache } from './store/db.js';
 import { initialScan, watchSources, skillSyncSpec, memorySyncSpec } from './store/sync.js';
 import { SkillRepository } from './skills/repository.js';
@@ -9,19 +11,20 @@ import { MemoryRepository } from './memory/repository.js';
 import { registerSkillTools } from './skills/tools.js';
 import { registerMemoryTools } from './memory/tools.js';
 import { registerRelocateTool } from './shared/relocate-tool.js';
+import { buildWebRouter } from './web/routes.js';
+import { registerUiTool } from './web/ui-tool.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// __dirname is <pkg>/src when run via tsx (dev/test) and <pkg>/dist/src once
+// built — either way dist/client (the Vite output) sits one level above the
+// nearer of the two src/ dirs, so walk up until we're out of any src/ nesting.
+const packageRoot = __dirname.endsWith(`${path.sep}dist${path.sep}src`)
+  ? path.join(__dirname, '..', '..')
+  : path.join(__dirname, '..');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8767;
 
-let config;
-try {
-  config = loadConfig();
-} catch (err) {
-  if (err instanceof MissingMemoryDirError) {
-    console.error(`[memory-bucket] ${err.message}`);
-    process.exit(1);
-  }
-  throw err;
-}
+const config = loadConfig();
 const db = openCache(config.cacheDbPath);
 
 const skillSpec = skillSyncSpec(config.skillSources);
@@ -51,11 +54,14 @@ function buildMcpServer(): McpServer {
   registerSkillTools(server, skillRepo);
   registerMemoryTools(server, memoryRepo);
   registerRelocateTool(server, skillRepo, memoryRepo);
+  registerUiTool(server, PORT);
   return server;
 }
 
 const app = express();
 app.use(express.json());
+app.use(buildWebRouter(db));
+app.use(express.static(path.join(packageRoot, 'dist', 'client')));
 
 app.post('/mcp', async (req, res) => {
   const server = buildMcpServer();
