@@ -1,16 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getOrCreateTenant as getOrCreateTenantForForm, tenants, startIdleSweep, createHttpServer, attachWebSocketServer } from '@avo-mcp-tools/mcp-tenant-lib';
+import { getOrCreateTenant as getOrCreateTenantForForm, tenants, startIdleSweep, createHttpServer, attachWebSocketServer } from 'mcp-tenant-lib';
 import type { FormDef } from './types.js';
 import { initialValuesFor } from './types.js';
 import { registerFormTools } from './tools/register.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// __dirname is <pkg>/src when run via tsx (dev/test) and <pkg>/dist/src once
+// built — either way dist/client and config sit one level above the nearer
+// of the two src/ dirs, so walk up until we're out of any src/ nesting.
+const packageRoot = __dirname.endsWith(`${path.sep}dist${path.sep}src`)
+  ? path.join(__dirname, '..', '..')
+  : path.join(__dirname, '..');
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8765;
 
 const initialFormDef = JSON.parse(
-  fs.readFileSync(path.join(__dirname, '..', 'config', 'fields.json'), 'utf-8')
+  fs.readFileSync(path.join(packageRoot, 'config', 'fields.json'), 'utf-8')
 ) as FormDef;
 
 const getOrCreateTenant = (id: string) =>
@@ -22,7 +28,7 @@ getOrCreateTenant('default');
 
 startIdleSweep((id) => console.error(`[mcp] sweeping idle tenant: ${id}`));
 
-const STATIC_DIR = path.join(__dirname, '..', 'dist', 'client');
+const STATIC_DIR = path.join(packageRoot, 'dist', 'client');
 
 const httpServer = createHttpServer({
   port: PORT,

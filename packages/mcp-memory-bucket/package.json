@@ -10,7 +10,7 @@
   },
   "license": "MIT",
   "bin": {
-    "mcp-memory-bucket": "./bin/mcp-memory-bucket.js"
+    "mcp-memory-bucket": "bin/mcp-memory-bucket.js"
   },
   "main": "dist/src/server.js",
   "files": [

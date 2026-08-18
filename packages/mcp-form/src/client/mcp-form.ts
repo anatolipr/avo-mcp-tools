@@ -1,6 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { Signal, SignalWatcher } from 'avosignals';
-import type { ServerMessage, ClientMessage } from '@avo-mcp-tools/mcp-tenant-lib';
+import type { ServerMessage, ClientMessage } from 'mcp-tenant-lib';
 import type { FieldDef, SubFieldDef, FormDef, FieldValues } from '../types.js';
 import './html-output-block.js';
 

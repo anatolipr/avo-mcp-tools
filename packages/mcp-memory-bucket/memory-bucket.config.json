@@ -1,0 +1,18 @@
+{
+  "skill_sources": [
+    {
+      "name": "super-skills",
+      "path": "../../.agents/skills"
+    },
+    {
+      "name": "demo-skills",
+      "path": "demo/skills"
+    }
+  ],
+  "memory_sources": [
+    {
+      "name": "docs",
+      "path": "demo/docs"
+    }
+  ]
+}
