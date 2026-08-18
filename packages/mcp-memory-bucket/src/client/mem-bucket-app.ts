@@ -4,6 +4,7 @@ import { Signal, Computed, SignalWatcher } from 'avosignals';
 import './result-list.js';
 import './detail-panel.js';
 import './add-root-modal.js';
+import './tag-multiselect.js';
 import type { Entry, Facets, Selection, TypeFilter, RootsResponse, Root } from './types.js';
 
 const TYPE_OPTIONS: Array<{ value: TypeFilter; label: string }> = [
@@ -14,6 +15,15 @@ const TYPE_OPTIONS: Array<{ value: TypeFilter; label: string }> = [
 
 const EMPTY_FACETS: Facets = { tags: [], statuses: [], owners: [], doc_types: [], key_types: [], roots: [] };
 const EMPTY_ROOTS: RootsResponse = { skill: [], memory: [] };
+
+const SPLIT_STORAGE_KEY = 'mem-bucket-split-pct';
+const SPLIT_MIN_PCT = 20;
+const SPLIT_MAX_PCT = 80;
+
+function loadSplitPct(): number {
+  const raw = Number(localStorage.getItem(SPLIT_STORAGE_KEY));
+  return Number.isFinite(raw) && raw >= SPLIT_MIN_PCT && raw <= SPLIT_MAX_PCT ? raw : 40;
+}
 
 export class MemBucketApp extends LitElement {
   static styles = css`
@@ -34,16 +44,6 @@ export class MemBucketApp extends LitElement {
     }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .filter-label { font-size: 12px; opacity: 0.6; font-weight: 600; }
-    .chip {
-      border: 1px solid #8886;
-      border-radius: 999px;
-      padding: 3px 10px;
-      font-size: 12px;
-      cursor: pointer;
-      background: none;
-      color: inherit;
-    }
-    .chip.active { background: #2563eb; border-color: #2563eb; color: white; }
     .type-toggle button {
       border: 1px solid #8886;
       background: none;
@@ -56,15 +56,40 @@ export class MemBucketApp extends LitElement {
     .type-toggle button:first-child { border-radius: 6px 0 0 6px; }
     .type-toggle button:last-child { border-radius: 0 6px 6px 0; }
     .body-region { display: flex; height: calc(100vh - 130px); }
-    result-list { flex: 1 1 40%; overflow-y: auto; border-right: 1px solid #8883; }
-    detail-panel { flex: 1 1 60%; overflow-y: auto; }
+    result-list { overflow-y: auto; flex: 0 0 auto; }
+    detail-panel { overflow-y: auto; flex: 1 1 auto; min-width: 0; }
+    .splitter {
+      flex: 0 0 auto;
+      width: 6px;
+      cursor: col-resize;
+      background: #8882;
+      position: relative;
+    }
+    .splitter:hover, .splitter.dragging { background: #2563eb55; }
+    .splitter::after {
+      content: '';
+      position: absolute;
+      top: 0; bottom: 0;
+      left: -3px; right: -3px;
+    }
     label.small { font-size: 12px; opacity: 0.7; }
-    .roots-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .roots-bar {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 10px 16px;
+      border-bottom: 1px solid #8883;
+      background: #8881a;
+    }
     .root-chip {
       border: 1px solid #8886; border-radius: 999px; padding: 3px 8px 3px 10px; font-size: 12px;
       cursor: pointer; background: none; color: inherit; display: inline-flex; align-items: center; gap: 6px;
     }
-    .root-chip.active { background: #7c3aed; border-color: #7c3aed; color: white; }
+    .root-chip.active { background: #a78bfa33; border-color: #a78bfa; color: #6d28d9; }
+    @media (prefers-color-scheme: dark) {
+      .root-chip.active { background: #a78bfa33; border-color: #a78bfa; color: #d8caff; }
+    }
     .root-chip .remove {
       opacity: 0.6; font-size: 12px; line-height: 1; padding: 2px; border-radius: 50%;
     }
@@ -93,10 +118,37 @@ export class MemBucketApp extends LitElement {
   #showAddRoot = new Signal<boolean>(false);
   #removingRoot = new Signal<string>('');
   #rootsLoaded = new Signal<boolean>(false);
+  #splitPct = new Signal<number>(loadSplitPct());
+  #dragging = new Signal<boolean>(false);
+
+  #boundOnDragMove = (e: PointerEvent) => this.#onDragMove(e);
+  #boundOnDragEnd = () => this.#onDragEnd();
 
   constructor() {
     super();
     new SignalWatcher(this);
+  }
+
+  #onDragStart(e: PointerEvent) {
+    e.preventDefault();
+    this.#dragging.set(true);
+    document.addEventListener('pointermove', this.#boundOnDragMove);
+    document.addEventListener('pointerup', this.#boundOnDragEnd);
+  }
+
+  #onDragMove(e: PointerEvent) {
+    const region = this.renderRoot.querySelector('.body-region') as HTMLElement | null;
+    if (!region) return;
+    const rect = region.getBoundingClientRect();
+    const pct = ((e.clientX - rect.left) / rect.width) * 100;
+    this.#splitPct.set(Math.min(SPLIT_MAX_PCT, Math.max(SPLIT_MIN_PCT, pct)));
+  }
+
+  #onDragEnd() {
+    this.#dragging.set(false);
+    document.removeEventListener('pointermove', this.#boundOnDragMove);
+    document.removeEventListener('pointerup', this.#boundOnDragEnd);
+    localStorage.setItem(SPLIT_STORAGE_KEY, String(this.#splitPct.value));
   }
 
   #requestQuery = new Computed(() => {
@@ -211,6 +263,24 @@ export class MemBucketApp extends LitElement {
     }
 
     return html`
+      <div class="roots-bar">
+        <span class="filter-label">Roots:</span>
+        ${allRoots.map(
+          (root) => html`
+            <button class="root-chip ${this.#activeRoots.value.includes(root.name) ? 'active' : ''}" @click=${() =>
+              this.#toggleRoot(root.name)}>
+              ${root.name}
+              <span
+                class="remove"
+                title="Remove root"
+                @click=${(e: Event) => this.#removeRoot(root, e)}
+              >${this.#removingRoot.value === root.name ? '…' : '✕'}</span
+              >
+            </button>
+          `
+        )}
+        <button class="add-root-btn" @click=${() => this.#showAddRoot.set(true)}>+ Add root</button>
+      </div>
       <div class="filters">
         <input
           type="search"
@@ -231,45 +301,28 @@ export class MemBucketApp extends LitElement {
           )}
         </div>
         <div class="row">
-          <span class="filter-label">Tags:</span>
           ${facets.tags.length === 0
-            ? html`<label class="small">no tags yet</label>`
-            : facets.tags.map(
-                (tag) => html`
-                  <button
-                    class="chip ${this.#activeTags.value.includes(tag) ? 'active' : ''}"
-                    @click=${() => this.#toggleTag(tag)}
-                  >
-                    ${tag}
-                  </button>
-                `
-              )}
-        </div>
-        <div class="roots-bar">
-          <span class="filter-label">Roots:</span>
-          ${allRoots.map(
-            (root) => html`
-              <button class="root-chip ${this.#activeRoots.value.includes(root.name) ? 'active' : ''}" @click=${() =>
-                this.#toggleRoot(root.name)}>
-                ${root.name}
-                <span
-                  class="remove"
-                  title="Remove root"
-                  @click=${(e: Event) => this.#removeRoot(root, e)}
-                >${this.#removingRoot.value === root.name ? '…' : '✕'}</span
-                >
-              </button>
-            `
-          )}
-          <button class="add-root-btn" @click=${() => this.#showAddRoot.set(true)}>+ Add root</button>
+            ? html`<span class="filter-label">Tags:</span> <label class="small">no tags yet</label>`
+            : html`
+                <tag-multiselect
+                  .tags=${facets.tags}
+                  .active=${this.#activeTags.value}
+                  .onToggle=${(tag: string) => this.#toggleTag(tag)}
+                ></tag-multiselect>
+              `}
         </div>
       </div>
       <div class="body-region">
         <result-list
+          style=${`width: ${this.#splitPct.value}%; border-right: 1px solid #8883;`}
           .results=${this.#results.value}
           .showRoot=${allRoots.length > 1}
           .onSelect=${(e: Entry) => this.#onSelect(e)}
         ></result-list>
+        <div
+          class="splitter ${this.#dragging.value ? 'dragging' : ''}"
+          @pointerdown=${(e: PointerEvent) => this.#onDragStart(e)}
+        ></div>
         <detail-panel .selected=${this.#selected.value}></detail-panel>
       </div>
       ${this.#showAddRoot.value

@@ -1,24 +1,41 @@
 {
   "name": "js-bridge-mcp",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Generic bridge: exposes MCP tools discovered from a connected page's own JSON tool manifest, dispatched over a cross-origin WebSocket. Ships a hello-world example page under legacy-page/.",
-  "main": "src/server.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anatolipr/avo-mcp-tools.git",
+    "directory": "packages/js-bridge-mcp"
+  },
+  "license": "MIT",
+  "bin": {
+    "js-bridge-mcp": "bin/js-bridge-mcp.js"
+  },
+  "main": "dist/src/server.js",
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "dev": "npm-run-all --parallel dev:client dev:mcp",
     "dev:client": "vite build --watch",
     "dev:mcp": "tsx watch src/server.ts",
-    "build": "vite build",
+    "build": "tsc -p tsconfig.build.json && vite build",
     "prestart:mcp": "npm run build",
     "start:mcp": "tsx src/server.ts",
     "start:static": "http-server legacy-page --cors -p 8080",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.client.json",
     "stop": "kill -9 $(lsof -ti :${PORT:-8766}) 2>/dev/null && echo 'Server stopped' || echo 'No server running'",
     "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {
-    "@avo-mcp-tools/mcp-tenant-lib": "*",
+    "mcp-tenant-lib": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "ws": "^8.18.0",
     "zod": "^3.23.8"

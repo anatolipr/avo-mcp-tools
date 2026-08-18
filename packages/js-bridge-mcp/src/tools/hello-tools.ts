@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Tenant } from '@avo-mcp-tools/mcp-tenant-lib';
+import type { Tenant } from 'mcp-tenant-lib';
 import type { HelloState } from '../types.js';
 
 export interface ToolDef {

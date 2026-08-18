@@ -1,10 +1,15 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getOrCreateTenant as getOrCreateTenantFor, tenants, startIdleSweep, createHttpServer, attachWebSocketServer } from '@avo-mcp-tools/mcp-tenant-lib';
+import { getOrCreateTenant as getOrCreateTenantFor, tenants, startIdleSweep, createHttpServer, attachWebSocketServer } from 'mcp-tenant-lib';
 import { initialHelloState } from './types.js';
 import { registerHelloTools } from './tools/register.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// __dirname is <pkg>/src when run via tsx (dev/test) and <pkg>/dist/src once
+// built for publishing.
+const packageRoot = __dirname.endsWith(`${path.sep}dist${path.sep}src`)
+  ? path.join(__dirname, '..', '..')
+  : path.join(__dirname, '..');
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8766;
 
 const getOrCreateTenant = (id: string) => getOrCreateTenantFor(id, undefined, { ...initialHelloState });
@@ -17,7 +22,7 @@ startIdleSweep((id) => console.error(`[mcp] sweeping idle tenant: ${id}`));
 // Only main.js is ever fetched from here — the legacy page this bundle is
 // injected into is hosted separately (see legacy-page/, run via
 // `npm run start:static`), not by this server.
-const STATIC_DIR = path.join(__dirname, '..', 'dist', 'client');
+const STATIC_DIR = path.join(packageRoot, 'dist', 'client');
 
 const httpServer = createHttpServer({
   port: PORT,

@@ -24,8 +24,11 @@ export class ResultList extends LitElement {
     .tag { font-size: 10px; border: 1px solid #8886; border-radius: 999px; padding: 1px 6px; }
     .type-badge { font-size: 10px; text-transform: uppercase; opacity: 0.6; }
     .root-badge {
-      font-size: 10px; text-transform: uppercase; opacity: 0.75; border: 1px solid #7c3aed88;
-      color: #7c3aed; border-radius: 4px; padding: 0 4px;
+      font-size: 10px; text-transform: uppercase; opacity: 0.9; border: 1px solid #a78bfa88;
+      color: #6d28d9; background: #a78bfa22; border-radius: 4px; padding: 0 4px;
+    }
+    @media (prefers-color-scheme: dark) {
+      .root-badge { color: #d8caff; }
     }
     .empty { padding: 24px; opacity: 0.6; font-size: 13px; }
   `;

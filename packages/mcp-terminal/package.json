@@ -1,13 +1,29 @@
 {
-  "name": "mcp-terminal",
+  "name": "avo-mcp-terminal",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Sandboxed filesystem/terminal tools for agents, exposed both as a real MCP stdio server and as a human-relay TUI (copy/paste bridge) for agents with no direct tool access.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anatolipr/avo-mcp-tools.git",
+    "directory": "packages/mcp-terminal"
+  },
+  "license": "MIT",
   "bin": {
-    "mcp-terminal": "./bin/mcp-terminal.js"
+    "mcp-terminal": "bin/mcp-terminal.js"
+  },
+  "main": "dist/src/mcp-server.js",
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build",
     "mcp": "tsx src/mcp-server.ts",
     "relay": "tsx src/relay-server.ts",
     "typecheck": "tsc --noEmit",
