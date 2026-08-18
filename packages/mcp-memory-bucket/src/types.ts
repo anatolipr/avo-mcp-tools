@@ -26,6 +26,8 @@ export interface SkillFrontmatter {
     extends: string | null;
     [key: string]: string | null; // spec allows arbitrary additional string-valued keys
   };
+  deprecated?: boolean; // independent of metadata.status; defaults to false
+  created_at?: string; // ISO date string, stamped once at create() time; absent on files predating this field
   source_path: string; // filled in at runtime, not authored — path to the SKILL.md file
   root: string; // filled in at runtime, not authored — name of the configured root this file lives under
 }
@@ -52,6 +54,8 @@ export interface MemoryFrontmatter {
   tags: string[];
   status: MemoryStatus;
   related_to: string | null;
+  deprecated?: boolean; // independent of status; defaults to false
+  created_at?: string; // ISO date string, stamped once at create() time; absent on docs predating this field
   source_path: string;
   root: string;
 }

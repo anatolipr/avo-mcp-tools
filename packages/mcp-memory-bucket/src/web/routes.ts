@@ -23,6 +23,8 @@ interface EntryRow {
   key_type: string | null;
   root: string;
   mtime_ms: number;
+  deprecated: boolean;
+  created_at: string | null;
 }
 
 function asArray(v: unknown): string[] {
@@ -45,6 +47,8 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
   const keyTypes = asArray(req.query.key_type);
   const roots = asArray(req.query.root);
   const q = (req.query.q as string | undefined)?.trim();
+  const deprecatedParam = req.query.deprecated as string | undefined;
+  const deprecated = deprecatedParam === '0' || deprecatedParam === '1' ? deprecatedParam : undefined;
 
   const matchedIds: { skills: Set<string>; memory_docs: Set<string> } | null = q
     ? matchSearch(db, q)
@@ -56,11 +60,11 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
   const results: EntryRow[] = [];
 
   if (type === 'skill' || type === 'all') {
-    results.push(...queryTable(db, 'skills', { tags, statuses, owners, docTypes: [], keyTypes: [], roots }, matchedIds?.skills));
+    results.push(...queryTable(db, 'skills', { tags, statuses, owners, docTypes: [], keyTypes: [], roots, deprecated }, matchedIds?.skills));
   }
   if (type === 'memory' || type === 'all') {
     results.push(
-      ...queryTable(db, 'memory_docs', { tags, statuses, owners: [], docTypes, keyTypes, roots }, matchedIds?.memory_docs)
+      ...queryTable(db, 'memory_docs', { tags, statuses, owners: [], docTypes, keyTypes, roots, deprecated }, matchedIds?.memory_docs)
     );
   }
 
@@ -68,6 +72,12 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
   results.sort((a, b) => {
     if (sort === 'mtime_asc') return a.mtime_ms - b.mtime_ms;
     if (sort === 'name_asc') return a.name.localeCompare(b.name);
+    if (sort === 'created_at_asc') {
+      if (!a.created_at && !b.created_at) return 0;
+      if (!a.created_at) return 1; // missing created_at sorts last
+      if (!b.created_at) return -1;
+      return a.created_at.localeCompare(b.created_at);
+    }
     return b.mtime_ms - a.mtime_ms; // mtime_desc, default
   });
 
@@ -77,7 +87,15 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
 function queryTable(
   db: Database.Database,
   table: 'skills' | 'memory_docs',
-  filters: { tags: string[]; statuses: string[]; owners: string[]; docTypes: string[]; keyTypes: string[]; roots: string[] },
+  filters: {
+    tags: string[];
+    statuses: string[];
+    owners: string[];
+    docTypes: string[];
+    keyTypes: string[];
+    roots: string[];
+    deprecated?: string;
+  },
   restrictToIds: Set<string> | undefined
 ): EntryRow[] {
   if (restrictToIds && restrictToIds.size === 0) return [];
@@ -109,6 +127,10 @@ function queryTable(
     where += ` AND root IN (${filters.roots.map(() => '?').join(', ')})`;
     params.push(...filters.roots);
   }
+  if (filters.deprecated !== undefined) {
+    where += ` AND deprecated = ?`;
+    params.push(filters.deprecated === '1' ? 1 : 0);
+  }
   if (restrictToIds) {
     where += ` AND id IN (${[...restrictToIds].map(() => '?').join(', ')})`;
     params.push(...restrictToIds);
@@ -116,7 +138,7 @@ function queryTable(
 
   if (table === 'skills') {
     const rows = db
-      .prepare(`SELECT id, description, owner, status, tags, root, mtime_ms FROM skills WHERE ${where}`)
+      .prepare(`SELECT id, description, owner, status, tags, root, mtime_ms, deprecated, created_at FROM skills WHERE ${where}`)
       .all(...params) as Array<{
       id: string;
       description: string;
@@ -125,6 +147,8 @@ function queryTable(
       tags: string;
       root: string;
       mtime_ms: number;
+      deprecated: number;
+      created_at: string | null;
     }>;
     return rows.map((r) => ({
       _table: 'skills',
@@ -138,11 +162,15 @@ function queryTable(
       key_type: null,
       root: r.root,
       mtime_ms: r.mtime_ms,
+      deprecated: !!r.deprecated,
+      created_at: r.created_at,
     }));
   }
 
   const rows = db
-    .prepare(`SELECT id, key, description, doc_type, key_type, status, tags, root, mtime_ms FROM memory_docs WHERE ${where}`)
+    .prepare(
+      `SELECT id, key, description, doc_type, key_type, status, tags, root, mtime_ms, deprecated, created_at FROM memory_docs WHERE ${where}`
+    )
     .all(...params) as Array<{
     id: string;
     key: string;
@@ -153,6 +181,8 @@ function queryTable(
     tags: string;
     root: string;
     mtime_ms: number;
+    deprecated: number;
+    created_at: string | null;
   }>;
   return rows.map((r) => ({
     _table: 'memory_docs',
@@ -166,6 +196,8 @@ function queryTable(
     key_type: r.key_type,
     root: r.root,
     mtime_ms: r.mtime_ms,
+    deprecated: !!r.deprecated,
+    created_at: r.created_at,
   }));
 }
 
@@ -312,6 +344,79 @@ export function buildWebRouter(
     const tags = JSON.parse(row.tags as string);
     const trigger_phrases = row.trigger_phrases ? JSON.parse(row.trigger_phrases as string) : undefined;
     res.json({ ...row, tags, trigger_phrases });
+  });
+
+  router.patch('/api/entries/:table/:id/deprecated', (req: Request, res: Response) => {
+    const { table, id } = req.params;
+    const { deprecated } = req.body as { deprecated?: boolean };
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    if (typeof deprecated !== 'boolean') {
+      res.status(400).json({ error: 'body must be { deprecated: boolean }' });
+      return;
+    }
+    try {
+      if (table === 'skills') skillRepo.update(id, { deprecated });
+      else memoryRepo.update(id, { deprecated });
+      res.json({ id, deprecated });
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  router.post('/api/entries/:table/bulk/deprecated', (req: Request, res: Response) => {
+    const { table } = req.params;
+    const { ids, deprecated } = req.body as { ids?: string[]; deprecated?: boolean };
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!Array.isArray(ids) || ids.length === 0 || typeof deprecated !== 'boolean') {
+      res.status(400).json({ error: 'body must be { ids: string[], deprecated: boolean }' });
+      return;
+    }
+    const results = table === 'skills' ? skillRepo.bulkUpdate(ids, { deprecated }) : memoryRepo.bulkUpdate(ids, { deprecated });
+    res.json({ results });
+  });
+
+  router.delete('/api/entries/:table/:id', (req: Request, res: Response) => {
+    const { table, id } = req.params;
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    try {
+      if (table === 'skills') skillRepo.delete(id);
+      else memoryRepo.delete(id);
+      res.json({ deleted: id });
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  router.post('/api/entries/:table/bulk/delete', (req: Request, res: Response) => {
+    const { table } = req.params;
+    const { ids } = req.body as { ids?: string[] };
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!Array.isArray(ids) || ids.length === 0) {
+      res.status(400).json({ error: 'body must be { ids: string[] }' });
+      return;
+    }
+    const results = table === 'skills' ? skillRepo.bulkDelete(ids) : memoryRepo.bulkDelete(ids);
+    res.json({ results });
   });
 
   router.get('/api/facets', (req: Request, res: Response) => {

@@ -15,6 +15,8 @@ export function openCache(dbPath: string): Database.Database {
       extends TEXT,
       source_path TEXT NOT NULL UNIQUE, -- path to SKILL.md
       root TEXT NOT NULL DEFAULT '',  -- name of the configured root this file lives under
+      deprecated INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT,
       body TEXT NOT NULL,
       mtime_ms INTEGER NOT NULL
     );
@@ -30,6 +32,8 @@ export function openCache(dbPath: string): Database.Database {
       related_to TEXT,
       source_path TEXT NOT NULL UNIQUE,
       root TEXT NOT NULL DEFAULT '',  -- name of the configured root this file lives under
+      deprecated INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT,
       body TEXT NOT NULL,
       mtime_ms INTEGER NOT NULL
     );
@@ -46,18 +50,31 @@ export function openCache(dbPath: string): Database.Database {
     );
   `);
 
-  addRootColumnIfMissing(db, 'skills');
-  addRootColumnIfMissing(db, 'memory_docs');
+  ensureColumns(db, 'skills', [
+    ['root', "TEXT NOT NULL DEFAULT ''"],
+    ['deprecated', 'INTEGER NOT NULL DEFAULT 0'],
+    ['created_at', 'TEXT'],
+  ]);
+  ensureColumns(db, 'memory_docs', [
+    ['root', "TEXT NOT NULL DEFAULT ''"],
+    ['deprecated', 'INTEGER NOT NULL DEFAULT 0'],
+    ['created_at', 'TEXT'],
+  ]);
   backfillSearchIndex(db);
 
   return db;
 }
 
-/** Migration for cache files created before the `root` column existed. */
-function addRootColumnIfMissing(db: Database.Database, table: 'skills' | 'memory_docs'): void {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-  if (columns.some((c) => c.name === 'root')) return;
-  db.exec(`ALTER TABLE ${table} ADD COLUMN root TEXT NOT NULL DEFAULT ''`);
+/** Migration for cache files created before a given column existed. Safe to call every startup. */
+function ensureColumns(
+  db: Database.Database,
+  table: 'skills' | 'memory_docs',
+  columns: Array<[name: string, ddlType: string]>
+): void {
+  const existing = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
+  for (const [name, ddlType] of columns) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddlType}`);
+  }
 }
 
 /** One-time backfill for existing rows the first time search_index is introduced into a cache file. */

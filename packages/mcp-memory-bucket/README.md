@@ -16,6 +16,35 @@ this server. See
 [skill-bucket-v0-plan.md](../../skill-bucket-v0-plan.md) at the workspace
 root for the full design plan.
 
+## Example uses
+
+A few illustrative scenarios (not transcripts of real sessions):
+
+**Saving a reusable pattern as a skill.** After pairing on a Lit dropdown
+component with keyboard navigation and ARIA roles, you tell the agent
+"save this as a skill for next time." It calls `skill_create` with a
+description covering both what the pattern does and when to use it, so
+future sessions can discover it by keyword.
+
+**Capturing a plan before a big refactor.** Before starting a multi-day
+migration, you ask the agent to write out its plan and save it under the
+ticket key: `memory_create(key: "RMXS-142", doc_type: "plan", ...)`. Later
+sessions on the same ticket call `memory_get("RMXS-142")` to pick up
+exactly where the last one left off, without you re-explaining context.
+
+**Triaging a year-old bucket.** A memory bucket that's accumulated docs
+for a year has a lot of dead weight. Sorting the web UI by "Oldest first"
+surfaces the stalest entries; selecting a batch and clicking "Mark
+deprecated" flags them without losing their original `status`, and a
+follow-up "Delete" (after a confirm dialog) clears out the ones nobody
+needs. The same triage works from an agent via `memory_bulk_update(ids,
+{ deprecated: true })` followed by `memory_bulk_delete`.
+
+**Bulk-tagging after a search.** "Find every skill about deploys and mark
+the outdated ones deprecated" becomes `skill_search("deploy")` to find
+candidates, then `skill_bulk_update(names, { deprecated: true })` to flag
+the stale ones in one call — no need to touch each file individually.
+
 ## Run
 
 ### Via npx
@@ -70,19 +99,24 @@ are, and the cache can be safely deleted; it's rebuilt on next startup.
 
 The same process also serves a browser UI at `http://localhost:8767/` for
 searching/filtering skills and memory docs by tag, root, status, owner,
-and fulltext (SQLite FTS5) — a way to review what's in the index without
-going through an agent. It also manages **roots**: add a skill or memory
-root by browsing the filesystem, or remove one (unregisters it and drops
-its cached rows — never deletes files on disk). Editing individual skills
-or memory docs still goes through the `skill_*`/`memory_*` tools or the
-files directly. From an MCP session connected to this server, call
-`bucket_open_ui` to get the URL. If no roots are configured yet, the UI
-opens straight into a first-run "add your first root" screen. The UI is a
-Lit + `avosignals` app built with Vite (`src/client/`, bundled to
-`dist/client/`) — `npm run build` builds it (along with the server);
-`npm start` does **not** rebuild it, so run `npm run build` again after
-changing anything under `src/client/`. `npm run dev` rebuilds the client
-on change alongside the server, for active UI development.
+deprecated flag, and fulltext (SQLite FTS5), and sorting by creation date
+or last-touched — a way to review and clean up what's in the index
+without going through an agent. It also manages **roots**: add a skill or
+memory root by browsing the filesystem, or remove one (unregisters it and
+drops its cached rows — never deletes files on disk). Beyond browsing,
+the UI supports marking entries **deprecated** (independent of `status`,
+so you don't lose "shipped"/"active" context when flagging something
+stale) and **deleting** entries — both single-item and multi-select bulk,
+with a confirm dialog before any delete. Deeper edits (renaming, editing
+body content, changing tags) still go through the `skill_*`/`memory_*`
+tools or the files directly. From an MCP session connected to this
+server, call `bucket_open_ui` to get the URL. If no roots are configured
+yet, the UI opens straight into a first-run "add your first root" screen.
+The UI is a Lit + `avosignals` app built with Vite (`src/client/`,
+bundled to `dist/client/`) — `npm run build` builds it (along with the
+server); `npm start` does **not** rebuild it, so run `npm run build`
+again after changing anything under `src/client/`. `npm run dev` rebuilds
+the client on change alongside the server, for active UI development.
 
 ### Configuration
 

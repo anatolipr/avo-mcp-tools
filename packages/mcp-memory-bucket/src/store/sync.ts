@@ -17,8 +17,8 @@ export interface TableSyncSpec<TFrontmatter> {
   toRow: (fm: TFrontmatter, sourcePath: string) => Record<string, unknown>;
 }
 
-const skillColumns = ['id', 'description', 'owner', 'status', 'tags', 'trigger_phrases', 'extends'];
-const memoryColumns = ['id', 'key', 'key_type', 'description', 'doc_type', 'tags', 'status', 'related_to'];
+const skillColumns = ['id', 'description', 'owner', 'status', 'tags', 'trigger_phrases', 'extends', 'deprecated', 'created_at'];
+const memoryColumns = ['id', 'key', 'key_type', 'description', 'doc_type', 'tags', 'status', 'related_to', 'deprecated', 'created_at'];
 
 export function skillSyncSpec(sources: NamedRoot[]): TableSyncSpec<SkillFrontmatter> {
   return {
@@ -35,6 +35,8 @@ export function skillSyncSpec(sources: NamedRoot[]): TableSyncSpec<SkillFrontmat
       tags: JSON.stringify(fm.tags ?? []),
       trigger_phrases: JSON.stringify(fm.trigger_phrases ?? []),
       extends: fm.metadata?.extends ?? null,
+      deprecated: fm.deprecated ? 1 : 0,
+      created_at: fm.created_at ?? null,
     }),
   };
 }
@@ -55,6 +57,8 @@ export function memorySyncSpec(sources: NamedRoot[]): TableSyncSpec<MemoryFrontm
       tags: JSON.stringify(fm.tags ?? []),
       status: fm.status ?? 'active',
       related_to: fm.related_to ?? null,
+      deprecated: fm.deprecated ? 1 : 0,
+      created_at: fm.created_at ?? null,
     }),
   };
 }

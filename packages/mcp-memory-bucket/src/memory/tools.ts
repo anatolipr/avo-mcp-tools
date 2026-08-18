@@ -27,12 +27,61 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
   );
 
   mcp.tool(
+    'memory_bulk_get',
+    'Fetches many memory docs by id in one call, including full markdown bodies — e.g. hydrating a batch of memory_search hits (which return ids, not keys). Missing ids are simply omitted from the result, not errors.',
+    { ids: z.array(z.string()).min(1) },
+    async ({ ids }) => {
+      const docs = repo.bulkGet(ids);
+      return { content: [{ type: 'text', text: JSON.stringify(docs, null, 2) }] };
+    }
+  );
+
+  mcp.tool(
     'memory_list',
     'Browses available memory keys (optionally filtered by a prefix) without needing to know the exact key upfront. Returns each key with its doc count.',
     { key_prefix: z.string().optional() },
     async ({ key_prefix }) => {
       const keys = repo.listKeys(key_prefix);
       return { content: [{ type: 'text', text: JSON.stringify(keys, null, 2) }] };
+    }
+  );
+
+  mcp.tool(
+    'memory_search',
+    'Full-text search over memory doc description/body/tags (grep/find-like, ranked by relevance) — unlike memory_get\'s exact-key lookup, this searches by content across all keys. `query` is raw SQLite FTS5 MATCH syntax: bare words, "exact phrases", prefix* wildcards, AND/OR/NOT boolean operators; hyphenated/punctuated terms must be quoted, e.g. "blue-green". Can be combined with doc_type/status/tag filters. Returns ranked hits with a highlighted snippet, not the full body — call memory_get(key) or fetch by id for that.',
+    {
+      query: z.string().describe('FTS5 match expression, e.g. `migration AND rollback` or `"blue green"`'),
+      doc_type: z.enum(MEMORY_DOC_TYPES).optional(),
+      status: z.enum(MEMORY_STATUS).optional(),
+      tag: z.string().optional(),
+      ...(multiRoot ? { root: z.string().optional().describe(`filter to one root: ${rootNames}`) } : {}),
+      limit: z.number().int().positive().max(100).optional(),
+      offset: z.number().int().nonnegative().optional(),
+    },
+    async ({ query, doc_type, status, tag, root, limit, offset }: any) => {
+      try {
+        const hits = repo.search(query, { docType: doc_type, status, tag, root, limit, offset });
+        return { content: [{ type: 'text', text: JSON.stringify(hits, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
+      }
+    }
+  );
+
+  mcp.tool(
+    'memory_bulk_update',
+    'Applies the same frontmatter change to many memory docs at once by id — e.g. add/remove a tag across a batch found via memory_search, or mark a group of docs "shipped". add_tags/remove_tags merge or subtract per-doc; status/related_to overwrite uniformly when provided. Body is never touched. Returns per-id success/failure so one bad id doesn\'t abort the batch.',
+    {
+      ids: z.array(z.string()).min(1),
+      add_tags: z.array(z.string()).optional(),
+      remove_tags: z.array(z.string()).optional(),
+      status: z.enum(MEMORY_STATUS).optional(),
+      related_to: z.string().nullable().optional(),
+      deprecated: z.boolean().optional().describe('marks docs as deprecated (or un-deprecates when false) — independent of status'),
+    },
+    async ({ ids, add_tags, remove_tags, status, related_to, deprecated }) => {
+      const results = repo.bulkUpdate(ids, { add_tags, remove_tags, status, related_to, deprecated });
+      return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
 
@@ -60,6 +109,28 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
     }
   );
 
+  const memoryEntrySchema = z.object({
+    key: z.string().describe('lookup handle — ticket ID or free-form name; normalized on write'),
+    key_type: z.enum(MEMORY_KEY_TYPES),
+    doc_type: z.enum(MEMORY_DOC_TYPES),
+    description: z.string().describe('distinguishes this doc from others sharing the same key'),
+    body: z.string(),
+    tags: z.array(z.string()).optional(),
+    related_to: z.string().optional(),
+    folder: z.string().optional(),
+    ...(multiRoot ? { root: z.string().describe(`which configured memory root to write into: ${rootNames}`) } : {}),
+  });
+
+  mcp.tool(
+    'memory_bulk_create',
+    `Writes many memory docs in one call — each entry is the same shape as memory_create's args. Returns per-key success/failure (with the new id on success) so one bad entry doesn't abort the rest of the batch. ${AUTHORING_SKILL_HINT}`,
+    { entries: z.array(memoryEntrySchema).min(1) },
+    async ({ entries }: any) => {
+      const results = repo.bulkCreate(entries);
+      return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+    }
+  );
+
   mcp.tool(
     'memory_update',
     `Edits an existing memory doc in place — frontmatter fields and/or body. Only provided fields change. ${AUTHORING_SKILL_HINT}`,
@@ -73,6 +144,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       tags: z.array(z.string()).optional(),
       status: z.enum(MEMORY_STATUS).optional(),
       related_to: z.string().optional(),
+      deprecated: z.boolean().optional().describe('marks the doc as deprecated (or un-deprecates when false) — independent of status'),
     },
     async ({ id, body, ...frontmatterFields }) => {
       try {
@@ -95,6 +167,16 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
       }
+    }
+  );
+
+  mcp.tool(
+    'memory_bulk_delete',
+    'Hard-deletes many memory docs by id in one call — e.g. cleaning up a batch of abandoned docs found via memory_search. No tombstone. Returns per-id success/failure so one bad id doesn\'t abort the rest of the batch.',
+    { ids: z.array(z.string()).min(1) },
+    async ({ ids }) => {
+      const results = repo.bulkDelete(ids);
+      return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
 

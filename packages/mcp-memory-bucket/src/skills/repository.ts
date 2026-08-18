@@ -6,6 +6,7 @@ import { writeMarkdownFile } from '../store/markdown-file.js';
 import { assertValidSkillName } from '../store/skill-name.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { upsertFile, removeFile, scanSingleRoot, unregisterRoot, skillSyncSpec, type TableSyncSpec } from '../store/sync.js';
+import { SearchQueryError } from '../store/search.js';
 import type { NamedRoot } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
 
@@ -19,6 +20,8 @@ interface SkillRow {
   extends: string | null;
   source_path: string;
   root: string;
+  deprecated: number;
+  created_at: string | null;
   body: string;
 }
 
@@ -29,6 +32,8 @@ function rowToDoc(row: SkillRow): SkillDoc {
     tags: JSON.parse(row.tags),
     trigger_phrases: JSON.parse(row.trigger_phrases),
     metadata: { owner: row.owner, status: row.status, extends: row.extends },
+    deprecated: !!row.deprecated,
+    created_at: row.created_at ?? undefined,
     source_path: row.source_path,
     root: row.root,
     body: row.body,
@@ -130,9 +135,64 @@ export class SkillRepository {
     return filtered.map(({ triggerPhrases: _tp, ...rest }) => rest);
   }
 
+  /**
+   * Full-text search over skill description/body/tags via FTS5 — `query` is
+   * raw FTS5 MATCH syntax (AND/OR/NOT, "phrases", prefix*). Ranked by bm25.
+   * Optional metadata filters (root/status/owner/tag) apply before limit/offset,
+   * so pagination stays correct even when filtering narrows the FTS hit set.
+   */
+  search(
+    query: string,
+    opts: { root?: string; status?: SkillStatus; owner?: string; tag?: string; limit?: number; offset?: number } = {}
+  ): Array<{ name: string; description: string; root: string; snippet: string; score: number }> {
+    const { root, status, owner, tag, limit = 20, offset = 0 } = opts;
+    const conditions: string[] = [];
+    const params: unknown[] = [query];
+    if (root) {
+      conditions.push('s.root = ?');
+      params.push(root);
+    }
+    if (status) {
+      conditions.push('s.status = ?');
+      params.push(status);
+    }
+    if (owner) {
+      conditions.push('s.owner = ?');
+      params.push(owner);
+    }
+    if (tag) {
+      conditions.push('EXISTS (SELECT 1 FROM json_each(s.tags) WHERE value = ?)');
+      params.push(tag);
+    }
+    params.push(limit, offset);
+
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT s.id AS name, s.description, s.root,
+                  snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
+                  -bm25(search_index) AS score
+           FROM search_index
+           JOIN skills s ON s.id = search_index.ref_id
+           WHERE search_index.ref_table = 'skills' AND search_index MATCH ? ${conditions.map((c) => `AND ${c}`).join(' ')}
+           ORDER BY bm25(search_index)
+           LIMIT ? OFFSET ?`
+        )
+        .all(...params) as Array<{ name: string; description: string; root: string; snippet: string; score: number }>;
+      return rows;
+    } catch (err) {
+      throw new SearchQueryError(query, err);
+    }
+  }
+
   get(name: string): SkillDoc | null {
     const row = this.db.prepare(`SELECT * FROM skills WHERE id = ?`).get(name) as SkillRow | undefined;
     return row ? rowToDoc(row) : null;
+  }
+
+  /** Fetches many skills by name in one call — e.g. hydrating full bodies for a batch of search() hits. Missing names are simply absent from the result, not errors. */
+  bulkGet(names: string[]): SkillDoc[] {
+    return names.map((name) => this.get(name)).filter((doc): doc is SkillDoc => doc !== null);
   }
 
   /**
@@ -175,12 +235,46 @@ export class SkillRepository {
         status: frontmatter.status ?? 'unreviewed',
         extends: frontmatter.extends ?? null,
       },
+      deprecated: false,
+      created_at: new Date().toISOString(),
       source_path: filePath,
       root: targetRoot.name,
     };
     writeMarkdownFile(filePath, stripSourcePath(fm), body);
     upsertFile(this.db, this.syncSpec, filePath);
     return { ...fm, body };
+  }
+
+  /**
+   * Creates many skills in one call — each entry is the same shape as create()'s
+   * args. Returns per-name results so one bad entry (duplicate name, invalid
+   * name, existing directory) doesn't abort the rest of the batch.
+   */
+  bulkCreate(
+    entries: Array<{
+      frontmatter: { name: string; description: string; license?: string; compatibility?: string; tags?: string[]; trigger_phrases?: string[] } & {
+        owner?: string | null;
+        status?: SkillStatus;
+        extends?: string | null;
+      };
+      body: string;
+      folder?: string;
+      root?: string;
+    }>
+  ): Array<{ name: string; ok: boolean; error?: string }> {
+    return entries.map((entry) => {
+      try {
+        this.create(entry.frontmatter, entry.body, entry.folder, entry.root);
+        return { name: entry.frontmatter.name, ok: true };
+      } catch (err) {
+        return { name: entry.frontmatter.name, ok: false, error: (err as Error).message };
+      }
+    });
+  }
+
+  /** Name of the always-present, non-removable builtin root (roots[0]) — never user content, never deprecatable. */
+  private isBuiltin(doc: Pick<SkillDoc, 'root'>): boolean {
+    return doc.root === this.roots[0]?.name;
   }
 
   update(
@@ -195,9 +289,14 @@ export class SkillRepository {
     const existing = this.get(name);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
 
+    // Builtin skills (e.g. memory-bucket-authoring) are the server's own always-present
+    // documentation, not user content — deprecating them would hide guidance every session needs.
+    const deprecated = this.isBuiltin(existing) ? existing.deprecated : frontmatter?.deprecated;
+
     const merged: SkillFrontmatter = {
       ...existing,
       ...frontmatter,
+      deprecated,
       name: existing.name, // name is immutable post-creation (it's also the folder name)
       metadata: {
         ...existing.metadata,
@@ -240,13 +339,71 @@ export class SkillRepository {
     return { ...merged, body: existing.body };
   }
 
+  /**
+   * Applies the same frontmatter change to many skills at once — e.g. add/remove
+   * a tag across a batch found via search(), or flip status for a group. Tags in
+   * `add_tags`/`remove_tags` are merged/subtracted per-skill; other fields (owner,
+   * status, extends) overwrite uniformly when provided. Never touches body.
+   * Returns per-name results so partial failures (e.g. an unknown name) don't
+   * abort the rest of the batch.
+   */
+  bulkUpdate(
+    names: string[],
+    changes: {
+      add_tags?: string[];
+      remove_tags?: string[];
+      owner?: string | null;
+      status?: SkillStatus;
+      extends?: string | null;
+      deprecated?: boolean;
+    }
+  ): Array<{ name: string; ok: boolean; error?: string }> {
+    return names.map((name) => {
+      try {
+        const existing = this.get(name);
+        if (!existing) throw new Error(`skill with name "${name}" not found`);
+        const builtin = this.isBuiltin(existing);
+        let tags = existing.tags;
+        if (changes.add_tags?.length) tags = Array.from(new Set([...tags, ...changes.add_tags]));
+        if (changes.remove_tags?.length) tags = tags.filter((t) => !changes.remove_tags!.includes(t));
+        this.update(name, {
+          tags,
+          owner: changes.owner,
+          status: changes.status,
+          extends: changes.extends,
+          ...(changes.deprecated !== undefined && !builtin ? { deprecated: changes.deprecated } : {}),
+        });
+        return { name, ok: true };
+      } catch (err) {
+        return { name, ok: false, error: (err as Error).message };
+      }
+    });
+  }
+
   /** Removes the whole skill directory, including any scripts/references/assets alongside SKILL.md. */
   delete(name: string): void {
     const existing = this.get(name);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
+    if (this.isBuiltin(existing)) throw new Error(`skill "${name}" is builtin and cannot be deleted`);
     const skillDir = path.dirname(existing.source_path);
     fs.rmSync(skillDir, { recursive: true, force: true });
     removeFile(this.db, 'skills', existing.source_path);
+  }
+
+  /**
+   * Deletes many skills by name in one call — e.g. cleaning up a batch found
+   * via search()/list(). Returns per-name results so one bad name doesn't
+   * abort the rest of the batch.
+   */
+  bulkDelete(names: string[]): Array<{ name: string; ok: boolean; error?: string }> {
+    return names.map((name) => {
+      try {
+        this.delete(name);
+        return { name, ok: true };
+      } catch (err) {
+        return { name, ok: false, error: (err as Error).message };
+      }
+    });
   }
 }
 

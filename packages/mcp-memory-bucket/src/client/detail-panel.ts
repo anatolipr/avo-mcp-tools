@@ -8,11 +8,13 @@ const VIEW_MODE_KEY = 'mem-bucket-detail-view-mode';
 export class DetailPanel extends LitElement {
   static properties = {
     selected: { attribute: false },
+    onChanged: { attribute: false },
     _doc: { state: true },
     _viewMode: { state: true },
   };
 
   declare selected: Selection | null;
+  declare onChanged: (() => void) | undefined;
   private _doc?: EntryDetail | null;
   private _viewMode: 'markdown' | 'raw' =
     (localStorage.getItem(VIEW_MODE_KEY) as 'markdown' | 'raw' | null) ?? 'markdown';
@@ -76,6 +78,27 @@ export class DetailPanel extends LitElement {
       font-family: monospace;
       font-size: 12px;
     }
+    .actions {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .actions button {
+      font-size: 11px;
+      padding: 4px 10px;
+      border: 1px solid #8884;
+      background: transparent;
+      color: inherit;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .actions button.danger {
+      border-color: #dc262688;
+      color: #dc2626;
+    }
+    @media (prefers-color-scheme: dark) {
+      .actions button.danger { color: #fca5a5; }
+    }
   `;
 
   updated(changed: Map<string, unknown>) {
@@ -103,16 +126,46 @@ export class DetailPanel extends LitElement {
     localStorage.setItem(VIEW_MODE_KEY, mode);
   }
 
+  async #toggleDeprecated() {
+    const { table, id } = this.selected!;
+    const deprecated = !this._doc?.deprecated;
+    await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/deprecated`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deprecated }),
+    });
+    await this.#load();
+    this.onChanged?.();
+  }
+
+  async #deleteDoc() {
+    if (!window.confirm("Delete this doc? This can't be undone.")) return;
+    const { table, id } = this.selected!;
+    await fetch(`/api/entries/${table}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    this._doc = null;
+    this.onChanged?.();
+  }
+
   render() {
     if (!this.selected) return html`<div class="empty">Select an entry to view its details.</div>`;
     if (!this._doc) return nothing;
     const d = this._doc;
+    const isBuiltin = this.selected.table === 'skills' && d.root === 'builtin';
     return html`
       <h2>${d.name ?? d.key ?? d.id}</h2>
       <div class="meta">
         ${d.tags?.join(', ') || 'no tags'} · ${d.status}${d.owner ? ` · owner: ${d.owner}` : ''}
+        ${d.deprecated ? ' · deprecated' : ''} · created ${d.created_at ? d.created_at.slice(0, 10) : 'unknown'}
       </div>
       <div class="meta">${d.description}</div>
+      ${isBuiltin
+        ? nothing
+        : html`
+            <div class="actions">
+              <button @click=${() => this.#toggleDeprecated()}>${d.deprecated ? 'Un-deprecate' : 'Mark deprecated'}</button>
+              <button class="danger" @click=${() => this.#deleteDoc()}>Delete</button>
+            </div>
+          `}
       <div class="view-toggle">
         <button
           class=${this._viewMode === 'markdown' ? 'active' : ''}

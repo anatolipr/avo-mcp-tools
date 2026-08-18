@@ -105,6 +105,29 @@ export class MemBucketApp extends LitElement {
     }
     .first-run h1 { font-size: 18px; margin: 0; }
     .first-run p { opacity: 0.7; font-size: 13px; max-width: 420px; margin: 0; }
+    select { font-size: 12px; padding: 4px 6px; }
+    .bulk-bar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 16px;
+      border-bottom: 1px solid #8883;
+      background: #2563eb11;
+      font-size: 12px;
+    }
+    .bulk-bar button {
+      font-size: 11px;
+      padding: 4px 10px;
+      border: 1px solid #8884;
+      background: transparent;
+      color: inherit;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .bulk-bar button.danger { border-color: #dc262688; color: #dc2626; }
+    @media (prefers-color-scheme: dark) {
+      .bulk-bar button.danger { color: #fca5a5; }
+    }
   `;
 
   #query = new Signal('');
@@ -120,6 +143,9 @@ export class MemBucketApp extends LitElement {
   #rootsLoaded = new Signal<boolean>(false);
   #splitPct = new Signal<number>(loadSplitPct());
   #dragging = new Signal<boolean>(false);
+  #sort = new Signal<string>('mtime_desc');
+  #hideDeprecated = new Signal<boolean>(false);
+  #selectedIds = new Signal<Set<string>>(new Set());
 
   #boundOnDragMove = (e: PointerEvent) => this.#onDragMove(e);
   #boundOnDragEnd = () => this.#onDragEnd();
@@ -157,6 +183,8 @@ export class MemBucketApp extends LitElement {
     if (this.#query.value.trim()) params.set('q', this.#query.value.trim());
     for (const tag of this.#activeTags.value) params.append('tag', tag);
     for (const root of this.#activeRoots.value) params.append('root', root);
+    if (this.#sort.value !== 'mtime_desc') params.set('sort', this.#sort.value);
+    if (this.#hideDeprecated.value) params.set('deprecated', '0');
     return params.toString();
   });
 
@@ -237,6 +265,72 @@ export class MemBucketApp extends LitElement {
     this.#selected.set({ table: entry._table, id: entry.id });
   }
 
+  #onSortChange(e: Event) {
+    this.#sort.set((e.target as HTMLSelectElement).value);
+    this.#refetch();
+  }
+
+  #onToggleHideDeprecated(e: Event) {
+    this.#hideDeprecated.set((e.target as HTMLInputElement).checked);
+    this.#refetch();
+  }
+
+  #onToggleSelect(entry: Entry) {
+    const current = new Set(this.#selectedIds.value);
+    if (current.has(entry.id)) current.delete(entry.id);
+    else current.add(entry.id);
+    this.#selectedIds.set(current);
+  }
+
+  #entriesById(): Map<string, Entry> {
+    return new Map(this.#results.value.map((r) => [r.id, r]));
+  }
+
+  /** Bulk actions require a single table — group selected ids by table and act per-group. */
+  #selectedByTable(): Map<'skills' | 'memory_docs', string[]> {
+    const byTable = new Map<'skills' | 'memory_docs', string[]>();
+    const entries = this.#entriesById();
+    for (const id of this.#selectedIds.value) {
+      const entry = entries.get(id);
+      if (!entry) continue;
+      const list = byTable.get(entry._table) ?? [];
+      list.push(id);
+      byTable.set(entry._table, list);
+    }
+    return byTable;
+  }
+
+  async #bulkSetDeprecated(deprecated: boolean) {
+    const byTable = this.#selectedByTable();
+    await Promise.all(
+      [...byTable.entries()].map(([table, ids]) =>
+        fetch(`/api/entries/${table}/bulk/deprecated`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids, deprecated }),
+        })
+      )
+    );
+    this.#selectedIds.set(new Set());
+    await this.#refetch();
+  }
+
+  async #bulkDelete() {
+    if (!window.confirm(`Delete ${this.#selectedIds.value.size} doc(s)? This can't be undone.`)) return;
+    const byTable = this.#selectedByTable();
+    await Promise.all(
+      [...byTable.entries()].map(([table, ids]) =>
+        fetch(`/api/entries/${table}/bulk/delete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        })
+      )
+    );
+    this.#selectedIds.set(new Set());
+    await this.#refetch();
+  }
+
   render() {
     const facets = this.#facets.value;
     const allRoots = this.#allRoots();
@@ -311,19 +405,49 @@ export class MemBucketApp extends LitElement {
                 ></tag-multiselect>
               `}
         </div>
+        <div class="row">
+          <span class="filter-label">Sort:</span>
+          <select .value=${this.#sort.value} @change=${(e: Event) => this.#onSortChange(e)}>
+            <option value="mtime_desc">Recently touched</option>
+            <option value="mtime_asc">Least recently touched</option>
+            <option value="created_at_asc">Oldest first</option>
+            <option value="name_asc">Name</option>
+          </select>
+          <label class="small">
+            <input
+              type="checkbox"
+              .checked=${this.#hideDeprecated.value}
+              @change=${(e: Event) => this.#onToggleHideDeprecated(e)}
+            />
+            Hide deprecated
+          </label>
+        </div>
       </div>
+      ${this.#selectedIds.value.size > 0
+        ? html`
+            <div class="bulk-bar">
+              <span>${this.#selectedIds.value.size} selected</span>
+              <button @click=${() => this.#bulkSetDeprecated(true)}>Mark deprecated</button>
+              <button @click=${() => this.#bulkSetDeprecated(false)}>Un-deprecate</button>
+              <button class="danger" @click=${() => this.#bulkDelete()}>Delete</button>
+              <button @click=${() => this.#selectedIds.set(new Set())}>Clear</button>
+            </div>
+          `
+        : ''}
       <div class="body-region">
         <result-list
           style=${`width: ${this.#splitPct.value}%; border-right: 1px solid #8883;`}
           .results=${this.#results.value}
           .showRoot=${allRoots.length > 1}
           .onSelect=${(e: Entry) => this.#onSelect(e)}
+          .selectedIds=${this.#selectedIds.value}
+          .onToggleSelect=${(e: Entry) => this.#onToggleSelect(e)}
         ></result-list>
         <div
           class="splitter ${this.#dragging.value ? 'dragging' : ''}"
           @pointerdown=${(e: PointerEvent) => this.#onDragStart(e)}
         ></div>
-        <detail-panel .selected=${this.#selected.value}></detail-panel>
+        <detail-panel .selected=${this.#selected.value} .onChanged=${() => this.#refetch()}></detail-panel>
       </div>
       ${this.#showAddRoot.value
         ? html`<add-root-modal

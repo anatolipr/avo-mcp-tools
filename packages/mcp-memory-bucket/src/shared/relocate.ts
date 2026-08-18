@@ -151,6 +151,20 @@ export function relocate(
   return { moved: true, id: doc.id, target: 'memory' };
 }
 
+/**
+ * Relocates many files in one call — each entry is the same shape as
+ * relocate()'s options, minus `path` which is supplied per-entry. Returns one
+ * RelocateResult per path (in order) so one bad/ambiguous file doesn't abort
+ * the rest of the batch — same "no guess, no partial write" behavior per file.
+ */
+export function relocateMany(
+  entries: Array<{ path: string } & Omit<RelocateOptions, 'path'>>,
+  skillRepo: SkillRepository,
+  memoryRepo: MemoryRepository
+): Array<RelocateResult & { path: string }> {
+  return entries.map((entry) => ({ path: entry.path, ...relocate(entry, skillRepo, memoryRepo) }));
+}
+
 function slugFromFilename(filePath: string): string {
   return path
     .basename(filePath, path.extname(filePath))

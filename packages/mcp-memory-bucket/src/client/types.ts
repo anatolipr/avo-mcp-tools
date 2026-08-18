@@ -10,6 +10,8 @@ export interface Entry {
   key_type: string | null;
   root: string;
   mtime_ms: number;
+  deprecated: boolean;
+  created_at: string | null;
 }
 
 export interface EntryDetail {
@@ -23,6 +25,8 @@ export interface EntryDetail {
   body: string;
   source_path: string;
   root: string;
+  deprecated?: boolean;
+  created_at?: string | null;
 }
 
 export interface Facets {

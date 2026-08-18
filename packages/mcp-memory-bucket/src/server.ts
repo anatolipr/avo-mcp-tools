@@ -11,6 +11,7 @@ import { MemoryRepository } from './memory/repository.js';
 import { registerSkillTools } from './skills/tools.js';
 import { registerMemoryTools } from './memory/tools.js';
 import { registerRelocateTool } from './shared/relocate-tool.js';
+import { registerSearchTool } from './shared/search-tool.js';
 import { buildWebRouter } from './web/routes.js';
 import { registerUiTool } from './web/ui-tool.js';
 
@@ -60,7 +61,7 @@ if (config.skillRoots.length === 0 && config.memoryRoots.length === 0) {
 // clients that expose either to the model can make that association.
 const SERVER_DESCRIPTION =
   'Also known as "memory bucket", "mem bucket", or "skill bucket" — if the user refers to this server by any of those names, they mean this one.';
-const SERVER_INSTRUCTIONS = `${SERVER_DESCRIPTION} Exposes skill_* (reusable coding patterns, stored as agentskills.io-standard SKILL.md folders) and memory_* (point-in-time working context — plans, specs, SQL, session summaries — looked up by key) tools, plus a shared relocate tool. Before calling any *_create/*_update/relocate tool, call skill_get("memory-bucket-authoring") first to learn the exact frontmatter schema — don't guess the shape.`;
+const SERVER_INSTRUCTIONS = `${SERVER_DESCRIPTION} Exposes skill_* (reusable coding patterns, stored as agentskills.io-standard SKILL.md folders) and memory_* (point-in-time working context — plans, specs, SQL, session summaries — looked up by key) tools, plus shared relocate/bucket_search tools. Use skill_search/memory_search/bucket_search for full-text search over body content (not just metadata) — bucket_search when you don't know which bucket something landed in. Most operations have a _bulk_ variant (bulk_get/bulk_create/bulk_update/bulk_delete, relocate_bulk) that take a list and return per-item success/failure — prefer these over looping single calls when acting on more than one item. Before calling any *_create/*_update/relocate tool, call skill_get("memory-bucket-authoring") first to learn the exact frontmatter schema — don't guess the shape.`;
 
 function buildMcpServer(): McpServer {
   const server = new McpServer(
@@ -70,6 +71,7 @@ function buildMcpServer(): McpServer {
   registerSkillTools(server, skillRepo);
   registerMemoryTools(server, memoryRepo);
   registerRelocateTool(server, skillRepo, memoryRepo);
+  registerSearchTool(server, db);
   registerUiTool(server, PORT);
   return server;
 }
