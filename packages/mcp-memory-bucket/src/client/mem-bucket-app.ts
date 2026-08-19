@@ -41,6 +41,40 @@ function applyTheme(mode: ThemeMode) {
   else document.documentElement.setAttribute('data-theme', mode);
 }
 
+interface FilterState {
+  query: string;
+  typeFilter: TypeFilter;
+  activeTags: string[];
+  activeRoots: string[];
+  sort: string;
+  hideDeprecated: boolean;
+  dateFrom: string;
+  dateTo: string;
+}
+
+function loadFilterState(): Partial<FilterState> {
+  const raw = location.hash.slice(1);
+  if (!raw) return {};
+  const params = new URLSearchParams(raw);
+  const state: Partial<FilterState> = {};
+  const q = params.get('q');
+  if (q) state.query = q;
+  const type = params.get('type');
+  if (type === 'skill' || type === 'memory' || type === 'all') state.typeFilter = type;
+  const tags = params.getAll('tag');
+  if (tags.length) state.activeTags = tags;
+  const roots = params.getAll('root');
+  if (roots.length) state.activeRoots = roots;
+  const sort = params.get('sort');
+  if (sort) state.sort = sort;
+  if (params.get('deprecated') === '0') state.hideDeprecated = true;
+  const dateFrom = params.get('date_from');
+  if (dateFrom) state.dateFrom = dateFrom;
+  const dateTo = params.get('date_to');
+  if (dateTo) state.dateTo = dateTo;
+  return state;
+}
+
 export class MemBucketApp extends LitElement {
   static styles = css`
     :host { display: flex; flex-direction: column; height: 100vh; }
@@ -226,10 +260,11 @@ export class MemBucketApp extends LitElement {
     .bulk-bar button.danger { border-color: var(--danger); color: var(--danger); }
   `;
 
-  #query = new Signal('');
-  #typeFilter = new Signal<TypeFilter>('all');
-  #activeTags = new Signal<string[]>([]);
-  #activeRoots = new Signal<string[]>([]);
+  #initialFilters = loadFilterState();
+  #query = new Signal(this.#initialFilters.query ?? '');
+  #typeFilter = new Signal<TypeFilter>(this.#initialFilters.typeFilter ?? 'all');
+  #activeTags = new Signal<string[]>(this.#initialFilters.activeTags ?? []);
+  #activeRoots = new Signal<string[]>(this.#initialFilters.activeRoots ?? []);
   #results = new Signal<Entry[]>([]);
   #facets = new Signal<Facets>(EMPTY_FACETS);
   #selected = new Signal<Selection | null>(null);
@@ -239,10 +274,10 @@ export class MemBucketApp extends LitElement {
   #rootsLoaded = new Signal<boolean>(false);
   #splitPct = new Signal<number>(loadSplitPct());
   #dragging = new Signal<boolean>(false);
-  #sort = new Signal<string>('mtime_desc');
-  #hideDeprecated = new Signal<boolean>(false);
-  #dateFrom = new Signal<string>('');
-  #dateTo = new Signal<string>('');
+  #sort = new Signal<string>(this.#initialFilters.sort ?? 'mtime_desc');
+  #hideDeprecated = new Signal<boolean>(this.#initialFilters.hideDeprecated ?? false);
+  #dateFrom = new Signal<string>(this.#initialFilters.dateFrom ?? '');
+  #dateTo = new Signal<string>(this.#initialFilters.dateTo ?? '');
   #selectedIds = new Signal<Set<string>>(new Set());
   #theme = new Signal<ThemeMode>(loadTheme());
 
@@ -309,7 +344,9 @@ export class MemBucketApp extends LitElement {
   }
 
   async #refetch() {
-    const res = await fetch(`/api/entries?${this.#requestQuery.value}`);
+    const query = this.#requestQuery.value;
+    history.replaceState(null, '', query ? `#${query}` : location.pathname + location.search);
+    const res = await fetch(`/api/entries?${query}`);
     this.#results.set((await res.json()) as Entry[]);
     this.renderRoot.querySelector('result-list')?.scrollTo(0, 0);
   }
