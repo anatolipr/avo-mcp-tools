@@ -13,6 +13,14 @@ const TYPE_OPTIONS: Array<{ value: TypeFilter; label: string }> = [
   { value: 'memory', label: 'Memories' },
 ];
 
+type TriState = 'all' | 'hide' | 'only';
+
+const TRISTATE_OPTIONS: Array<{ value: TriState; label: string }> = [
+  { value: 'all', label: 'Show all' },
+  { value: 'hide', label: 'Hide' },
+  { value: 'only', label: 'Only' },
+];
+
 const EMPTY_FACETS: Facets = { tags: [], statuses: [], owners: [], doc_types: [], key_types: [], roots: [] };
 const EMPTY_ROOTS: RootsResponse = { skill: [], memory: [] };
 
@@ -47,8 +55,8 @@ interface FilterState {
   activeTags: string[];
   activeRoots: string[];
   sort: string;
-  hideDeprecated: boolean;
-  hidePaused: boolean;
+  deprecatedFilter: TriState;
+  pausedFilter: TriState;
   dateFrom: string;
   dateTo: string;
 }
@@ -68,8 +76,12 @@ function loadFilterState(): Partial<FilterState> {
   if (roots.length) state.activeRoots = roots;
   const sort = params.get('sort');
   if (sort) state.sort = sort;
-  if (params.get('deprecated') === '0') state.hideDeprecated = true;
-  if (params.get('paused') === '0') state.hidePaused = true;
+  const deprecated = params.get('deprecated');
+  if (deprecated === '0') state.deprecatedFilter = 'hide';
+  else if (deprecated === '1') state.deprecatedFilter = 'only';
+  const paused = params.get('paused');
+  if (paused === '0') state.pausedFilter = 'hide';
+  else if (paused === '1') state.pausedFilter = 'only';
   const dateFrom = params.get('date_from');
   if (dateFrom) state.dateFrom = dateFrom;
   const dateTo = params.get('date_to');
@@ -277,8 +289,8 @@ export class MemBucketApp extends LitElement {
   #splitPct = new Signal<number>(loadSplitPct());
   #dragging = new Signal<boolean>(false);
   #sort = new Signal<string>(this.#initialFilters.sort ?? 'mtime_desc');
-  #hideDeprecated = new Signal<boolean>(this.#initialFilters.hideDeprecated ?? false);
-  #hidePaused = new Signal<boolean>(this.#initialFilters.hidePaused ?? false);
+  #deprecatedFilter = new Signal<TriState>(this.#initialFilters.deprecatedFilter ?? 'all');
+  #pausedFilter = new Signal<TriState>(this.#initialFilters.pausedFilter ?? 'all');
   #dateFrom = new Signal<string>(this.#initialFilters.dateFrom ?? '');
   #dateTo = new Signal<string>(this.#initialFilters.dateTo ?? '');
   #selectedIds = new Signal<Set<string>>(new Set());
@@ -333,8 +345,10 @@ export class MemBucketApp extends LitElement {
     for (const tag of this.#activeTags.value) params.append('tag', tag);
     for (const root of this.#activeRoots.value) params.append('root', root);
     if (this.#sort.value !== 'mtime_desc') params.set('sort', this.#sort.value);
-    if (this.#hideDeprecated.value) params.set('deprecated', '0');
-    if (this.#hidePaused.value) params.set('paused', '0');
+    if (this.#deprecatedFilter.value === 'hide') params.set('deprecated', '0');
+    else if (this.#deprecatedFilter.value === 'only') params.set('deprecated', '1');
+    if (this.#pausedFilter.value === 'hide') params.set('paused', '0');
+    else if (this.#pausedFilter.value === 'only') params.set('paused', '1');
     if (this.#dateFrom.value) params.set('date_from', this.#dateFrom.value);
     if (this.#dateTo.value) params.set('date_to', this.#dateTo.value);
     return params.toString();
@@ -430,13 +444,13 @@ export class MemBucketApp extends LitElement {
     this.#refetch();
   }
 
-  #onToggleHideDeprecated(e: Event) {
-    this.#hideDeprecated.set((e.target as HTMLInputElement).checked);
+  #onDeprecatedFilterChange(e: Event) {
+    this.#deprecatedFilter.set((e.target as HTMLSelectElement).value as TriState);
     this.#refetch();
   }
 
-  #onToggleHidePaused(e: Event) {
-    this.#hidePaused.set((e.target as HTMLInputElement).checked);
+  #onPausedFilterChange(e: Event) {
+    this.#pausedFilter.set((e.target as HTMLSelectElement).value as TriState);
     this.#refetch();
   }
 
@@ -668,22 +682,14 @@ export class MemBucketApp extends LitElement {
             <option value="created_at_asc">Oldest first</option>
             <option value="name_asc">Name</option>
           </select>
-          <label class="small">
-            <input
-              type="checkbox"
-              .checked=${this.#hideDeprecated.value}
-              @change=${(e: Event) => this.#onToggleHideDeprecated(e)}
-            />
-            Hide deprecated
-          </label>
-          <label class="small">
-            <input
-              type="checkbox"
-              .checked=${this.#hidePaused.value}
-              @change=${(e: Event) => this.#onToggleHidePaused(e)}
-            />
-            Hide paused
-          </label>
+          <span class="filter-label">Deprecated:</span>
+          <select .value=${this.#deprecatedFilter.value} @change=${(e: Event) => this.#onDeprecatedFilterChange(e)}>
+            ${TRISTATE_OPTIONS.map((opt) => html`<option value=${opt.value}>${opt.label}</option>`)}
+          </select>
+          <span class="filter-label">Paused:</span>
+          <select .value=${this.#pausedFilter.value} @change=${(e: Event) => this.#onPausedFilterChange(e)}>
+            ${TRISTATE_OPTIONS.map((opt) => html`<option value=${opt.value}>${opt.label}</option>`)}
+          </select>
         </div>
       </div>
       ${this.#selectedIds.value.size > 0

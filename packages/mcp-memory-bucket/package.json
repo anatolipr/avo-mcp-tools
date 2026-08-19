@@ -1,6 +1,6 @@
 {
   "name": "mcp-memory-bucket",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "description": "MCP server exposing skill_* (reusable coding patterns) and memory_* (point-in-time working context) tools over a markdown+frontmatter source, cached into SQLite at runtime.",
   "repository": {
@@ -29,7 +29,7 @@
     "copy:builtin-skills": "mkdir -p dist/src/skills/builtin && cp -r src/skills/builtin/. dist/src/skills/builtin/",
     "prepublishOnly": "npm run build",
     "start": "tsx src/server.ts",
-    "start_in_folder": "tsx src/server.ts --memory-dir",
+    "start_in_folder": "vite build && tsx src/server.ts --memory-dir",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.client.json",
     "test": "node --import tsx --test test/**/*.test.ts"
   },
