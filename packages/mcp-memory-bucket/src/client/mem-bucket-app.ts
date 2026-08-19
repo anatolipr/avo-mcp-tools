@@ -104,6 +104,32 @@ export class MemBucketApp extends LitElement {
       border-radius: 50%;
     }
     .search-clear-btn:hover { opacity: 1; background: var(--hover); }
+    .date-range { display: flex; align-items: center; gap: 4px; }
+    .date-range input[type='date'] {
+      font-size: 13px;
+      padding: 5px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: none;
+      color: inherit;
+      height: 30px;
+      box-sizing: border-box;
+    }
+    .date-range-sep { opacity: 0.5; font-size: 12px; }
+    .date-range-clear {
+      position: static;
+      transform: none;
+      opacity: 0.6;
+      font-size: 12px;
+      line-height: 1;
+      padding: 4px 6px;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      color: inherit;
+      border-radius: 50%;
+    }
+    .date-range-clear:hover { opacity: 1; background: var(--hover); }
     .search-row { align-items: center; }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .filter-label { font-size: 12px; opacity: 0.6; font-weight: 600; }
@@ -215,6 +241,8 @@ export class MemBucketApp extends LitElement {
   #dragging = new Signal<boolean>(false);
   #sort = new Signal<string>('mtime_desc');
   #hideDeprecated = new Signal<boolean>(false);
+  #dateFrom = new Signal<string>('');
+  #dateTo = new Signal<string>('');
   #selectedIds = new Signal<Set<string>>(new Set());
   #theme = new Signal<ThemeMode>(loadTheme());
 
@@ -268,6 +296,8 @@ export class MemBucketApp extends LitElement {
     for (const root of this.#activeRoots.value) params.append('root', root);
     if (this.#sort.value !== 'mtime_desc') params.set('sort', this.#sort.value);
     if (this.#hideDeprecated.value) params.set('deprecated', '0');
+    if (this.#dateFrom.value) params.set('date_from', this.#dateFrom.value);
+    if (this.#dateTo.value) params.set('date_to', this.#dateTo.value);
     return params.toString();
   });
 
@@ -361,6 +391,22 @@ export class MemBucketApp extends LitElement {
 
   #onToggleHideDeprecated(e: Event) {
     this.#hideDeprecated.set((e.target as HTMLInputElement).checked);
+    this.#refetch();
+  }
+
+  #onDateFromChange(e: Event) {
+    this.#dateFrom.set((e.target as HTMLInputElement).value);
+    this.#refetch();
+  }
+
+  #onDateToChange(e: Event) {
+    this.#dateTo.set((e.target as HTMLInputElement).value);
+    this.#refetch();
+  }
+
+  #clearDateRange() {
+    this.#dateFrom.set('');
+    this.#dateTo.set('');
     this.#refetch();
   }
 
@@ -526,6 +572,34 @@ export class MemBucketApp extends LitElement {
                   .onToggle=${(tag: string) => this.#toggleTag(tag)}
                 ></tag-multiselect>
               `}
+          <span class="filter-label">Dates:</span>
+          <div class="date-range">
+            <input
+              type="date"
+              aria-label="From date"
+              .value=${this.#dateFrom.value}
+              @change=${(e: Event) => this.#onDateFromChange(e)}
+            />
+            <span class="date-range-sep">–</span>
+            <input
+              type="date"
+              aria-label="To date"
+              .value=${this.#dateTo.value}
+              @change=${(e: Event) => this.#onDateToChange(e)}
+            />
+            ${this.#dateFrom.value || this.#dateTo.value
+              ? html`
+                  <button
+                    class="date-range-clear"
+                    title="Clear date range"
+                    aria-label="Clear date range"
+                    @click=${() => this.#clearDateRange()}
+                  >
+                    ✕
+                  </button>
+                `
+              : ''}
+          </div>
           <span class="filter-label">Sort:</span>
           <select .value=${this.#sort.value} @change=${(e: Event) => this.#onSortChange(e)}>
             <option value="mtime_desc">Recently touched</option>

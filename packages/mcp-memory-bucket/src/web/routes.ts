@@ -49,6 +49,8 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
   const q = (req.query.q as string | undefined)?.trim();
   const deprecatedParam = req.query.deprecated as string | undefined;
   const deprecated = deprecatedParam === '0' || deprecatedParam === '1' ? deprecatedParam : undefined;
+  const dateFrom = (req.query.date_from as string | undefined)?.trim() || undefined;
+  const dateTo = (req.query.date_to as string | undefined)?.trim() || undefined;
 
   const matchedIds: { skills: Set<string>; memory_docs: Set<string> } | null = q
     ? matchSearch(db, q)
@@ -57,14 +59,32 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
     return [];
   }
 
+  const dateIds: { skills: Set<string>; memory_docs: Set<string> } | null =
+    dateFrom || dateTo ? matchDateRange(db, dateFrom, dateTo) : null;
+  if (dateIds && dateIds.skills.size === 0 && dateIds.memory_docs.size === 0) {
+    return [];
+  }
+
   const results: EntryRow[] = [];
 
   if (type === 'skill' || type === 'all') {
-    results.push(...queryTable(db, 'skills', { tags, statuses, owners, docTypes: [], keyTypes: [], roots, deprecated }, matchedIds?.skills));
+    results.push(
+      ...queryTable(
+        db,
+        'skills',
+        { tags, statuses, owners, docTypes: [], keyTypes: [], roots, deprecated },
+        intersectIds(matchedIds?.skills, dateIds?.skills)
+      )
+    );
   }
   if (type === 'memory' || type === 'all') {
     results.push(
-      ...queryTable(db, 'memory_docs', { tags, statuses, owners: [], docTypes, keyTypes, roots, deprecated }, matchedIds?.memory_docs)
+      ...queryTable(
+        db,
+        'memory_docs',
+        { tags, statuses, owners: [], docTypes, keyTypes, roots, deprecated },
+        intersectIds(matchedIds?.memory_docs, dateIds?.memory_docs)
+      )
     );
   }
 
@@ -199,6 +219,40 @@ function queryTable(
     deprecated: !!r.deprecated,
     created_at: r.created_at,
   }));
+}
+
+/** Combines two optional id-restriction sets (e.g. from `q` and a date range) into one, when both are present. */
+function intersectIds(a: Set<string> | undefined, b: Set<string> | undefined): Set<string> | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return new Set([...a].filter((id) => b.has(id)));
+}
+
+/** Queries the `doc_dates` side table for ids whose body-extracted or created_at date falls in [from, to], bucketed by source table. */
+function matchDateRange(
+  db: Database.Database,
+  from: string | undefined,
+  to: string | undefined
+): { skills: Set<string>; memory_docs: Set<string> } {
+  const skills = new Set<string>();
+  const memory_docs = new Set<string>();
+  const params: string[] = [];
+  let where = '1 = 1';
+  if (from) {
+    where += ' AND date >= ?';
+    params.push(from);
+  }
+  if (to) {
+    where += ' AND date <= ?';
+    params.push(to);
+  }
+  const rows = db
+    .prepare(`SELECT DISTINCT ref_table, ref_id FROM doc_dates WHERE ${where}`)
+    .all(...params) as Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string }>;
+  for (const row of rows) {
+    (row.ref_table === 'skills' ? skills : memory_docs).add(row.ref_id);
+  }
+  return { skills, memory_docs };
 }
 
 /** Runs the FTS5 query once and buckets matching ids by source table. */
