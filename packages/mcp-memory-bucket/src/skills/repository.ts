@@ -21,6 +21,7 @@ interface SkillRow {
   source_path: string;
   root: string;
   deprecated: number;
+  paused: number;
   created_at: string | null;
   body: string;
 }
@@ -33,6 +34,7 @@ function rowToDoc(row: SkillRow): SkillDoc {
     trigger_phrases: JSON.parse(row.trigger_phrases),
     metadata: { owner: row.owner, status: row.status, extends: row.extends },
     deprecated: !!row.deprecated,
+    paused: !!row.paused,
     created_at: row.created_at ?? undefined,
     source_path: row.source_path,
     root: row.root,
@@ -47,6 +49,7 @@ export interface SkillListItem {
   status: SkillStatus;
   tags: string[];
   root: string;
+  paused: boolean;
 }
 
 export class SkillRepository {
@@ -103,14 +106,21 @@ export class SkillRepository {
     unregisterRoot(this.db, 'skills', name);
   }
 
-  list(query?: string, root?: string): SkillListItem[] {
-    const rows = root
-      ? (this.db
-          .prepare(`SELECT id, description, owner, status, tags, trigger_phrases, root FROM skills WHERE root = ?`)
-          .all(root) as Array<Pick<SkillRow, 'id' | 'description' | 'owner' | 'status' | 'tags' | 'trigger_phrases' | 'root'>>)
-      : (this.db
-          .prepare(`SELECT id, description, owner, status, tags, trigger_phrases, root FROM skills`)
-          .all() as Array<Pick<SkillRow, 'id' | 'description' | 'owner' | 'status' | 'tags' | 'trigger_phrases' | 'root'>>);
+  /** `includePaused` defaults to false: paused skills are hidden from discovery (see setPaused). */
+  list(query?: string, root?: string, opts: { includePaused?: boolean } = {}): SkillListItem[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (root) {
+      conditions.push('root = ?');
+      params.push(root);
+    }
+    if (!opts.includePaused) {
+      conditions.push('paused = 0');
+    }
+    const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
+    const rows = this.db
+      .prepare(`SELECT id, description, owner, status, tags, trigger_phrases, root, paused FROM skills${where}`)
+      .all(...params) as Array<Pick<SkillRow, 'id' | 'description' | 'owner' | 'status' | 'tags' | 'trigger_phrases' | 'root' | 'paused'>>;
 
     const needle = query?.trim().toLowerCase();
     const items = rows.map((r) => ({
@@ -121,6 +131,7 @@ export class SkillRepository {
       tags: JSON.parse(r.tags) as string[],
       triggerPhrases: JSON.parse(r.trigger_phrases) as string[],
       root: r.root,
+      paused: !!r.paused,
     }));
 
     const filtered = needle
@@ -143,9 +154,18 @@ export class SkillRepository {
    */
   search(
     query: string,
-    opts: { root?: string; status?: SkillStatus; owner?: string; tag?: string; limit?: number; offset?: number } = {}
+    opts: {
+      root?: string;
+      status?: SkillStatus;
+      owner?: string;
+      tag?: string;
+      limit?: number;
+      offset?: number;
+      /** Defaults to false: paused skills are hidden from discovery (see setPaused). */
+      includePaused?: boolean;
+    } = {}
   ): Array<{ name: string; description: string; root: string; snippet: string; score: number }> {
-    const { root, status, owner, tag, limit = 20, offset = 0 } = opts;
+    const { root, status, owner, tag, limit = 20, offset = 0, includePaused = false } = opts;
     const conditions: string[] = [];
     const params: unknown[] = [query];
     if (root) {
@@ -163,6 +183,9 @@ export class SkillRepository {
     if (tag) {
       conditions.push('EXISTS (SELECT 1 FROM json_each(s.tags) WHERE value = ?)');
       params.push(tag);
+    }
+    if (!includePaused) {
+      conditions.push('s.paused = 0');
     }
     params.push(limit, offset);
 
@@ -242,7 +265,7 @@ export class SkillRepository {
     };
     writeMarkdownFile(filePath, stripSourcePath(fm), body);
     upsertFile(this.db, this.syncSpec, filePath);
-    return { ...fm, body };
+    return { ...fm, body, paused: false };
   }
 
   /**
@@ -288,13 +311,16 @@ export class SkillRepository {
   ): SkillDoc {
     const existing = this.get(name);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
+    // `paused` is local-cache-only and must never reach writeMarkdownFile — split it off of
+    // `existing` before spreading the rest into the frontmatter that gets written to disk.
+    const { paused: existingPaused, ...existingForFile } = existing;
 
     // Builtin skills (e.g. memory-bucket-authoring) are the server's own always-present
     // documentation, not user content — deprecating them would hide guidance every session needs.
     const deprecated = this.isBuiltin(existing) ? existing.deprecated : frontmatter?.deprecated;
 
     const merged: SkillFrontmatter = {
-      ...existing,
+      ...existingForFile,
       ...frontmatter,
       deprecated,
       name: existing.name, // name is immutable post-creation (it's also the folder name)
@@ -308,7 +334,7 @@ export class SkillRepository {
     const newBody = body ?? existing.body;
     writeMarkdownFile(existing.source_path, stripSourcePath(merged), newBody);
     upsertFile(this.db, this.syncSpec, existing.source_path);
-    return { ...merged, body: newBody };
+    return { ...merged, body: newBody, paused: existingPaused };
   }
 
   /**
@@ -332,11 +358,14 @@ export class SkillRepository {
     fs.renameSync(oldDir, newDir);
     const newFilePath = path.join(newDir, 'SKILL.md');
 
-    const merged: SkillFrontmatter = { ...existing, name: newName };
+    // Rename changes the skill's id, so it becomes a fresh cache row — paused (local-only,
+    // keyed by id) does not carry over, same as it wouldn't survive deleting the cache file.
+    const { paused: _existingPaused, ...existingForFile } = existing;
+    const merged: SkillFrontmatter = { ...existingForFile, name: newName };
     writeMarkdownFile(newFilePath, stripSourcePath(merged), existing.body);
     removeFile(this.db, 'skills', existing.source_path);
     upsertFile(this.db, this.syncSpec, newFilePath);
-    return { ...merged, body: existing.body };
+    return { ...merged, body: existing.body, paused: false };
   }
 
   /**
@@ -373,6 +402,28 @@ export class SkillRepository {
           extends: changes.extends,
           ...(changes.deprecated !== undefined && !builtin ? { deprecated: changes.deprecated } : {}),
         });
+        return { name, ok: true };
+      } catch (err) {
+        return { name, ok: false, error: (err as Error).message };
+      }
+    });
+  }
+
+  /**
+   * Pauses/resumes skills by name — a local-only toggle stored directly in this cache file's
+   * `paused` column, never written to SKILL.md and never synced by the file watcher (see the
+   * comment on skillColumns in store/sync.ts). Paused skills are hidden from list()/search() by
+   * default but remain fetchable via get()/bulkGet(). Because it's local-only, the flag does not
+   * follow the skill to another machine's cache, survive a rename, or survive the cache file
+   * being deleted. Returns per-name results so one bad name doesn't abort the rest of the batch.
+   */
+  setPaused(names: string[], paused: boolean): Array<{ name: string; ok: boolean; error?: string }> {
+    return names.map((name) => {
+      try {
+        const existing = this.get(name);
+        if (!existing) throw new Error(`skill with name "${name}" not found`);
+        if (this.isBuiltin(existing)) throw new Error(`skill "${name}" is builtin and cannot be paused`);
+        this.db.prepare(`UPDATE skills SET paused = ? WHERE id = ?`).run(paused ? 1 : 0, name);
         return { name, ok: true };
       } catch (err) {
         return { name, ok: false, error: (err as Error).message };

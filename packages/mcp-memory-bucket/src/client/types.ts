@@ -11,6 +11,7 @@ export interface Entry {
   root: string;
   mtime_ms: number;
   deprecated: boolean;
+  paused: boolean;
   created_at: string | null;
 }
 
@@ -26,6 +27,7 @@ export interface EntryDetail {
   source_path: string;
   root: string;
   deprecated?: boolean;
+  paused?: boolean;
   created_at?: string | null;
 }
 

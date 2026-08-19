@@ -24,6 +24,7 @@ interface MemoryRow {
   source_path: string;
   root: string;
   deprecated: number;
+  paused: number;
   created_at: string | null;
   body: string;
 }
@@ -39,6 +40,7 @@ function rowToDoc(row: MemoryRow): MemoryDoc {
     status: row.status,
     related_to: row.related_to,
     deprecated: !!row.deprecated,
+    paused: !!row.paused,
     created_at: row.created_at ?? undefined,
     source_path: row.source_path,
     root: row.root,
@@ -97,12 +99,24 @@ export class MemoryRepository {
     unregisterRoot(this.db, 'memory_docs', name);
   }
 
-  /** Exact-match lookup by normalized key, per V0 (no fuzzy matching). */
-  getByKey(key: string, docType?: MemoryDocType): MemoryDoc[] {
+  /**
+   * Exact-match lookup by normalized key, per V0 (no fuzzy matching).
+   * `includePaused` defaults to false: paused docs are hidden from discovery (see setPaused).
+   */
+  getByKey(key: string, docType?: MemoryDocType, opts: { includePaused?: boolean } = {}): MemoryDoc[] {
     const normalized = normalizeKey(key);
-    const rows = docType
-      ? (this.db.prepare(`SELECT * FROM memory_docs WHERE key = ? AND doc_type = ?`).all(normalized, docType) as MemoryRow[])
-      : (this.db.prepare(`SELECT * FROM memory_docs WHERE key = ?`).all(normalized) as MemoryRow[]);
+    const conditions = ['key = ?'];
+    const params: unknown[] = [normalized];
+    if (docType) {
+      conditions.push('doc_type = ?');
+      params.push(docType);
+    }
+    if (!opts.includePaused) {
+      conditions.push('paused = 0');
+    }
+    const rows = this.db
+      .prepare(`SELECT * FROM memory_docs WHERE ${conditions.join(' AND ')}`)
+      .all(...params) as MemoryRow[];
     return rows.map(rowToDoc);
   }
 
@@ -114,9 +128,18 @@ export class MemoryRepository {
    */
   search(
     query: string,
-    opts: { docType?: MemoryDocType; status?: MemoryStatus; root?: string; tag?: string; limit?: number; offset?: number } = {}
+    opts: {
+      docType?: MemoryDocType;
+      status?: MemoryStatus;
+      root?: string;
+      tag?: string;
+      limit?: number;
+      offset?: number;
+      /** Defaults to false: paused docs are hidden from discovery (see setPaused). */
+      includePaused?: boolean;
+    } = {}
   ): Array<{ id: string; key: string; description: string; doc_type: MemoryDocType; root: string; snippet: string; score: number }> {
-    const { docType, status, root, tag, limit = 20, offset = 0 } = opts;
+    const { docType, status, root, tag, limit = 20, offset = 0, includePaused = false } = opts;
     const conditions: string[] = [];
     const params: unknown[] = [query];
     if (docType) {
@@ -134,6 +157,9 @@ export class MemoryRepository {
     if (tag) {
       conditions.push('EXISTS (SELECT 1 FROM json_each(m.tags) WHERE value = ?)');
       params.push(tag);
+    }
+    if (!includePaused) {
+      conditions.push('m.paused = 0');
     }
     params.push(limit, offset);
 
@@ -217,7 +243,7 @@ export class MemoryRepository {
     };
     writeMarkdownFile(filePath, stripSourcePath(fm), input.body);
     upsertFile(this.db, this.syncSpec, filePath);
-    return { ...fm, body: input.body };
+    return { ...fm, body: input.body, paused: false };
   }
 
   /**
@@ -251,9 +277,12 @@ export class MemoryRepository {
   update(id: string, frontmatter?: Partial<MemoryFrontmatter>, body?: string): MemoryDoc {
     const existing = this.get(id);
     if (!existing) throw new Error(`memory doc with id "${id}" not found`);
+    // `paused` is local-cache-only and must never reach writeMarkdownFile — split it off of
+    // `existing` before spreading the rest into the frontmatter that gets written to disk.
+    const { paused: existingPaused, ...existingForFile } = existing;
 
     const merged: MemoryFrontmatter = {
-      ...existing,
+      ...existingForFile,
       ...frontmatter,
       id: existing.id,
       key: frontmatter?.key ? normalizeKey(frontmatter.key) : existing.key,
@@ -261,7 +290,7 @@ export class MemoryRepository {
     const newBody = body ?? existing.body;
     writeMarkdownFile(existing.source_path, stripSourcePath(merged), newBody);
     upsertFile(this.db, this.syncSpec, existing.source_path);
-    return { ...merged, body: newBody };
+    return { ...merged, body: newBody, paused: existingPaused };
   }
 
   /**
@@ -295,6 +324,27 @@ export class MemoryRepository {
           ...(changes.related_to !== undefined ? { related_to: changes.related_to } : {}),
           ...(changes.deprecated !== undefined ? { deprecated: changes.deprecated } : {}),
         });
+        return { id, ok: true };
+      } catch (err) {
+        return { id, ok: false, error: (err as Error).message };
+      }
+    });
+  }
+
+  /**
+   * Pauses/resumes memory docs by id — a local-only toggle stored directly in this cache file's
+   * `paused` column, never written to the doc's markdown file and never synced by the file
+   * watcher (see the comment on memoryColumns in store/sync.ts). Paused docs are hidden from
+   * getByKey()/search() by default but remain fetchable via get()/bulkGet(). Because it's
+   * local-only, the flag does not follow the doc to another machine's cache or survive the cache
+   * file being deleted. Returns per-id results so one bad id doesn't abort the rest of the batch.
+   */
+  setPaused(ids: string[], paused: boolean): Array<{ id: string; ok: boolean; error?: string }> {
+    return ids.map((id) => {
+      try {
+        const existing = this.get(id);
+        if (!existing) throw new Error(`memory doc with id "${id}" not found`);
+        this.db.prepare(`UPDATE memory_docs SET paused = ? WHERE id = ?`).run(paused ? 1 : 0, id);
         return { id, ok: true };
       } catch (err) {
         return { id, ok: false, error: (err as Error).message };

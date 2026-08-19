@@ -519,9 +519,116 @@ test('ensureColumns migration adds deprecated/created_at columns to a pre-existi
   );
   assert.ok(skillCols.has('deprecated'));
   assert.ok(skillCols.has('created_at'));
+  assert.ok(skillCols.has('paused'));
   assert.ok(memoryCols.has('deprecated'));
   assert.ok(memoryCols.has('created_at'));
+  assert.ok(memoryCols.has('paused'));
   migrated.close();
+});
+
+test('skill setPaused hides skills from list/search by default, never writes paused into SKILL.md', () => {
+  const skillDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+
+  const created = repo.create({ name: 'pausable', description: 'Pausable skill.', tags: [], trigger_phrases: [] }, 'Body text.');
+  assert.equal(created.paused, false);
+
+  const results = repo.setPaused(['pausable', 'missing-skill'], true);
+  assert.deepEqual(
+    results.map((r) => r.ok),
+    [true, false]
+  );
+  assert.equal(repo.get('pausable')?.paused, true);
+
+  // Hidden from discovery by default...
+  assert.equal(repo.list().some((s) => s.name === 'pausable'), false);
+  assert.equal(repo.search('pausable').some((s) => s.name === 'pausable'), false);
+  // ...but visible with includePaused, and always fetchable directly by name.
+  assert.equal(repo.list(undefined, undefined, { includePaused: true }).some((s) => s.name === 'pausable'), true);
+  assert.equal(repo.search('pausable', { includePaused: true }).some((s) => s.name === 'pausable'), true);
+  assert.ok(repo.get('pausable'));
+
+  // The toggle is local-only — it must never end up in the SKILL.md frontmatter on disk.
+  const raw = fs.readFileSync(path.join(skillDir, 'pausable', 'SKILL.md'), 'utf-8');
+  assert.doesNotMatch(raw, /paused/);
+
+  // update() must round-trip the file without disturbing the paused flag or leaking it into the file.
+  const updated = repo.update('pausable', { status: 'stable' });
+  assert.equal(updated.paused, true);
+  assert.equal(repo.get('pausable')?.paused, true);
+  const rawAfterUpdate = fs.readFileSync(path.join(skillDir, 'pausable', 'SKILL.md'), 'utf-8');
+  assert.doesNotMatch(rawAfterUpdate, /paused/);
+
+  const resumed = repo.setPaused(['pausable'], false);
+  assert.equal(resumed[0]?.ok, true);
+  assert.equal(repo.get('pausable')?.paused, false);
+  assert.equal(repo.list().some((s) => s.name === 'pausable'), true);
+
+  db.close();
+  fs.rmSync(skillDir, { recursive: true, force: true });
+});
+
+test('builtin skills cannot be paused', () => {
+  const builtinDir = makeTmpDir();
+  const skillDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: builtinDir }, { name: 'root', path: skillDir }]);
+
+  const builtinSkillDir = path.join(builtinDir, 'authoring-guide');
+  fs.mkdirSync(builtinSkillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(builtinSkillDir, 'SKILL.md'),
+    `---\nname: "authoring-guide"\ndescription: "Builtin guide."\ntags: []\ntrigger_phrases: []\n---\nBody.\n`
+  );
+  initialScan(db, skillSyncSpec([{ name: 'builtin', path: builtinDir }, { name: 'root', path: skillDir }]));
+
+  const results = repo.setPaused(['authoring-guide'], true);
+  assert.equal(results[0]?.ok, false);
+  assert.match(results[0]?.error ?? '', /builtin/);
+  assert.equal(repo.get('authoring-guide')?.paused, false);
+
+  db.close();
+  fs.rmSync(builtinDir, { recursive: true, force: true });
+  fs.rmSync(skillDir, { recursive: true, force: true });
+});
+
+test('memory setPaused hides docs from getByKey/search by default, never writes paused into the doc file', () => {
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+
+  const doc = repo.create({ key: 'RMXS-30', key_type: 'ticket', doc_type: 'plan', description: 'pausable plan', body: 'Plan body.' });
+  assert.equal(doc.paused, false);
+
+  const results = repo.setPaused([doc.id, 'missing-id'], true);
+  assert.deepEqual(
+    results.map((r) => r.ok),
+    [true, false]
+  );
+  assert.equal(repo.get(doc.id)?.paused, true);
+
+  assert.equal(repo.getByKey('RMXS-30').length, 0);
+  assert.equal(repo.getByKey('RMXS-30', undefined, { includePaused: true }).length, 1);
+  assert.equal(repo.search('pausable').some((h) => h.id === doc.id), false);
+  assert.equal(repo.search('pausable', { includePaused: true }).some((h) => h.id === doc.id), true);
+  assert.ok(repo.get(doc.id)); // always fetchable directly by id
+
+  const raw = fs.readFileSync(doc.source_path, 'utf-8');
+  assert.doesNotMatch(raw, /paused/);
+
+  const updated = repo.update(doc.id, { description: 'updated pausable plan' });
+  assert.equal(updated.paused, true);
+  const rawAfterUpdate = fs.readFileSync(doc.source_path, 'utf-8');
+  assert.doesNotMatch(rawAfterUpdate, /paused/);
+
+  const resumed = repo.setPaused([doc.id], false);
+  assert.equal(resumed[0]?.ok, true);
+  assert.equal(repo.get(doc.id)?.paused, false);
+  assert.equal(repo.getByKey('RMXS-30').length, 1);
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
 });
 
 test('relocate preserves created_at on the resulting doc', () => {
