@@ -48,6 +48,7 @@ interface FilterState {
   activeRoots: string[];
   sort: string;
   hideDeprecated: boolean;
+  hidePaused: boolean;
   dateFrom: string;
   dateTo: string;
 }
@@ -68,6 +69,7 @@ function loadFilterState(): Partial<FilterState> {
   const sort = params.get('sort');
   if (sort) state.sort = sort;
   if (params.get('deprecated') === '0') state.hideDeprecated = true;
+  if (params.get('paused') === '0') state.hidePaused = true;
   const dateFrom = params.get('date_from');
   if (dateFrom) state.dateFrom = dateFrom;
   const dateTo = params.get('date_to');
@@ -276,6 +278,7 @@ export class MemBucketApp extends LitElement {
   #dragging = new Signal<boolean>(false);
   #sort = new Signal<string>(this.#initialFilters.sort ?? 'mtime_desc');
   #hideDeprecated = new Signal<boolean>(this.#initialFilters.hideDeprecated ?? false);
+  #hidePaused = new Signal<boolean>(this.#initialFilters.hidePaused ?? false);
   #dateFrom = new Signal<string>(this.#initialFilters.dateFrom ?? '');
   #dateTo = new Signal<string>(this.#initialFilters.dateTo ?? '');
   #selectedIds = new Signal<Set<string>>(new Set());
@@ -331,6 +334,7 @@ export class MemBucketApp extends LitElement {
     for (const root of this.#activeRoots.value) params.append('root', root);
     if (this.#sort.value !== 'mtime_desc') params.set('sort', this.#sort.value);
     if (this.#hideDeprecated.value) params.set('deprecated', '0');
+    if (this.#hidePaused.value) params.set('paused', '0');
     if (this.#dateFrom.value) params.set('date_from', this.#dateFrom.value);
     if (this.#dateTo.value) params.set('date_to', this.#dateTo.value);
     return params.toString();
@@ -431,6 +435,11 @@ export class MemBucketApp extends LitElement {
     this.#refetch();
   }
 
+  #onToggleHidePaused(e: Event) {
+    this.#hidePaused.set((e.target as HTMLInputElement).checked);
+    this.#refetch();
+  }
+
   #onDateFromChange(e: Event) {
     this.#dateFrom.set((e.target as HTMLInputElement).value);
     this.#refetch();
@@ -480,6 +489,21 @@ export class MemBucketApp extends LitElement {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ids, deprecated }),
+        })
+      )
+    );
+    this.#selectedIds.set(new Set());
+    await this.#refetch();
+  }
+
+  async #bulkSetPaused(paused: boolean) {
+    const byTable = this.#selectedByTable();
+    await Promise.all(
+      [...byTable.entries()].map(([table, ids]) =>
+        fetch(`/api/entries/${table}/bulk/paused`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids, paused }),
         })
       )
     );
@@ -652,6 +676,14 @@ export class MemBucketApp extends LitElement {
             />
             Hide deprecated
           </label>
+          <label class="small">
+            <input
+              type="checkbox"
+              .checked=${this.#hidePaused.value}
+              @change=${(e: Event) => this.#onToggleHidePaused(e)}
+            />
+            Hide paused
+          </label>
         </div>
       </div>
       ${this.#selectedIds.value.size > 0
@@ -660,6 +692,8 @@ export class MemBucketApp extends LitElement {
               <span>${this.#selectedIds.value.size} selected</span>
               <button @click=${() => this.#bulkSetDeprecated(true)}>Mark deprecated</button>
               <button @click=${() => this.#bulkSetDeprecated(false)}>Un-deprecate</button>
+              <button @click=${() => this.#bulkSetPaused(true)}>Pause</button>
+              <button @click=${() => this.#bulkSetPaused(false)}>Resume</button>
               <button class="danger" @click=${() => this.#bulkDelete()}>Delete</button>
               <button @click=${() => this.#selectedIds.set(new Set())}>Clear</button>
             </div>

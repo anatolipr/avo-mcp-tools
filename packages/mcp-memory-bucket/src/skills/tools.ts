@@ -15,19 +15,26 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_list',
-    'Lists skills (reusable coding patterns, one SKILL.md per folder per the agentskills.io open standard), optionally filtered by a keyword matched against description/tags/trigger phrases.',
+    'Lists skills (reusable coding patterns, one SKILL.md per folder per the agentskills.io open standard), optionally filtered by a keyword matched against description/tags/trigger phrases. Paused skills are hidden by default — pass include_paused to see them.',
     multiRoot
-      ? { query: z.string().optional(), root: z.string().optional().describe(`filter to one root: ${rootNames}`) }
-      : { query: z.string().optional() },
-    async ({ query, root }: { query?: string; root?: string }) => {
-      const items = repo.list(query, root);
+      ? {
+          query: z.string().optional(),
+          root: z.string().optional().describe(`filter to one root: ${rootNames}`),
+          include_paused: z.boolean().optional().describe('include paused skills, which are hidden by default (see skill_set_paused)'),
+        }
+      : {
+          query: z.string().optional(),
+          include_paused: z.boolean().optional().describe('include paused skills, which are hidden by default (see skill_set_paused)'),
+        },
+    async ({ query, root, include_paused }: { query?: string; root?: string; include_paused?: boolean }) => {
+      const items = repo.list(query, root, { includePaused: include_paused });
       return { content: [{ type: 'text', text: JSON.stringify(items, null, 2) }] };
     }
   );
 
   mcp.tool(
     'skill_search',
-    'Full-text search over skill description/body/tags (grep/find-like, ranked by relevance) — unlike skill_list\'s substring metadata filter, this searches the full markdown body. `query` is raw SQLite FTS5 MATCH syntax: bare words, "exact phrases", prefix* wildcards, AND/OR/NOT boolean operators; hyphenated/punctuated terms must be quoted, e.g. "blue-green". Can be combined with status/owner/tag filters. Returns ranked hits with a highlighted snippet, not the full body — call skill_get on a hit\'s name for that.',
+    'Full-text search over skill description/body/tags (grep/find-like, ranked by relevance) — unlike skill_list\'s substring metadata filter, this searches the full markdown body. `query` is raw SQLite FTS5 MATCH syntax: bare words, "exact phrases", prefix* wildcards, AND/OR/NOT boolean operators; hyphenated/punctuated terms must be quoted, e.g. "blue-green". Can be combined with status/owner/tag filters. Returns ranked hits with a highlighted snippet, not the full body — call skill_get on a hit\'s name for that. Paused skills are hidden by default — pass include_paused to see them.',
     {
       query: z.string().describe('FTS5 match expression, e.g. `deploy AND rollback` or `"blue green"`'),
       status: z.enum(SKILL_STATUS).optional(),
@@ -35,11 +42,12 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       tag: z.string().optional(),
       limit: z.number().int().positive().max(100).optional(),
       offset: z.number().int().nonnegative().optional(),
+      include_paused: z.boolean().optional().describe('include paused skills, which are hidden by default (see skill_set_paused)'),
       ...(multiRoot ? { root: z.string().optional().describe(`filter to one root: ${rootNames}`) } : {}),
     },
-    async ({ query, status, owner, tag, limit, offset, root }: any) => {
+    async ({ query, status, owner, tag, limit, offset, root, include_paused }: any) => {
       try {
-        const hits = repo.search(query, { root, status, owner, tag, limit, offset });
+        const hits = repo.search(query, { root, status, owner, tag, limit, offset, includePaused: include_paused });
         return { content: [{ type: 'text', text: JSON.stringify(hits, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -218,6 +226,19 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     },
     async ({ entries }: any) => {
       const results = repo.bulkRename(entries);
+      return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+    }
+  );
+
+  mcp.tool(
+    'skill_set_paused',
+    'Pauses or resumes skills by name — a local-only toggle stored in this machine\'s SQLite cache, never written to SKILL.md, so it never touches the file on disk and never follows the skill to another machine\'s cache. Paused skills are hidden from skill_list/skill_search by default but stay fully intact and are still fetchable directly via skill_get/skill_bulk_get — use this to temporarily stop a skill from being surfaced during discovery without deprecating (retiring) it. Returns per-name success/failure so one bad name doesn\'t abort the batch.',
+    {
+      names: z.array(z.string()).min(1),
+      paused: z.boolean().describe('true to pause (hide from skill_list/skill_search), false to resume'),
+    },
+    async ({ names, paused }) => {
+      const results = repo.setPaused(names, paused);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );

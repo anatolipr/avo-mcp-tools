@@ -18,6 +18,9 @@ export interface TableSyncSpec<TFrontmatter> {
   toRow: (fm: TFrontmatter, sourcePath: string) => Record<string, unknown>;
 }
 
+// `paused` is deliberately absent from both lists: it's a local-only cache column (see
+// SkillRepository/MemoryRepository#setPaused) that never round-trips through frontmatter, so a
+// file add/change/rescan must never overwrite it via the INSERT/ON CONFLICT UPDATE below.
 const skillColumns = ['id', 'description', 'owner', 'status', 'tags', 'trigger_phrases', 'extends', 'deprecated', 'created_at'];
 const memoryColumns = ['id', 'key', 'key_type', 'description', 'doc_type', 'tags', 'status', 'related_to', 'deprecated', 'created_at'];
 

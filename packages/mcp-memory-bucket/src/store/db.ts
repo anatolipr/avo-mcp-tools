@@ -16,6 +16,7 @@ export function openCache(dbPath: string): Database.Database {
       source_path TEXT NOT NULL UNIQUE, -- path to SKILL.md
       root TEXT NOT NULL DEFAULT '',  -- name of the configured root this file lives under
       deprecated INTEGER NOT NULL DEFAULT 0,
+      paused INTEGER NOT NULL DEFAULT 0, -- local-only: never synced from/to SKILL.md, cache-file scoped
       created_at TEXT,
       body TEXT NOT NULL,
       mtime_ms INTEGER NOT NULL
@@ -33,6 +34,7 @@ export function openCache(dbPath: string): Database.Database {
       source_path TEXT NOT NULL UNIQUE,
       root TEXT NOT NULL DEFAULT '',  -- name of the configured root this file lives under
       deprecated INTEGER NOT NULL DEFAULT 0,
+      paused INTEGER NOT NULL DEFAULT 0, -- local-only: never synced from/to the doc's markdown file, cache-file scoped
       created_at TEXT,
       body TEXT NOT NULL,
       mtime_ms INTEGER NOT NULL
@@ -62,11 +64,13 @@ export function openCache(dbPath: string): Database.Database {
   ensureColumns(db, 'skills', [
     ['root', "TEXT NOT NULL DEFAULT ''"],
     ['deprecated', 'INTEGER NOT NULL DEFAULT 0'],
+    ['paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['created_at', 'TEXT'],
   ]);
   ensureColumns(db, 'memory_docs', [
     ['root', "TEXT NOT NULL DEFAULT ''"],
     ['deprecated', 'INTEGER NOT NULL DEFAULT 0'],
+    ['paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['created_at', 'TEXT'],
   ]);
   backfillSearchIndex(db);

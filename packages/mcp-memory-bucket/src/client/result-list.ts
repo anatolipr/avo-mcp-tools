@@ -37,6 +37,7 @@ export class ResultList extends LitElement {
     .row { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; gap: 8px; }
     .row:hover { background: var(--hover); }
     .row.deprecated { opacity: 0.55; }
+    .row.paused { opacity: 0.6; }
     .row-checkbox { flex: 0 0 auto; margin-top: 2px; cursor: pointer; }
     .row-body { flex: 1 1 auto; min-width: 0; }
     .top { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
@@ -55,6 +56,10 @@ export class ResultList extends LitElement {
       font-size: 10px; text-transform: uppercase; border: 1px solid var(--danger);
       color: var(--danger); background: color-mix(in srgb, var(--danger) 13%, transparent); border-radius: 4px; padding: 0 4px;
     }
+    .paused-badge {
+      font-size: 10px; text-transform: uppercase; border: 1px solid var(--accent);
+      color: var(--accent); background: var(--accent-tint); border-radius: 4px; padding: 0 4px;
+    }
     .empty { padding: 24px; opacity: 0.6; font-size: 13px; }
   `;
 
@@ -67,13 +72,13 @@ export class ResultList extends LitElement {
       ${this.results.map((r) => {
         const isBuiltin = r._table === 'skills' && r.root === 'builtin';
         return html`
-          <div class="row ${r.deprecated ? 'deprecated' : ''}" @click=${() => this.onSelect(r)}>
+          <div class="row ${r.deprecated ? 'deprecated' : ''} ${r.paused ? 'paused' : ''}" @click=${() => this.onSelect(r)}>
             <input
               type="checkbox"
               class="row-checkbox"
               .checked=${this.selectedIds?.has(r.id) ?? false}
               .disabled=${isBuiltin}
-              title=${isBuiltin ? "Builtin skills can't be bulk-deprecated or deleted" : ''}
+              title=${isBuiltin ? "Builtin skills can't be bulk-deprecated, paused, or deleted" : ''}
               @click=${(e: Event) => {
                 e.stopPropagation();
                 if (!isBuiltin) this.onToggleSelect(r);
@@ -89,6 +94,7 @@ export class ResultList extends LitElement {
                 <span class="type-badge">${r._table === 'skills' ? 'skill' : 'memory'}</span>
                 ${this.showRoot && r.root ? html`<span class="root-badge">${r.root}</span>` : ''}
                 ${r.deprecated ? html`<span class="deprecated-badge">deprecated</span>` : ''}
+                ${r.paused ? html`<span class="paused-badge">paused</span>` : ''}
                 ${r.tags.map((t) => html`<span class="tag">${t}</span>`)}
               </div>
             </div>

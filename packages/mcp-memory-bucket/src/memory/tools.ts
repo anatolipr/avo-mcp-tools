@@ -15,13 +15,14 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
 
   mcp.tool(
     'memory_get',
-    'Exact-match lookup of memory docs (plan/spec/sql/etc.) by normalized key — a ticket ID or a free-form name like "Spot Chart Design". Returns every doc under that key, or only the matching doc_type if provided.',
+    'Exact-match lookup of memory docs (plan/spec/sql/etc.) by normalized key — a ticket ID or a free-form name like "Spot Chart Design". Returns every doc under that key, or only the matching doc_type if provided. Paused docs are hidden by default — pass include_paused to see them.',
     {
       key: z.string(),
       doc_type: z.enum(MEMORY_DOC_TYPES).optional(),
+      include_paused: z.boolean().optional().describe('include paused docs, which are hidden by default (see memory_set_paused)'),
     },
-    async ({ key, doc_type }) => {
-      const docs = repo.getByKey(key, doc_type);
+    async ({ key, doc_type, include_paused }) => {
+      const docs = repo.getByKey(key, doc_type, { includePaused: include_paused });
       return { content: [{ type: 'text', text: JSON.stringify(docs, null, 2) }] };
     }
   );
@@ -48,7 +49,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
 
   mcp.tool(
     'memory_search',
-    'Full-text search over memory doc description/body/tags (grep/find-like, ranked by relevance) — unlike memory_get\'s exact-key lookup, this searches by content across all keys. `query` is raw SQLite FTS5 MATCH syntax: bare words, "exact phrases", prefix* wildcards, AND/OR/NOT boolean operators; hyphenated/punctuated terms must be quoted, e.g. "blue-green". Can be combined with doc_type/status/tag filters. Returns ranked hits with a highlighted snippet, not the full body — call memory_get(key) or fetch by id for that.',
+    'Full-text search over memory doc description/body/tags (grep/find-like, ranked by relevance) — unlike memory_get\'s exact-key lookup, this searches by content across all keys. `query` is raw SQLite FTS5 MATCH syntax: bare words, "exact phrases", prefix* wildcards, AND/OR/NOT boolean operators; hyphenated/punctuated terms must be quoted, e.g. "blue-green". Can be combined with doc_type/status/tag filters. Returns ranked hits with a highlighted snippet, not the full body — call memory_get(key) or fetch by id for that. Paused docs are hidden by default — pass include_paused to see them.',
     {
       query: z.string().describe('FTS5 match expression, e.g. `migration AND rollback` or `"blue green"`'),
       doc_type: z.enum(MEMORY_DOC_TYPES).optional(),
@@ -57,10 +58,11 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       ...(multiRoot ? { root: z.string().optional().describe(`filter to one root: ${rootNames}`) } : {}),
       limit: z.number().int().positive().max(100).optional(),
       offset: z.number().int().nonnegative().optional(),
+      include_paused: z.boolean().optional().describe('include paused docs, which are hidden by default (see memory_set_paused)'),
     },
-    async ({ query, doc_type, status, tag, root, limit, offset }: any) => {
+    async ({ query, doc_type, status, tag, root, limit, offset, include_paused }: any) => {
       try {
-        const hits = repo.search(query, { docType: doc_type, status, tag, root, limit, offset });
+        const hits = repo.search(query, { docType: doc_type, status, tag, root, limit, offset, includePaused: include_paused });
         return { content: [{ type: 'text', text: JSON.stringify(hits, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -153,6 +155,19 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
       }
+    }
+  );
+
+  mcp.tool(
+    'memory_set_paused',
+    'Pauses or resumes memory docs by id — a local-only toggle stored in this machine\'s SQLite cache, never written to the doc\'s markdown file, so it never touches the file on disk and never follows the doc to another machine\'s cache. Paused docs are hidden from memory_get/memory_search by default but stay fully intact and are still fetchable directly via memory_bulk_get — use this to temporarily stop a doc from surfacing during discovery without deprecating it. Returns per-id success/failure so one bad id doesn\'t abort the batch.',
+    {
+      ids: z.array(z.string()).min(1),
+      paused: z.boolean().describe('true to pause (hide from memory_get/memory_search), false to resume'),
+    },
+    async ({ ids, paused }) => {
+      const results = repo.setPaused(ids, paused);
+      return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
 

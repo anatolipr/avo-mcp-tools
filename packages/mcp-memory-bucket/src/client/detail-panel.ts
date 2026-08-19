@@ -135,6 +135,18 @@ export class DetailPanel extends LitElement {
     this.onChanged?.();
   }
 
+  async #togglePaused() {
+    const { table, id } = this.selected!;
+    const paused = !this._doc?.paused;
+    await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/paused`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused }),
+    });
+    await this.#load();
+    this.onChanged?.();
+  }
+
   async #deleteDoc() {
     if (!window.confirm("Delete this doc? This can't be undone.")) return;
     const { table, id } = this.selected!;
@@ -152,7 +164,8 @@ export class DetailPanel extends LitElement {
       <h2>${d.name ?? d.key ?? d.id}</h2>
       <div class="meta">
         ${d.tags?.join(', ') || 'no tags'} · ${d.status}${d.owner ? ` · owner: ${d.owner}` : ''}
-        ${d.deprecated ? ' · deprecated' : ''} · created ${d.created_at ? d.created_at.slice(0, 10) : 'unknown'}
+        ${d.deprecated ? ' · deprecated' : ''}${d.paused ? ' · paused' : ''} · created
+        ${d.created_at ? d.created_at.slice(0, 10) : 'unknown'}
       </div>
       <div class="meta">${d.description}</div>
       ${isBuiltin
@@ -160,6 +173,7 @@ export class DetailPanel extends LitElement {
         : html`
             <div class="actions">
               <button @click=${() => this.#toggleDeprecated()}>${d.deprecated ? 'Un-deprecate' : 'Mark deprecated'}</button>
+              <button @click=${() => this.#togglePaused()}>${d.paused ? 'Resume' : 'Pause'}</button>
               <button class="danger" @click=${() => this.#deleteDoc()}>Delete</button>
             </div>
           `}

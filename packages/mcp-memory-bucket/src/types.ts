@@ -32,7 +32,9 @@ export interface SkillFrontmatter {
   root: string; // filled in at runtime, not authored — name of the configured root this file lives under
 }
 
-export type SkillDoc = SkillFrontmatter & { body: string };
+// `paused` lives only in the SQLite cache (see SkillRepository#setPaused) — it is deliberately
+// not part of SkillFrontmatter so it never gets written into SKILL.md's frontmatter.
+export type SkillDoc = SkillFrontmatter & { body: string; paused: boolean };
 
 export type MemoryKeyType = 'ticket' | 'freeform';
 export type MemoryDocType =
@@ -60,7 +62,9 @@ export interface MemoryFrontmatter {
   root: string;
 }
 
-export type MemoryDoc = MemoryFrontmatter & { body: string };
+// `paused` lives only in the SQLite cache (see MemoryRepository#setPaused) — it is deliberately
+// not part of MemoryFrontmatter so it never gets written into the doc's markdown frontmatter.
+export type MemoryDoc = MemoryFrontmatter & { body: string; paused: boolean };
 
 /** Normalizes a lookup key the same way for authoring and querying: uppercase, hyphenated. */
 export function normalizeKey(key: string): string {
