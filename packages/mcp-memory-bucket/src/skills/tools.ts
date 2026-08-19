@@ -209,6 +209,20 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
   );
 
   mcp.tool(
+    'skill_bulk_rename',
+    'Renames many skills at once — each entry is a {name, new_name} pair, same semantics as skill_rename (moves the folder, updates frontmatter `name`). Returns per-entry success/failure so one bad pair (unknown name, name collision) doesn\'t abort the rest of the batch.',
+    {
+      entries: z
+        .array(z.object({ name: z.string().describe('current skill name'), new_name: z.string().describe(SKILL_NAME_DESCRIPTION) }))
+        .min(1),
+    },
+    async ({ entries }: any) => {
+      const results = repo.bulkRename(entries);
+      return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+    }
+  );
+
+  mcp.tool(
     'skill_delete',
     'Hard-deletes a skill by name — removes the whole skill folder (SKILL.md plus any scripts/references/assets), no tombstone.',
     { name: z.string() },

@@ -4,8 +4,28 @@
   <meta charset="utf-8" />
   <title>mem-bucket viewer</title>
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, sans-serif; margin: 0; }
+    :root {
+      color-scheme: light dark;
+      --border: light-dark(#0000001f, #ffffff2e);
+      --border-strong: light-dark(#00000038, #ffffff4a);
+      --hover: light-dark(#00000010, #ffffff14);
+      --hover-strong: light-dark(#00000018, #ffffff20);
+      --bg: light-dark(#ffffff, #1a1a1a);
+      --bg-subtle: light-dark(#00000008, #ffffff0d);
+      --fg: light-dark(#111111, #f0f0f0);
+      --accent: light-dark(#2563eb, #3b82f6);
+      --accent-fg: #ffffff;
+      --accent-tint: light-dark(#2563eb11, #3b82f622);
+      --danger: light-dark(#dc2626, #fca5a5);
+      --purple: light-dark(#7c3aed, #a78bfa);
+      --purple-fg: light-dark(#6d28d9, #d8caff);
+      --purple-tint: #a78bfa33;
+      --shadow: light-dark(#00000026, #00000080);
+      --overlay: light-dark(#00000059, #000000b3);
+    }
+    :root[data-theme='light'] { color-scheme: light; }
+    :root[data-theme='dark'] { color-scheme: dark; }
+    body { font-family: system-ui, sans-serif; margin: 0; background: var(--bg); color: var(--fg); }
   </style>
 </head>
 <body>

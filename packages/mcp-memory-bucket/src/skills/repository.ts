@@ -380,6 +380,22 @@ export class SkillRepository {
     });
   }
 
+  /**
+   * Renames many skills at once — each entry is a {name, new_name} pair, same
+   * semantics as rename(). Returns per-entry results so one bad pair (unknown
+   * name, name collision) doesn't abort the rest of the batch.
+   */
+  bulkRename(entries: Array<{ name: string; new_name: string }>): Array<{ name: string; new_name: string; ok: boolean; error?: string }> {
+    return entries.map(({ name, new_name }) => {
+      try {
+        this.rename(name, new_name);
+        return { name, new_name, ok: true };
+      } catch (err) {
+        return { name, new_name, ok: false, error: (err as Error).message };
+      }
+    });
+  }
+
   /** Removes the whole skill directory, including any scripts/references/assets alongside SKILL.md. */
   delete(name: string): void {
     const existing = this.get(name);

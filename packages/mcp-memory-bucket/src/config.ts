@@ -99,6 +99,16 @@ export function saveRoot(config: BucketConfig, kind: 'skill' | 'memory', root: N
   fs.writeFileSync(config.configPath, JSON.stringify(next, null, 2) + '\n');
 }
 
+/** Lowercase-hyphenate a folder-derived root name, same shape as skill names. */
+export function sanitizeRootName(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+}
+
 /**
  * Removes a named root from the config file by name. Matches both explicit
  * {name, path} entries and bare-string entries (via their derived name).

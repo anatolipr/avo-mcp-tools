@@ -25,47 +25,114 @@ function loadSplitPct(): number {
   return Number.isFinite(raw) && raw >= SPLIT_MIN_PCT && raw <= SPLIT_MAX_PCT ? raw : 40;
 }
 
+type ThemeMode = 'system' | 'light' | 'dark';
+const THEME_STORAGE_KEY = 'mem-bucket-theme';
+const THEME_CYCLE: ThemeMode[] = ['system', 'light', 'dark'];
+const THEME_ICON: Record<ThemeMode, string> = { system: '◐', light: '☀', dark: '☾' };
+const THEME_LABEL: Record<ThemeMode, string> = { system: 'Auto', light: 'Light', dark: 'Dark' };
+
+function loadTheme(): ThemeMode {
+  const raw = localStorage.getItem(THEME_STORAGE_KEY);
+  return raw === 'light' || raw === 'dark' ? raw : 'system';
+}
+
+function applyTheme(mode: ThemeMode) {
+  if (mode === 'system') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', mode);
+}
+
 export class MemBucketApp extends LitElement {
   static styles = css`
-    :host { display: block; height: 100vh; }
+    :host { display: flex; flex-direction: column; height: 100vh; }
+    .theme-toggle {
+      position: fixed;
+      top: 10px;
+      right: 12px;
+      z-index: 10;
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--border-strong);
+      border-radius: 50%;
+      background: var(--bg);
+      color: inherit;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.75;
+    }
+    .theme-toggle:hover { opacity: 1; background: var(--hover); }
     .filters {
       padding: 12px 16px;
-      border-bottom: 1px solid #8883;
+      border-bottom: 1px solid var(--border);
       display: flex;
       flex-direction: column;
       gap: 8px;
     }
-    .filters input[type='search'] {
-      font-size: 14px;
-      padding: 8px 10px;
-      width: 100%;
+    .search-field {
+      position: relative;
+      flex: 1 1 240px;
       max-width: 480px;
-      box-sizing: border-box;
     }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .filter-label { font-size: 12px; opacity: 0.6; font-weight: 600; }
-    .type-toggle button {
-      border: 1px solid #8886;
+    .filters input[type='search'] {
+      font-size: 13px;
+      padding: 6px 28px 6px 10px;
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
       background: none;
       color: inherit;
-      padding: 5px 12px;
+      height: 30px;
+    }
+    .filters input[type='search']::-webkit-search-cancel-button { display: none; }
+    .search-clear-btn {
+      position: absolute;
+      right: 4px;
+      top: 50%;
+      transform: translateY(-50%);
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      color: inherit;
+      opacity: 0.6;
+      font-size: 12px;
+      line-height: 1;
+      padding: 4px 6px;
+      border-radius: 50%;
+    }
+    .search-clear-btn:hover { opacity: 1; background: var(--hover); }
+    .search-row { align-items: center; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .filter-label { font-size: 12px; opacity: 0.6; font-weight: 600; }
+    .type-toggle { gap: 0; }
+    .type-toggle button {
+      border: 1px solid var(--border-strong);
+      background: none;
+      color: inherit;
+      padding: 6px 12px;
       font-size: 13px;
       cursor: pointer;
+      height: 30px;
+      box-sizing: border-box;
     }
-    .type-toggle button.active { background: #2563eb; border-color: #2563eb; color: white; }
+    .type-toggle button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
     .type-toggle button:first-child { border-radius: 6px 0 0 6px; }
     .type-toggle button:last-child { border-radius: 0 6px 6px 0; }
-    .body-region { display: flex; height: calc(100vh - 130px); }
+    .type-toggle button:not(:first-child) { border-left: none; }
+    .body-region { display: flex; flex: 1 1 auto; min-height: 0; }
     result-list { overflow-y: auto; flex: 0 0 auto; }
     detail-panel { overflow-y: auto; flex: 1 1 auto; min-width: 0; }
     .splitter {
       flex: 0 0 auto;
       width: 6px;
       cursor: col-resize;
-      background: #8882;
+      background: var(--hover);
       position: relative;
     }
-    .splitter:hover, .splitter.dragging { background: #2563eb55; }
+    .splitter:hover, .splitter.dragging { background: var(--accent-tint); }
     .splitter::after {
       content: '';
       position: absolute;
@@ -79,55 +146,58 @@ export class MemBucketApp extends LitElement {
       align-items: center;
       flex-wrap: wrap;
       padding: 10px 16px;
-      border-bottom: 1px solid #8883;
-      background: #8881a;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-subtle);
     }
     .root-chip {
-      border: 1px solid #8886; border-radius: 999px; padding: 3px 8px 3px 10px; font-size: 12px;
+      border: 1px solid var(--border-strong); border-radius: 999px; padding: 3px 8px 3px 10px; font-size: 12px;
       cursor: pointer; background: none; color: inherit; display: inline-flex; align-items: center; gap: 6px;
     }
-    .root-chip.active { background: #a78bfa33; border-color: #a78bfa; color: #6d28d9; }
-    @media (prefers-color-scheme: dark) {
-      .root-chip.active { background: #a78bfa33; border-color: #a78bfa; color: #d8caff; }
-    }
+    .root-chip.active { background: var(--purple-tint); border-color: var(--purple); color: var(--purple-fg); }
     .root-chip .remove {
       opacity: 0.6; font-size: 12px; line-height: 1; padding: 2px; border-radius: 50%;
     }
-    .root-chip .remove:hover { opacity: 1; background: #0002; }
+    .root-chip .remove:hover { opacity: 1; background: var(--hover-strong); }
     .add-root-btn {
-      border: 1px dashed #8886; border-radius: 999px; padding: 3px 10px; font-size: 12px;
+      border: 1px dashed var(--border-strong); border-radius: 999px; padding: 3px 10px; font-size: 12px;
       cursor: pointer; background: none; color: inherit; opacity: 0.75;
     }
     .add-root-btn:hover { opacity: 1; }
     .first-run {
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      height: 100vh; gap: 16px; text-align: center; padding: 24px;
+      flex: 1 1 auto; gap: 16px; text-align: center; padding: 24px;
     }
     .first-run h1 { font-size: 18px; margin: 0; }
     .first-run p { opacity: 0.7; font-size: 13px; max-width: 420px; margin: 0; }
-    select { font-size: 12px; padding: 4px 6px; }
+    select {
+      font-size: 13px;
+      padding: 6px 8px;
+      height: 30px;
+      box-sizing: border-box;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: none;
+      color: inherit;
+    }
     .bulk-bar {
       display: flex;
       gap: 8px;
       align-items: center;
       padding: 6px 16px;
-      border-bottom: 1px solid #8883;
-      background: #2563eb11;
+      border-bottom: 1px solid var(--border);
+      background: var(--accent-tint);
       font-size: 12px;
     }
     .bulk-bar button {
       font-size: 11px;
       padding: 4px 10px;
-      border: 1px solid #8884;
+      border: 1px solid var(--border);
       background: transparent;
       color: inherit;
       border-radius: 4px;
       cursor: pointer;
     }
-    .bulk-bar button.danger { border-color: #dc262688; color: #dc2626; }
-    @media (prefers-color-scheme: dark) {
-      .bulk-bar button.danger { color: #fca5a5; }
-    }
+    .bulk-bar button.danger { border-color: var(--danger); color: var(--danger); }
   `;
 
   #query = new Signal('');
@@ -146,6 +216,7 @@ export class MemBucketApp extends LitElement {
   #sort = new Signal<string>('mtime_desc');
   #hideDeprecated = new Signal<boolean>(false);
   #selectedIds = new Signal<Set<string>>(new Set());
+  #theme = new Signal<ThemeMode>(loadTheme());
 
   #boundOnDragMove = (e: PointerEvent) => this.#onDragMove(e);
   #boundOnDragEnd = () => this.#onDragEnd();
@@ -153,6 +224,18 @@ export class MemBucketApp extends LitElement {
   constructor() {
     super();
     new SignalWatcher(this);
+    applyTheme(this.#theme.value);
+  }
+
+  #setTheme(mode: ThemeMode) {
+    this.#theme.set(mode);
+    localStorage.setItem(THEME_STORAGE_KEY, mode);
+    applyTheme(mode);
+  }
+
+  #cycleTheme() {
+    const next = THEME_CYCLE[(THEME_CYCLE.indexOf(this.#theme.value) + 1) % THEME_CYCLE.length]!;
+    this.#setTheme(next);
   }
 
   #onDragStart(e: PointerEvent) {
@@ -198,6 +281,7 @@ export class MemBucketApp extends LitElement {
   async #refetch() {
     const res = await fetch(`/api/entries?${this.#requestQuery.value}`);
     this.#results.set((await res.json()) as Entry[]);
+    this.renderRoot.querySelector('result-list')?.scrollTo(0, 0);
   }
 
   async #refetchFacets() {
@@ -258,6 +342,11 @@ export class MemBucketApp extends LitElement {
 
   #onSearchInput(e: Event) {
     this.#query.set((e.target as HTMLInputElement).value);
+    this.#refetch();
+  }
+
+  #clearSearch() {
+    this.#query.set('');
     this.#refetch();
   }
 
@@ -331,12 +420,27 @@ export class MemBucketApp extends LitElement {
     await this.#refetch();
   }
 
+  #renderThemeToggle() {
+    const mode = this.#theme.value;
+    return html`
+      <button
+        class="theme-toggle"
+        title=${`Theme: ${THEME_LABEL[mode]} (click to change)`}
+        aria-label="Toggle color theme"
+        @click=${() => this.#cycleTheme()}
+      >
+        ${THEME_ICON[mode]}
+      </button>
+    `;
+  }
+
   render() {
     const facets = this.#facets.value;
     const allRoots = this.#allRoots();
 
     if (this.#rootsLoaded.value && allRoots.length === 0 && !this.#showAddRoot.value) {
       return html`
+        ${this.#renderThemeToggle()}
         <div class="first-run">
           <h1>No roots configured yet</h1>
           <p>
@@ -357,12 +461,16 @@ export class MemBucketApp extends LitElement {
     }
 
     return html`
+      ${this.#renderThemeToggle()}
       <div class="roots-bar">
         <span class="filter-label">Roots:</span>
         ${allRoots.map(
           (root) => html`
-            <button class="root-chip ${this.#activeRoots.value.includes(root.name) ? 'active' : ''}" @click=${() =>
-              this.#toggleRoot(root.name)}>
+            <button
+              class="root-chip ${this.#activeRoots.value.includes(root.name) ? 'active' : ''}"
+              title=${root.path}
+              @click=${() => this.#toggleRoot(root.name)}
+            >
               ${root.name}
               <span
                 class="remove"
@@ -376,25 +484,39 @@ export class MemBucketApp extends LitElement {
         <button class="add-root-btn" @click=${() => this.#showAddRoot.set(true)}>+ Add root</button>
       </div>
       <div class="filters">
-        <input
-          type="search"
-          placeholder="Search descriptions, bodies, tags..."
-          .value=${this.#query.value}
-          @input=${(e: Event) => this.#onSearchInput(e)}
-        />
-        <div class="row type-toggle">
-          ${TYPE_OPTIONS.map(
-            (opt) => html`
-              <button
-                class=${this.#typeFilter.value === opt.value ? 'active' : ''}
-                @click=${() => this.#setType(opt.value)}
-              >
-                ${opt.label}
-              </button>
-            `
-          )}
-        </div>
-        <div class="row">
+        <div class="row search-row">
+          <div class="search-field">
+            <input
+              type="search"
+              placeholder="Search descriptions, bodies, tags..."
+              .value=${this.#query.value}
+              @input=${(e: Event) => this.#onSearchInput(e)}
+            />
+            ${this.#query.value
+              ? html`
+                  <button
+                    class="search-clear-btn"
+                    title="Clear search"
+                    aria-label="Clear search"
+                    @click=${() => this.#clearSearch()}
+                  >
+                    ✕
+                  </button>
+                `
+              : ''}
+          </div>
+          <div class="row type-toggle">
+            ${TYPE_OPTIONS.map(
+              (opt) => html`
+                <button
+                  class=${this.#typeFilter.value === opt.value ? 'active' : ''}
+                  @click=${() => this.#setType(opt.value)}
+                >
+                  ${opt.label}
+                </button>
+              `
+            )}
+          </div>
           ${facets.tags.length === 0
             ? html`<span class="filter-label">Tags:</span> <label class="small">no tags yet</label>`
             : html`
@@ -404,8 +526,6 @@ export class MemBucketApp extends LitElement {
                   .onToggle=${(tag: string) => this.#toggleTag(tag)}
                 ></tag-multiselect>
               `}
-        </div>
-        <div class="row">
           <span class="filter-label">Sort:</span>
           <select .value=${this.#sort.value} @change=${(e: Event) => this.#onSortChange(e)}>
             <option value="mtime_desc">Recently touched</option>
@@ -436,7 +556,7 @@ export class MemBucketApp extends LitElement {
         : ''}
       <div class="body-region">
         <result-list
-          style=${`width: ${this.#splitPct.value}%; border-right: 1px solid #8883;`}
+          style=${`width: ${this.#splitPct.value}%; border-right: 1px solid var(--border);`}
           .results=${this.#results.value}
           .showRoot=${allRoots.length > 1}
           .onSelect=${(e: Entry) => this.#onSelect(e)}

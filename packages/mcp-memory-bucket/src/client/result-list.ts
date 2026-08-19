@@ -25,8 +25,17 @@ export class ResultList extends LitElement {
 
   static styles = css`
     :host { display: block; }
-    .row { padding: 10px 14px; border-bottom: 1px solid #8882; cursor: pointer; display: flex; gap: 8px; }
-    .row:hover { background: #8881; }
+    .count-header {
+      padding: 8px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      opacity: 0.6;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+    }
+    .row { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; gap: 8px; }
+    .row:hover { background: var(--hover); }
     .row.deprecated { opacity: 0.55; }
     .row-checkbox { flex: 0 0 auto; margin-top: 2px; cursor: pointer; }
     .row-body { flex: 1 1 auto; min-width: 0; }
@@ -36,19 +45,15 @@ export class ResultList extends LitElement {
     .meta { opacity: 0.65; font-size: 11px; white-space: nowrap; }
     .desc { font-size: 12px; opacity: 0.8; margin-top: 3px; }
     .tags { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
-    .tag { font-size: 10px; border: 1px solid #8886; border-radius: 999px; padding: 1px 6px; }
+    .tag { font-size: 10px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 6px; }
     .type-badge { font-size: 10px; text-transform: uppercase; opacity: 0.6; }
     .root-badge {
-      font-size: 10px; text-transform: uppercase; opacity: 0.9; border: 1px solid #a78bfa88;
-      color: #6d28d9; background: #a78bfa22; border-radius: 4px; padding: 0 4px;
+      font-size: 10px; text-transform: uppercase; opacity: 0.9; border: 1px solid var(--purple);
+      color: var(--purple-fg); background: var(--purple-tint); border-radius: 4px; padding: 0 4px;
     }
     .deprecated-badge {
-      font-size: 10px; text-transform: uppercase; border: 1px solid #dc262688;
-      color: #dc2626; background: #dc262622; border-radius: 4px; padding: 0 4px;
-    }
-    @media (prefers-color-scheme: dark) {
-      .root-badge { color: #d8caff; }
-      .deprecated-badge { color: #fca5a5; }
+      font-size: 10px; text-transform: uppercase; border: 1px solid var(--danger);
+      color: var(--danger); background: color-mix(in srgb, var(--danger) 13%, transparent); border-radius: 4px; padding: 0 4px;
     }
     .empty { padding: 24px; opacity: 0.6; font-size: 13px; }
   `;
@@ -58,6 +63,7 @@ export class ResultList extends LitElement {
       return html`<div class="empty">No results.</div>`;
     }
     return html`
+      <div class="count-header">${this.results.length} result${this.results.length === 1 ? '' : 's'}</div>
       ${this.results.map((r) => {
         const isBuiltin = r._table === 'skills' && r.root === 'builtin';
         return html`

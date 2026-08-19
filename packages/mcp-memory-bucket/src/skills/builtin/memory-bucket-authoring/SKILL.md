@@ -557,6 +557,19 @@ given, ask for both before calling it; don't guess a key from context.
   tools when you don't know (or don't care) which bucket something
   landed in. All three return snippets, not full bodies — follow up with
   `skill_get`/`memory_get` (or the bulk variants below) for the rest.
+- **`search_by_date(start, end)`** — finds skills and memory docs whose
+  **body text mentions a date, or whose `created_at` falls,** within an
+  inclusive ISO `YYYY-MM-DD` range, e.g. "what did I work on this week"
+  once you've resolved "this week" into concrete start/end dates
+  yourself (it does not parse natural language). Both a date written
+  inside the content and the doc's `created_at` count as candidate
+  matches — whichever is earliest wins, no priority between them. Like
+  `bucket_search`, it covers both skills and memory docs at once (pass
+  `table` to restrict to one). Returns a highlighted snippet around the
+  matched date (or a note that it matched via `created_at`, when the
+  date isn't literally in the body), not the full body. `created_at` is
+  indexed as the server's local calendar date, so "today"/"this week"
+  ranges built from local time just work — no timezone conversion needed.
 - **`skill_get`/`memory_get`** — exact-key lookup when you already know
   the name/key.
 

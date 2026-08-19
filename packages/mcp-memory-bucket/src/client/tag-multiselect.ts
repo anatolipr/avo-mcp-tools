@@ -26,27 +26,30 @@ export class TagMultiselect extends LitElement {
       position: relative;
       width: 260px;
       font: inherit;
+      font-size: 13px;
     }
     .field {
       display: flex;
       align-items: center;
       flex-wrap: wrap;
       gap: 4px;
-      border: 1px solid #8886;
+      border: 1px solid var(--border-strong);
       border-radius: 6px;
       background: none;
       padding: 3px 4px 3px 8px;
+      min-height: 30px;
+      box-sizing: border-box;
     }
     .field:focus-within {
-      border-color: #2563eb;
-      box-shadow: 0 0 0 2px #2563eb33;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-tint);
     }
     .selected-chip {
       display: inline-flex;
       align-items: center;
       gap: 4px;
-      background: #2563eb;
-      color: white;
+      background: var(--accent);
+      color: var(--accent-fg);
       border-radius: 999px;
       padding: 2px 6px 2px 10px;
       font-size: 12px;
@@ -96,11 +99,11 @@ export class TagMultiselect extends LitElement {
       list-style: none;
       padding: 4px;
       margin: 0;
-      border: 1px solid #8884;
+      border: 1px solid var(--border);
       border-radius: 8px;
-      background: var(--modal-bg, Canvas);
+      background: var(--bg);
       color: inherit;
-      box-shadow: 0 8px 24px #0006;
+      box-shadow: 0 8px 24px var(--shadow);
       max-height: 260px;
       overflow-y: auto;
       box-sizing: border-box;
@@ -118,7 +121,7 @@ export class TagMultiselect extends LitElement {
       cursor: pointer;
       font-size: 13px;
     }
-    .option:hover, .option.highlighted { background: #8881; }
+    .option:hover, .option.highlighted { background: var(--hover); }
     .option input { margin: 0; pointer-events: none; }
     .empty { padding: 6px 8px; opacity: 0.6; font-style: italic; font-size: 12px; }
   `;

@@ -33,7 +33,7 @@ export class DetailPanel extends LitElement {
     pre {
       white-space: pre-wrap;
       font-size: 12px;
-      background: #8881;
+      background: var(--bg-subtle);
       padding: 12px;
       border-radius: 6px;
       max-height: 60vh;
@@ -48,7 +48,7 @@ export class DetailPanel extends LitElement {
     .view-toggle button {
       font-size: 11px;
       padding: 3px 8px;
-      border: 1px solid #8884;
+      border: 1px solid var(--border);
       background: transparent;
       border-radius: 4px;
       cursor: pointer;
@@ -56,7 +56,7 @@ export class DetailPanel extends LitElement {
     }
     .view-toggle button.active {
       opacity: 1;
-      background: #8882;
+      background: var(--hover);
       font-weight: 600;
     }
     .markdown-body {
@@ -65,13 +65,13 @@ export class DetailPanel extends LitElement {
       max-height: 60vh;
       overflow-y: auto;
       padding: 12px;
-      background: #8881;
+      background: var(--bg-subtle);
       border-radius: 6px;
     }
     .markdown-body :first-child { margin-top: 0; }
     .markdown-body :last-child { margin-bottom: 0; }
     .markdown-body pre {
-      background: #8882;
+      background: var(--hover);
       max-height: none;
     }
     .markdown-body code {
@@ -86,18 +86,15 @@ export class DetailPanel extends LitElement {
     .actions button {
       font-size: 11px;
       padding: 4px 10px;
-      border: 1px solid #8884;
+      border: 1px solid var(--border);
       background: transparent;
       color: inherit;
       border-radius: 4px;
       cursor: pointer;
     }
     .actions button.danger {
-      border-color: #dc262688;
-      color: #dc2626;
-    }
-    @media (prefers-color-scheme: dark) {
-      .actions button.danger { color: #fca5a5; }
+      border-color: var(--danger);
+      color: var(--danger);
     }
   `;
 

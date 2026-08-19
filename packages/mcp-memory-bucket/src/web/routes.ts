@@ -5,7 +5,7 @@ import type { Router, Request, Response } from 'express';
 import express from 'express';
 import type Database from 'better-sqlite3';
 import type { BucketConfig } from '../config.js';
-import { saveRoot, removeRoot as removeRootFromConfig } from '../config.js';
+import { saveRoot, removeRoot as removeRootFromConfig, sanitizeRootName } from '../config.js';
 import type { SkillRepository } from '../skills/repository.js';
 import type { MemoryRepository } from '../memory/repository.js';
 
@@ -306,16 +306,6 @@ function buildHealth(db: Database.Database) {
     .map((m) => m.id);
 
   return { danglingExtends, danglingRelatedTo, emptyTriggerPhrases, staleActiveMemoryDocs };
-}
-
-/** Lowercase-hyphenate a folder-derived root name, same shape as skill names. */
-function sanitizeRootName(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
 }
 
 export function buildWebRouter(

@@ -33,28 +33,28 @@ export class AddRootModal extends LitElement {
   static styles = css`
     :host { display: block; }
     .backdrop {
-      position: fixed; inset: 0; background: #0008;
+      position: fixed; inset: 0; background: var(--overlay);
       display: flex; align-items: center; justify-content: center; z-index: 100;
     }
     .modal {
-      background: var(--modal-bg, Canvas);
+      background: var(--bg);
       color: inherit;
       border-radius: 10px;
       width: min(560px, 92vw);
       max-height: 82vh;
       display: flex;
       flex-direction: column;
-      box-shadow: 0 8px 40px #0006;
-      border: 1px solid #8884;
+      box-shadow: 0 8px 40px var(--shadow);
+      border: 1px solid var(--border);
     }
     .header { padding: 16px 20px 8px; }
     h2 { margin: 0; font-size: 16px; }
     .kind-toggle { display: flex; gap: 8px; padding: 0 20px 12px; }
     .kind-toggle button {
-      flex: 1; padding: 8px; border: 1px solid #8886; background: none; color: inherit;
+      flex: 1; padding: 8px; border: 1px solid var(--border-strong); background: none; color: inherit;
       border-radius: 6px; cursor: pointer; font-size: 13px;
     }
-    .kind-toggle button.active { background: #2563eb; border-color: #2563eb; color: white; }
+    .kind-toggle button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
     .breadcrumb-row {
       padding: 8px 20px; display: flex; align-items: center; justify-content: space-between; gap: 8px;
     }
@@ -67,13 +67,13 @@ export class AddRootModal extends LitElement {
       cursor: pointer; white-space: nowrap; user-select: none;
     }
     .browser {
-      flex: 1; overflow-y: auto; border-top: 1px solid #8883; border-bottom: 1px solid #8883;
+      flex: 1; overflow-y: auto; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
       min-height: 200px;
     }
     .entry {
       padding: 8px 20px; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 8px;
     }
-    .entry:hover { background: #8881; }
+    .entry:hover { background: var(--hover); }
     .entry .icon { opacity: 0.6; }
     .up { opacity: 0.7; }
     .empty { padding: 16px 20px; opacity: 0.6; font-size: 13px; }
@@ -81,18 +81,21 @@ export class AddRootModal extends LitElement {
     .selected-row { font-size: 12px; }
     .selected-row .path { font-family: monospace; opacity: 0.85; word-break: break-all; }
     label { font-size: 12px; opacity: 0.7; display: block; margin-bottom: 4px; }
-    input[type='text'] { width: 100%; box-sizing: border-box; padding: 7px 9px; font-size: 13px; }
+    input[type='text'] {
+      width: 100%; box-sizing: border-box; padding: 7px 9px; font-size: 13px;
+      border: 1px solid var(--border-strong); border-radius: 6px; background: none; color: inherit;
+    }
     .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
     button.primary {
-      background: #2563eb; border: 1px solid #2563eb; color: white; padding: 7px 16px;
+      background: var(--accent); border: 1px solid var(--accent); color: var(--accent-fg); padding: 7px 16px;
       border-radius: 6px; cursor: pointer; font-size: 13px;
     }
     button.primary:disabled { opacity: 0.5; cursor: default; }
     button.secondary {
-      background: none; border: 1px solid #8886; color: inherit; padding: 7px 16px;
+      background: none; border: 1px solid var(--border-strong); color: inherit; padding: 7px 16px;
       border-radius: 6px; cursor: pointer; font-size: 13px;
     }
-    .error { color: #dc2626; font-size: 12px; }
+    .error { color: var(--danger); font-size: 12px; }
   `;
 
   constructor() {

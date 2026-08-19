@@ -48,6 +48,15 @@ export function openCache(dbPath: string): Database.Database {
       tags,
       tokenize = 'porter unicode61'
     );
+
+    CREATE TABLE IF NOT EXISTS doc_dates (
+      ref_table TEXT NOT NULL,
+      ref_id TEXT NOT NULL,
+      date TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_doc_dates_date ON doc_dates(date);
+    CREATE INDEX IF NOT EXISTS idx_doc_dates_ref ON doc_dates(ref_table, ref_id);
   `);
 
   ensureColumns(db, 'skills', [

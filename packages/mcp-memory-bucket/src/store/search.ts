@@ -50,6 +50,81 @@ export function searchIndex(
   }
 }
 
+export interface DateSearchHit {
+  ref_table: 'skills' | 'memory_docs';
+  ref_id: string;
+  matched_date: string;
+  snippet: string;
+}
+
+const SNIPPET_CONTEXT_WORDS = 20;
+
+/**
+ * Builds a `<<...>>`-marked excerpt around the first occurrence of `date` in
+ * `body`, mirroring FTS5's snippet() style for visual consistency with the
+ * other search tools. `date` doesn't always appear literally in the body —
+ * it may have matched via created_at instead — in which case there's no
+ * position to excerpt around, so the marker stands alone with no context.
+ */
+function buildDateSnippet(body: string, date: string): string {
+  const idx = body.indexOf(date);
+  if (idx === -1) return `<<${date}>> (matched via created_at, not mentioned in body)`;
+  const before = body.slice(0, idx).split(/\s+/).filter(Boolean).slice(-SNIPPET_CONTEXT_WORDS).join(' ');
+  const after = body
+    .slice(idx + date.length)
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, SNIPPET_CONTEXT_WORDS)
+    .join(' ');
+  return `${before ? '…' + before + ' ' : ''}<<${date}>>${after ? ' ' + after + '…' : ''}`;
+}
+
+/**
+ * Finds skills/memory docs whose body mentions a date, OR whose created_at
+ * falls, within [start, end] (inclusive, ISO YYYY-MM-DD) — driven by the
+ * `doc_dates` side table, populated at index time from both extractDates()
+ * on the body and the doc's created_at, not FTS5. ANY-match: a doc with
+ * multiple candidate dates matches if any falls in range; `matched_date` is
+ * the earliest match, with no priority between body-extracted and created_at.
+ */
+export function searchByDate(
+  db: Database.Database,
+  start: string,
+  end: string,
+  opts: { table?: 'skills' | 'memory_docs'; limit?: number; offset?: number } = {}
+): DateSearchHit[] {
+  if (start > end) {
+    throw new Error(`invalid date range: start "${start}" is after end "${end}"`);
+  }
+  const { table, limit = 20, offset = 0 } = opts;
+  const params: unknown[] = [start, end];
+  if (table) params.push(table);
+  params.push(limit, offset);
+
+  const rows = db
+    .prepare(
+      `SELECT ref_table, ref_id, MIN(date) AS matched_date
+       FROM doc_dates
+       WHERE date BETWEEN ? AND ? ${table ? 'AND ref_table = ?' : ''}
+       GROUP BY ref_table, ref_id
+       ORDER BY matched_date
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params) as Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string; matched_date: string }>;
+
+  return rows.map((row) => {
+    const bodyRow = db
+      .prepare(`SELECT body FROM ${row.ref_table} WHERE id = ?`)
+      .get(row.ref_id) as { body: string } | undefined;
+    return {
+      ref_table: row.ref_table,
+      ref_id: row.ref_id,
+      matched_date: row.matched_date,
+      snippet: bodyRow ? buildDateSnippet(bodyRow.body, row.matched_date) : '',
+    };
+  });
+}
+
 export interface CombinedSearchHit {
   ref_table: 'skills' | 'memory_docs';
   id: string; // skill name, or memory doc id

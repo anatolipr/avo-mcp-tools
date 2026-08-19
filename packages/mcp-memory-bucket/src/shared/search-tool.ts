@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type Database from 'better-sqlite3';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { searchCombined, SearchQueryError } from '../store/search.js';
+import { searchCombined, searchByDate, SearchQueryError } from '../store/search.js';
 
 export function registerSearchTool(mcp: McpServer, db: Database.Database): void {
   mcp.tool(
@@ -19,6 +19,26 @@ export function registerSearchTool(mcp: McpServer, db: Database.Database): void 
       } catch (err) {
         const message = err instanceof SearchQueryError ? err.message : (err as Error).message;
         return { content: [{ type: 'text', text: message }], isError: true };
+      }
+    }
+  );
+
+  mcp.tool(
+    'search_by_date',
+    'Finds skills and memory docs whose body text mentions a date, OR whose created_at falls, within [start, end] (inclusive, ISO YYYY-MM-DD). Matches any date extracted from the document body plus its created_at — ANY-match, no priority between them. created_at is stored converted to the server\'s local calendar date, so "today"/"this week" ranges built from local time line up correctly without any timezone adjustment. Useful for period-based recall, e.g. "what did I work on this week": the caller computes the date range itself, this tool does not parse natural language. Returns ranked hits (earliest matched date first) with a highlighted snippet showing the matched date in context (or a note that it matched via created_at, when the date isn\'t literally in the body), not the full body — call skill_get/memory_get on a hit for that.',
+    {
+      start: z.string().describe('ISO date YYYY-MM-DD, inclusive'),
+      end: z.string().describe('ISO date YYYY-MM-DD, inclusive'),
+      table: z.enum(['skills', 'memory_docs']).optional().describe('restrict to one bucket; omit to search both'),
+      limit: z.number().int().positive().max(100).optional(),
+      offset: z.number().int().nonnegative().optional(),
+    },
+    async ({ start, end, table, limit, offset }) => {
+      try {
+        const hits = searchByDate(db, start, end, { table, limit, offset });
+        return { content: [{ type: 'text', text: JSON.stringify(hits, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
       }
     }
   );

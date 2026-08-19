@@ -10,7 +10,8 @@ import { SkillRepository } from '../src/skills/repository.js';
 import { MemoryRepository } from '../src/memory/repository.js';
 import { relocate, relocateMany, inferMemoryFrontmatter } from '../src/shared/relocate.js';
 import { isValidSkillName } from '../src/store/skill-name.js';
-import { searchCombined, SearchQueryError } from '../src/store/search.js';
+import { searchCombined, searchByDate, SearchQueryError } from '../src/store/search.js';
+import { toLocalDate } from '../src/store/date-extract.js';
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'memory-bucket-test-'));
@@ -551,4 +552,146 @@ test('isValidSkillName enforces the agentskills.io name constraints', () => {
   assert.equal(isValidSkillName('-pdf'), false); // leading hyphen
   assert.equal(isValidSkillName('pdf--processing'), false); // consecutive hyphens
   assert.equal(isValidSkillName('a'.repeat(65)), false); // too long
+});
+
+test('searchByDate finds memory docs and skills by dates mentioned in their body', () => {
+  const memDir = makeTmpDir();
+  const skillDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+
+  memoryRepo.create({
+    key: 'date-test',
+    key_type: 'freeform',
+    doc_type: 'session-summary',
+    description: 'Session with dates',
+    body: 'Started work on 2026-08-10, wrapped up on 2026-08-12 after review.',
+  });
+  memoryRepo.create({
+    key: 'no-date-test',
+    key_type: 'freeform',
+    doc_type: 'session-summary',
+    description: 'Session without dates',
+    body: 'No dates mentioned in this one at all.',
+  });
+  skillRepo.create(
+    {
+      name: 'dated-skill',
+      description: 'Skill with a date. Use for testing search_by_date.',
+      owner: null,
+      status: 'unreviewed',
+      tags: [],
+      trigger_phrases: [],
+    },
+    'Introduced on Jan 15, 2026 as a pattern.'
+  );
+
+  // 2026-08-10 is a body-mentioned date; created_at (today, some other date
+  // this test run) is also indexed but falls outside this narrow range, so
+  // only the body match shows up here.
+  const hits = searchByDate(db, '2026-08-10', '2026-08-10');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.ref_table, 'memory_docs');
+  assert.equal(hits[0]?.matched_date, '2026-08-10');
+  assert.ok(hits[0]?.snippet.includes('<<2026-08-10>>'));
+
+  const skillHits = searchByDate(db, '2026-01-15', '2026-01-15', { table: 'skills' });
+  assert.equal(skillHits.length, 1);
+  assert.equal(skillHits[0]?.ref_id, 'dated-skill');
+
+  const outOfRange = searchByDate(db, '2020-01-01', '2020-01-31');
+  assert.equal(outOfRange.length, 0);
+
+  assert.throws(() => searchByDate(db, '2026-08-31', '2026-08-01'), /invalid date range/);
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+  fs.rmSync(skillDir, { recursive: true, force: true });
+});
+
+test('searchByDate also matches on created_at when no date is mentioned in the body', () => {
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+
+  const doc = memoryRepo.create({
+    key: 'created-at-only',
+    key_type: 'freeform',
+    doc_type: 'session-summary',
+    description: 'No dates in body',
+    body: 'Nothing date-like mentioned here.',
+  });
+  const createdDate = toLocalDate(doc.created_at!);
+
+  const hits = searchByDate(db, createdDate, createdDate);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.ref_id, doc.id);
+  assert.equal(hits[0]?.matched_date, createdDate);
+  assert.ok(hits[0]?.snippet.includes('matched via created_at'));
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+});
+
+test('wiping all cache tables and re-running initialScan fully restores state from disk (bucket_rebuild_cache mechanics)', () => {
+  const memDir = makeTmpDir();
+  const skillDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const skillSpec = skillSyncSpec([{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const memorySpec = memorySyncSpec([{ name: 'root', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+
+  memoryRepo.create({
+    key: 'rebuild-test',
+    key_type: 'freeform',
+    doc_type: 'session-summary',
+    description: 'Rebuild target',
+    body: 'Happened on 2026-07-04.',
+  });
+  skillRepo.create(
+    { name: 'rebuild-skill', description: 'For rebuild testing. Use to test rebuild.', owner: null, status: 'unreviewed', tags: [], trigger_phrases: [] },
+    'Body text.'
+  );
+
+  // Simulate the tool's wipe: delete all four derived tables directly (source
+  // files on disk are untouched).
+  db.exec(`DELETE FROM skills; DELETE FROM memory_docs; DELETE FROM search_index; DELETE FROM doc_dates;`);
+  assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM memory_docs`).get() as { n: number }).n, 0);
+  assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM doc_dates`).get() as { n: number }).n, 0);
+
+  initialScan(db, skillSpec);
+  initialScan(db, memorySpec);
+
+  const restoredMemory = memoryRepo.getByKey('rebuild-test');
+  assert.equal(restoredMemory.length, 1);
+  assert.equal(restoredMemory[0]?.description, 'Rebuild target');
+  assert.ok(skillRepo.get('rebuild-skill'));
+  assert.equal(searchByDate(db, '2026-07-04', '2026-07-04').length, 1);
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+  fs.rmSync(skillDir, { recursive: true, force: true });
+});
+
+test('searchByDate reflects doc_dates cleanup after deletion', () => {
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+
+  const doc = memoryRepo.create({
+    key: 'delete-test',
+    key_type: 'freeform',
+    doc_type: 'session-summary',
+    description: 'To be deleted',
+    body: 'Happened on 2026-05-01.',
+  });
+  assert.equal(searchByDate(db, '2026-05-01', '2026-05-01').length, 1);
+
+  memoryRepo.delete(doc.id);
+  assert.equal(searchByDate(db, '2026-05-01', '2026-05-01').length, 0);
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
 });

@@ -4,6 +4,7 @@ import chokidar, { type FSWatcher } from 'chokidar';
 import type Database from 'better-sqlite3';
 import { readMarkdownFile } from './markdown-file.js';
 import { flattenTags } from './db.js';
+import { extractDates, toLocalDate } from './date-extract.js';
 import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
 import type { NamedRoot } from '../config.js';
 
@@ -119,6 +120,17 @@ export function upsertFile<TFrontmatter>(
   db.prepare(
     `INSERT INTO search_index (ref_table, ref_id, description, body, tags) VALUES (?, ?, ?, ?, ?)`
   ).run(spec.table, id, String(row.description ?? ''), parsed.body, flattenTags(String(row.tags ?? '[]')));
+
+  db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ?`).run(spec.table, id);
+  const dates = new Set(extractDates(parsed.body));
+  // created_at is a UTC instant; convert to the OS-local calendar date so it
+  // lines up with what a user in this timezone would call "today", matching
+  // extractDates()'s output, which is already timezone-naive local text.
+  if (row.created_at) dates.add(toLocalDate(String(row.created_at)));
+  if (dates.size > 0) {
+    const insertDate = db.prepare(`INSERT INTO doc_dates (ref_table, ref_id, date) VALUES (?, ?, ?)`);
+    for (const date of dates) insertDate.run(spec.table, id, date);
+  }
 }
 
 export function removeFile(db: Database.Database, table: 'skills' | 'memory_docs', filePath: string): void {
@@ -128,6 +140,7 @@ export function removeFile(db: Database.Database, table: 'skills' | 'memory_docs
   db.prepare(`DELETE FROM ${table} WHERE source_path = ?`).run(filePath);
   if (existing) {
     db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(table, existing.id);
+    db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ?`).run(table, existing.id);
   }
 }
 
