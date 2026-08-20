@@ -5,6 +5,8 @@ import type Database from 'better-sqlite3';
 import { readMarkdownFile } from './markdown-file.js';
 import { flattenTags } from './db.js';
 import { extractDates, toLocalDate } from './date-extract.js';
+import { slugify } from './slug.js';
+import { normalizeKey } from '../types.js';
 import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
 import type { NamedRoot } from '../config.js';
 
@@ -16,6 +18,13 @@ export interface TableSyncSpec<TFrontmatter> {
   columns: string[]; // column names in insert order, excluding body/mtime_ms/source_path/root
   getId: (fm: TFrontmatter) => string | undefined;
   toRow: (fm: TFrontmatter, sourcePath: string) => Record<string, unknown>;
+  /**
+   * Optional fallback for files with no (or incomplete) frontmatter — fills in defaults derived
+   * from the file itself so a plain dropped-in .md still gets indexed rather than skipped. Runs
+   * before getId/toRow. Skills omit this: SKILL.md's `name`/`description` are spec-required and
+   * meaningful, so a skill missing them is a real authoring error, not a file to paper over.
+   */
+  deriveFrontmatter?: (fm: TFrontmatter, filePath: string) => TFrontmatter;
 }
 
 // `paused` is deliberately absent from both lists: it's a local-only cache column (see
@@ -52,6 +61,21 @@ export function memorySyncSpec(sources: NamedRoot[]): TableSyncSpec<MemoryFrontm
     matchesFile: (filePath) => filePath.endsWith('.md'),
     columns: memoryColumns,
     getId: (fm) => fm.id,
+    deriveFrontmatter: (fm, filePath) => {
+      const basename = path.basename(filePath, '.md');
+      const fallbackId = slugify(basename) || 'untitled';
+      return {
+        ...fm,
+        id: fm.id ?? fallbackId,
+        key: fm.key ?? normalizeKey(fallbackId),
+        key_type: fm.key_type ?? 'freeform',
+        description: fm.description ?? basename,
+        doc_type: fm.doc_type ?? 'other',
+        status: fm.status ?? 'active',
+        tags: fm.tags ?? [],
+        related_to: fm.related_to ?? null,
+      };
+    },
     toRow: (fm) => ({
       id: fm.id,
       key: fm.key,
@@ -98,13 +122,17 @@ export function upsertFile<TFrontmatter>(
   const parsed = readMarkdownFile<TFrontmatter>(filePath);
   if (existing && existing.mtime_ms === parsed.mtimeMs) return; // unchanged, skip reprocessing
 
-  const id = spec.getId(parsed.frontmatter);
+  const frontmatter = spec.deriveFrontmatter
+    ? spec.deriveFrontmatter(parsed.frontmatter, filePath)
+    : parsed.frontmatter;
+
+  const id = spec.getId(frontmatter);
   if (!id) {
     console.error(`[memory-bucket] skipping ${filePath}: missing required id field in frontmatter`);
     return;
   }
 
-  const row = spec.toRow(parsed.frontmatter, filePath);
+  const row = spec.toRow(frontmatter, filePath);
   const root = rootForFile(spec.sources, filePath);
   const cols = [...spec.columns, 'source_path', 'root', 'body', 'mtime_ms'];
   const values = [...spec.columns.map((c) => row[c]), filePath, root, parsed.body, parsed.mtimeMs];

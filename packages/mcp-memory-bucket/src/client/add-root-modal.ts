@@ -29,6 +29,8 @@ export class AddRootModal extends LitElement {
   #error = new Signal<string>('');
   #submitting = new Signal<boolean>(false);
   #showHidden = new Signal<boolean>(false);
+  #creatingFolder = new Signal<boolean>(false);
+  #newFolderName = new Signal<string>('');
 
   static styles = css`
     :host { display: block; }
@@ -65,6 +67,23 @@ export class AddRootModal extends LitElement {
     .hidden-toggle {
       font-size: 11px; opacity: 0.7; display: flex; align-items: center; gap: 4px;
       cursor: pointer; white-space: nowrap; user-select: none;
+    }
+    .new-folder-btn {
+      font-size: 11px; opacity: 0.7; background: none; border: none; color: inherit;
+      cursor: pointer; white-space: nowrap; padding: 0;
+    }
+    .new-folder-btn:hover { opacity: 1; }
+    .new-folder-row {
+      padding: 8px 20px; display: flex; align-items: center; gap: 8px;
+      border-top: 1px solid var(--border);
+    }
+    .new-folder-row input[type='text'] {
+      flex: 1; padding: 5px 8px; font-size: 12px;
+      border: 1px solid var(--border-strong); border-radius: 6px; background: none; color: inherit;
+    }
+    .new-folder-row button {
+      font-size: 11px; padding: 5px 10px; border: 1px solid var(--border-strong); background: none;
+      color: inherit; border-radius: 6px; cursor: pointer;
     }
     .browser {
       flex: 1; overflow-y: auto; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
@@ -125,11 +144,45 @@ export class AddRootModal extends LitElement {
     this.#parent.set(data.parent);
     this.#entries.set(data.entries);
     this.#error.set('');
+    this.renderRoot.querySelector('.browser')?.scrollTo(0, 0);
   }
 
   #toggleHidden() {
     this.#showHidden.set(!this.#showHidden.value);
     this.#browse(this.#currentPath.value);
+  }
+
+  #startCreateFolder() {
+    this.#newFolderName.set('');
+    this.#creatingFolder.set(true);
+  }
+
+  #cancelCreateFolder() {
+    this.#creatingFolder.set(false);
+    this.#newFolderName.set('');
+  }
+
+  async #submitCreateFolder() {
+    const name = this.#newFolderName.value.trim();
+    if (!name) return;
+    this.#error.set('');
+    try {
+      const res = await fetch('/api/fs/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: this.#currentPath.value, name }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        this.#error.set(data.error ?? 'failed to create folder');
+        return;
+      }
+      this.#creatingFolder.set(false);
+      this.#newFolderName.set('');
+      await this.#browse(this.#currentPath.value);
+    } catch (err) {
+      this.#error.set((err as Error).message);
+    }
   }
 
   #selectCurrentAsRoot() {
@@ -187,11 +240,30 @@ export class AddRootModal extends LitElement {
               `}
           <div class="breadcrumb-row">
             <div class="breadcrumb">${this.#currentPath.value}</div>
+            <button class="new-folder-btn" @click=${() => this.#startCreateFolder()}>+ New folder</button>
             <label class="hidden-toggle">
               <input type="checkbox" .checked=${this.#showHidden.value} @change=${() => this.#toggleHidden()} />
               Show hidden
             </label>
           </div>
+          ${this.#creatingFolder.value
+            ? html`
+                <div class="new-folder-row">
+                  <input
+                    type="text"
+                    placeholder="Folder name"
+                    .value=${this.#newFolderName.value}
+                    @input=${(e: Event) => this.#newFolderName.set((e.target as HTMLInputElement).value)}
+                    @keydown=${(e: KeyboardEvent) => {
+                      if (e.key === 'Enter') this.#submitCreateFolder();
+                      if (e.key === 'Escape') this.#cancelCreateFolder();
+                    }}
+                  />
+                  <button @click=${() => this.#submitCreateFolder()}>Create</button>
+                  <button @click=${() => this.#cancelCreateFolder()}>Cancel</button>
+                </div>
+              `
+            : ''}
           <div class="browser">
             ${this.#parent.value
               ? html`<div class="entry up" @click=${() => this.#browse(this.#parent.value!)}>

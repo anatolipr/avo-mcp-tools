@@ -12,3 +12,4 @@ build/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+packages/mcp-memory-bucket/memory-bucket.config.json

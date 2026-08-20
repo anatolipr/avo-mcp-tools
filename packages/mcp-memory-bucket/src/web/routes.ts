@@ -615,5 +615,32 @@ export function buildWebRouter(
     res.json({ path: dirPath, parent, entries });
   });
 
+  router.post('/api/fs/mkdir', (req: Request, res: Response) => {
+    const { path: parentPath, name } = req.body as { path?: string; name?: string };
+    if (!parentPath || !path.isAbsolute(parentPath)) {
+      res.status(400).json({ error: 'path must be an absolute directory path' });
+      return;
+    }
+    if (!name || name.trim() !== name || name.includes('/') || name === '.' || name === '..') {
+      res.status(400).json({ error: 'invalid folder name' });
+      return;
+    }
+    if (!fs.existsSync(parentPath) || !fs.statSync(parentPath).isDirectory()) {
+      res.status(400).json({ error: `not a directory: ${parentPath}` });
+      return;
+    }
+    const newDirPath = path.join(parentPath, name);
+    if (fs.existsSync(newDirPath)) {
+      res.status(409).json({ error: `already exists: ${newDirPath}` });
+      return;
+    }
+    try {
+      fs.mkdirSync(newDirPath);
+      res.json({ path: newDirPath, name });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   return router;
 }

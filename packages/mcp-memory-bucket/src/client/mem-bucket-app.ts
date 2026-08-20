@@ -354,8 +354,25 @@ export class MemBucketApp extends LitElement {
     return params.toString();
   });
 
+  #boundOnFocus = () => this.#onFocus();
+
   connectedCallback() {
     super.connectedCallback();
+    this.#refetch();
+    this.#refetchFacets();
+    this.#refetchRoots();
+    window.addEventListener('focus', this.#boundOnFocus);
+    document.addEventListener('visibilitychange', this.#boundOnFocus);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('focus', this.#boundOnFocus);
+    document.removeEventListener('visibilitychange', this.#boundOnFocus);
+  }
+
+  #onFocus() {
+    if (document.visibilityState !== 'visible') return;
     this.#refetch();
     this.#refetchFacets();
     this.#refetchRoots();
