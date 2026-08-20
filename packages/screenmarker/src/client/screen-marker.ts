@@ -38,6 +38,22 @@ function makeId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
+type ThemeMode = 'system' | 'light' | 'dark';
+const THEME_STORAGE_KEY = 'screenmarker-theme';
+const THEME_CYCLE: ThemeMode[] = ['system', 'light', 'dark'];
+const THEME_ICON: Record<ThemeMode, string> = { system: '◐', light: '☀', dark: '☾' };
+const THEME_LABEL: Record<ThemeMode, string> = { system: 'Auto', light: 'Light', dark: 'Dark' };
+
+function loadTheme(): ThemeMode {
+  const raw = localStorage.getItem(THEME_STORAGE_KEY);
+  return raw === 'light' || raw === 'dark' ? raw : 'system';
+}
+
+function applyTheme(mode: ThemeMode) {
+  if (mode === 'system') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', mode);
+}
+
 export class ScreenMarker extends LitElement {
   static styles = css`
     :host {
@@ -45,21 +61,30 @@ export class ScreenMarker extends LitElement {
       flex-direction: column;
       height: 100vh;
       font-family: system-ui, sans-serif;
-      --bg: #f5f5f0;
-      --panel: #ffffff;
-      --border: #d8d8d2;
-      --text: #1a1a1a;
-      --accent: #007aff;
       background: var(--bg);
       color: var(--text);
     }
-    @media (prefers-color-scheme: dark) {
-      :host {
-        --bg: #17181a;
-        --panel: #232427;
-        --border: #3a3b3e;
-        --text: #f0f0f0;
-      }
+    .theme-toggle {
+      position: fixed;
+      top: 10px;
+      right: 12px;
+      z-index: 10;
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      background: var(--panel);
+      color: inherit;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.75;
+    }
+    .theme-toggle:hover {
+      opacity: 1;
     }
     .tabs {
       display: flex;
@@ -304,10 +329,24 @@ export class ScreenMarker extends LitElement {
   #dragOverPageId: string | null = null;
   #dragOverSide: 'before' | 'after' | null = null;
   #justMovedPageId: string | null = null;
+  #theme: ThemeMode = loadTheme();
 
   constructor() {
     super();
     new SignalWatcher(this);
+    applyTheme(this.#theme);
+  }
+
+  #setTheme(mode: ThemeMode): void {
+    this.#theme = mode;
+    localStorage.setItem(THEME_STORAGE_KEY, mode);
+    applyTheme(mode);
+    this.requestUpdate();
+  }
+
+  #cycleTheme(): void {
+    const next = THEME_CYCLE[(THEME_CYCLE.indexOf(this.#theme) + 1) % THEME_CYCLE.length]!;
+    this.#setTheme(next);
   }
 
   connectedCallback(): void {
@@ -989,6 +1028,14 @@ export class ScreenMarker extends LitElement {
     const page = this.#store.activePage;
 
     return html`
+      <button
+        class="theme-toggle"
+        title=${`Theme: ${THEME_LABEL[this.#theme]} (click to change)`}
+        aria-label="Toggle color theme"
+        @click=${() => this.#cycleTheme()}
+      >
+        ${THEME_ICON[this.#theme]}
+      </button>
       <div
         class="tabs"
         @dragover=${(e: DragEvent) => {
