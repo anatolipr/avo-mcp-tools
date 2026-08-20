@@ -1,4 +1,6 @@
-export type SkillStatus = 'stable' | 'beta' | 'unreviewed';
+// Free-form label, not a closed enum — conventional values are 'stable' | 'beta' | 'unreviewed',
+// but any lowercase-hyphenated string is accepted (see shared/status.ts).
+export type SkillStatus = string;
 
 /**
  * Frontmatter for a skill's SKILL.md, per the agentskills.io open standard:
@@ -45,7 +47,9 @@ export type MemoryDocType =
   | 'discovery'
   | 'session-summary'
   | 'other';
-export type MemoryStatus = 'active' | 'shipped' | 'abandoned';
+// Free-form label, not a closed enum — conventional values are 'active' | 'shipped' | 'abandoned',
+// but any lowercase-hyphenated string is accepted (see shared/status.ts).
+export type MemoryStatus = string;
 
 export interface MemoryFrontmatter {
   id: string;

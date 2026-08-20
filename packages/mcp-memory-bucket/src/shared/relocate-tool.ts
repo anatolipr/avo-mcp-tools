@@ -3,6 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { SkillRepository } from '../skills/repository.js';
 import type { MemoryRepository } from '../memory/repository.js';
 import { relocate, relocateMany } from './relocate.js';
+import { statusSchema } from './status.js';
 
 const AUTHORING_SKILL_HINT =
   "Before your first call in a session, run skill_get(\"memory-bucket-authoring\") to learn the exact frontmatter schema and conventions — don't guess the shape.";
@@ -21,7 +22,7 @@ const overridesSchema = z
     key_type: z.enum(['ticket', 'freeform']).optional().describe('memory target only'),
     doc_type: z.enum(['plan', 'spec', 'sql', 'testing-todo', 'discovery', 'session-summary', 'other']).optional().describe('memory target only'),
     tags: z.array(z.string()).optional(),
-    status: z.enum(['stable', 'beta', 'unreviewed', 'active', 'shipped', 'abandoned']).optional(),
+    status: statusSchema(['stable', 'beta', 'unreviewed', 'active', 'shipped', 'abandoned']).optional(),
     folder: z.string().optional().describe('optional subdirectory under the target root'),
     root: z.string().optional().describe('which configured root to write into; required if multiple roots exist for the target type'),
   })

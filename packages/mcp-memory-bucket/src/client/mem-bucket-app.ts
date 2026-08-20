@@ -807,7 +807,10 @@ export class MemBucketApp extends LitElement {
         <detail-panel
           .selected=${this.#selected.value}
           .facets=${facets}
-          .onChanged=${() => this.#refetch()}
+          .onChanged=${() => {
+            this.#refetch();
+            this.#refetchFacets();
+          }}
           .onTagClick=${(t: string) => this.#addTagFilter(t)}
           .onRootClick=${(r: string) => this.#addRootFilter(r)}
           .onDateClick=${(d: string) => this.#setDateFilter(d)}

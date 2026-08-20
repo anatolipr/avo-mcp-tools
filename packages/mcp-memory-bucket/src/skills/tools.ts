@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { SkillRepository } from './repository.js';
+import { statusSchema } from '../shared/status.js';
 
-const SKILL_STATUS = ['stable', 'beta', 'unreviewed'] as const;
+const SKILL_STATUS_DEFAULTS = ['stable', 'beta', 'unreviewed'] as const;
 const SKILL_NAME_DESCRIPTION =
   'stable id, must be 1-64 chars, lowercase letters/numbers/hyphens only, no leading/trailing/consecutive hyphens — this becomes the skill\'s folder name (agentskills.io spec requirement)';
 const AUTHORING_SKILL_HINT =
@@ -37,7 +38,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     'Full-text search over skill description/body/tags (grep/find-like, ranked by relevance) — unlike skill_list\'s substring metadata filter, this searches the full markdown body. `query` is raw SQLite FTS5 MATCH syntax: bare words, "exact phrases", prefix* wildcards, AND/OR/NOT boolean operators; hyphenated/punctuated terms must be quoted, e.g. "blue-green". Can be combined with status/owner/tag filters. Returns ranked hits with a highlighted snippet, not the full body — call skill_get on a hit\'s name for that. Paused skills are hidden by default — pass include_paused to see them.',
     {
       query: z.string().describe('FTS5 match expression, e.g. `deploy AND rollback` or `"blue green"`'),
-      status: z.enum(SKILL_STATUS).optional(),
+      status: statusSchema(SKILL_STATUS_DEFAULTS).optional(),
       owner: z.string().optional(),
       tag: z.string().optional(),
       limit: z.number().int().positive().max(100).optional(),
@@ -63,7 +64,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       add_tags: z.array(z.string()).optional(),
       remove_tags: z.array(z.string()).optional(),
       owner: z.string().nullable().optional(),
-      status: z.enum(SKILL_STATUS).optional(),
+      status: statusSchema(SKILL_STATUS_DEFAULTS).optional(),
       extends: z.string().nullable().optional(),
       deprecated: z.boolean().optional().describe('marks skills as deprecated (or un-deprecates when false) — independent of status'),
     },
@@ -109,7 +110,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       license: z.string().optional(),
       compatibility: z.string().max(500).optional().describe('only needed if the skill has specific environment requirements'),
       owner: z.string().optional().describe('squad or "company" — stored in frontmatter.metadata, unused for resolution in V0'),
-      status: z.enum(SKILL_STATUS).optional().describe('defaults to "unreviewed"; stored in frontmatter.metadata'),
+      status: statusSchema(SKILL_STATUS_DEFAULTS).optional().describe('defaults to "unreviewed"; stored in frontmatter.metadata'),
       tags: z.array(z.string()).optional(),
       trigger_phrases: z.array(z.string()).optional(),
       extends: z.string().optional().describe('reserved for a future overlay mechanism — stored in frontmatter.metadata'),
@@ -138,7 +139,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     license: z.string().optional(),
     compatibility: z.string().max(500).optional(),
     owner: z.string().optional(),
-    status: z.enum(SKILL_STATUS).optional(),
+    status: statusSchema(SKILL_STATUS_DEFAULTS).optional(),
     tags: z.array(z.string()).optional(),
     trigger_phrases: z.array(z.string()).optional(),
     extends: z.string().optional(),
@@ -183,7 +184,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       license: z.string().optional(),
       compatibility: z.string().max(500).optional(),
       owner: z.string().optional(),
-      status: z.enum(SKILL_STATUS).optional(),
+      status: statusSchema(SKILL_STATUS_DEFAULTS).optional(),
       tags: z.array(z.string()).optional(),
       trigger_phrases: z.array(z.string()).optional(),
       extends: z.string().optional(),

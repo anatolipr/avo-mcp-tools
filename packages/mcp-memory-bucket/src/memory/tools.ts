@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MemoryRepository } from './repository.js';
+import { statusSchema } from '../shared/status.js';
 
 const MEMORY_DOC_TYPES = ['plan', 'spec', 'sql', 'testing-todo', 'discovery', 'session-summary', 'other'] as const;
 const MEMORY_KEY_TYPES = ['ticket', 'freeform'] as const;
-const MEMORY_STATUS = ['active', 'shipped', 'abandoned'] as const;
+const MEMORY_STATUS_DEFAULTS = ['active', 'shipped', 'abandoned'] as const;
 const AUTHORING_SKILL_HINT =
   "Before your first call in a session, run skill_get(\"memory-bucket-authoring\") to learn the exact frontmatter schema and conventions — don't guess the shape.";
 
@@ -53,7 +54,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
     {
       query: z.string().describe('FTS5 match expression, e.g. `migration AND rollback` or `"blue green"`'),
       doc_type: z.enum(MEMORY_DOC_TYPES).optional(),
-      status: z.enum(MEMORY_STATUS).optional(),
+      status: statusSchema(MEMORY_STATUS_DEFAULTS).optional(),
       tag: z.string().optional(),
       ...(multiRoot ? { root: z.string().optional().describe(`filter to one root: ${rootNames}`) } : {}),
       limit: z.number().int().positive().max(100).optional(),
@@ -77,7 +78,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       ids: z.array(z.string()).min(1),
       add_tags: z.array(z.string()).optional(),
       remove_tags: z.array(z.string()).optional(),
-      status: z.enum(MEMORY_STATUS).optional(),
+      status: statusSchema(MEMORY_STATUS_DEFAULTS).optional(),
       related_to: z.string().nullable().optional(),
       deprecated: z.boolean().optional().describe('marks docs as deprecated (or un-deprecates when false) — independent of status'),
     },
@@ -97,13 +98,14 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       description: z.string().describe('distinguishes this doc from others sharing the same key'),
       body: z.string(),
       tags: z.array(z.string()).optional(),
+      status: statusSchema(MEMORY_STATUS_DEFAULTS).optional().describe('defaults to "active"'),
       related_to: z.string().optional().describe('id of a related doc, e.g. a spec linking to its plan'),
       folder: z.string().optional().describe('optional subdirectory under the memory root'),
       ...(multiRoot ? { root: z.string().describe(`which configured memory root to write into: ${rootNames}`) } : {}),
     },
-    async ({ key, key_type, doc_type, description, body, tags, related_to, folder, root }: any) => {
+    async ({ key, key_type, doc_type, description, body, tags, status, related_to, folder, root }: any) => {
       try {
-        const doc = repo.create({ key, key_type, doc_type, description, body, tags, related_to, folder, root });
+        const doc = repo.create({ key, key_type, doc_type, description, body, tags, status, related_to, folder, root });
         return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -118,6 +120,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
     description: z.string().describe('distinguishes this doc from others sharing the same key'),
     body: z.string(),
     tags: z.array(z.string()).optional(),
+    status: statusSchema(MEMORY_STATUS_DEFAULTS).optional().describe('defaults to "active"'),
     related_to: z.string().optional(),
     folder: z.string().optional(),
     ...(multiRoot ? { root: z.string().describe(`which configured memory root to write into: ${rootNames}`) } : {}),
@@ -144,7 +147,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       description: z.string().optional(),
       body: z.string().optional(),
       tags: z.array(z.string()).optional(),
-      status: z.enum(MEMORY_STATUS).optional(),
+      status: statusSchema(MEMORY_STATUS_DEFAULTS).optional(),
       related_to: z.string().optional(),
       deprecated: z.boolean().optional().describe('marks the doc as deprecated (or un-deprecates when false) — independent of status'),
     },

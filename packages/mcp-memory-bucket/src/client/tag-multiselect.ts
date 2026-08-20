@@ -36,7 +36,6 @@ export class TagMultiselect extends LitElement {
     .field {
       display: flex;
       align-items: center;
-      flex-wrap: wrap;
       gap: 4px;
       border: 1px solid var(--border-strong);
       border-radius: 6px;
@@ -44,6 +43,14 @@ export class TagMultiselect extends LitElement {
       padding: 3px 4px 3px 8px;
       min-height: 30px;
       box-sizing: border-box;
+    }
+    .chips-and-input {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px;
+      flex: 1 1 auto;
+      min-width: 0;
     }
     .field:focus-within {
       border-color: var(--accent);
@@ -245,28 +252,30 @@ export class TagMultiselect extends LitElement {
     const highlighted = this.#highlighted.value;
     return html`
       <div class="field" style=${`anchor-name: ${this.#anchorName}`}>
-        ${active.map(
-          (tag) => html`
-            <span class="selected-chip">
-              ${tag}
-              <span class="remove" @click=${() => this.onToggle(tag)}>✕</span>
-            </span>
-          `
-        )}
-        <input
-          class="input"
-          role="combobox"
-          aria-autocomplete="list"
-          aria-expanded=${open}
-          aria-controls=${this.#listboxId}
-          aria-activedescendant=${highlighted >= 0 ? `${this.#listboxId}-opt-${highlighted}` : ''}
-          placeholder=${active.length === 0 ? 'Filter by tag…' : ''}
-          .value=${this.#query.value}
-          @input=${(e: Event) => this.#onInput(e)}
-          @focus=${() => this.#openMenu()}
-          @click=${() => this.#openMenu()}
-          @keydown=${(e: KeyboardEvent) => this.#onKeydown(e)}
-        />
+        <div class="chips-and-input">
+          ${active.map(
+            (tag) => html`
+              <span class="selected-chip">
+                ${tag}
+                <span class="remove" @click=${() => this.onToggle(tag)}>✕</span>
+              </span>
+            `
+          )}
+          <input
+            class="input"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded=${open}
+            aria-controls=${this.#listboxId}
+            aria-activedescendant=${highlighted >= 0 ? `${this.#listboxId}-opt-${highlighted}` : ''}
+            placeholder=${active.length === 0 ? 'Filter by tag…' : ''}
+            .value=${this.#query.value}
+            @input=${(e: Event) => this.#onInput(e)}
+            @focus=${() => this.#openMenu()}
+            @click=${() => this.#openMenu()}
+            @keydown=${(e: KeyboardEvent) => this.#onKeydown(e)}
+          />
+        </div>
         ${active.length > 0
           ? html`<button class="clear-btn" tabindex="-1" @mousedown=${(e: Event) => e.preventDefault()} @click=${(e: Event) => this.#clearAll(e)}>✕</button>`
           : ''}

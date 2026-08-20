@@ -2,6 +2,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { marked } from 'marked';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import './tag-multiselect.js';
+import './status-select.js';
 import type { EntryDetail, Selection, Facets } from './types.js';
 
 const VIEW_MODE_KEY = 'mem-bucket-detail-view-mode';
@@ -19,8 +20,8 @@ function toLocalDate(isoTimestamp: string): string {
   return formatter.format(new Date(isoTimestamp));
 }
 
-const SKILL_STATUSES = ['stable', 'beta', 'unreviewed'];
-const MEMORY_STATUSES = ['active', 'shipped', 'abandoned'];
+const SKILL_STATUS_DEFAULTS = ['stable', 'beta', 'unreviewed'];
+const MEMORY_STATUS_DEFAULTS = ['active', 'shipped', 'abandoned'];
 const MEMORY_DOC_TYPES = ['plan', 'spec', 'sql', 'testing-todo', 'discovery', 'session-summary', 'other'];
 const MEMORY_KEY_TYPES = ['ticket', 'freeform'];
 
@@ -284,6 +285,10 @@ export class DetailPanel extends LitElement {
       background: var(--bg);
       color: inherit;
       font-family: inherit;
+    }
+    .field input[type='text'],
+    .field select {
+      max-width: 320px;
     }
     .field textarea {
       min-height: 60px;
@@ -607,14 +612,11 @@ export class DetailPanel extends LitElement {
         </div>
         <div class="field">
           <label>status</label>
-          <select
+          <status-select
+            .options=${[...new Set([...(isSkill ? SKILL_STATUS_DEFAULTS : MEMORY_STATUS_DEFAULTS), ...(facets?.statuses ?? [])])]}
             .value=${d.status}
-            @change=${(e: Event) => this.#updateDraft({ status: (e.target as HTMLSelectElement).value })}
-          >
-            ${(isSkill ? SKILL_STATUSES : MEMORY_STATUSES).map(
-              (s) => html`<option value=${s} ?selected=${s === d.status}>${s}</option>`
-            )}
-          </select>
+            .onChange=${(status: string) => this.#updateDraft({ status })}
+          ></status-select>
         </div>
         ${isSkill
           ? html`

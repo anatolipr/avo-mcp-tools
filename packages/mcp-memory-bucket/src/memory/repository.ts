@@ -217,6 +217,7 @@ export class MemoryRepository {
     description: string;
     body: string;
     tags?: string[];
+    status?: MemoryStatus;
     related_to?: string | null;
     folder?: string;
     root?: string;
@@ -234,7 +235,7 @@ export class MemoryRepository {
       description: input.description,
       doc_type: input.doc_type,
       tags: input.tags ?? [],
-      status: 'active',
+      status: input.status ?? 'active',
       related_to: input.related_to ?? null,
       deprecated: false,
       created_at: new Date().toISOString(),
@@ -259,6 +260,7 @@ export class MemoryRepository {
       description: string;
       body: string;
       tags?: string[];
+      status?: MemoryStatus;
       related_to?: string | null;
       folder?: string;
       root?: string;
