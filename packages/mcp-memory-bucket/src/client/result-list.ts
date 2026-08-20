@@ -1,11 +1,16 @@
 import { LitElement, html, css } from 'lit';
 import type { Entry } from './types.js';
 
+// Local timezone, not raw UTC — mirrors the server's toLocalDate (src/store/date-extract.ts),
+// which is what actually populates doc_dates and therefore what the date-range filter keys off
+// of. A raw `.toISOString().slice(0, 10)` can show a date one day off from what's filterable.
+const dateFormatter = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' });
+
 function formatAge(createdAt: string | null): string {
   if (!createdAt) return 'unknown age';
   const date = new Date(createdAt);
   if (Number.isNaN(date.getTime())) return 'unknown age';
-  return date.toISOString().slice(0, 10);
+  return dateFormatter.format(date);
 }
 
 export class ResultList extends LitElement {

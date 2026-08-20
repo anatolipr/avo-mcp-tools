@@ -802,3 +802,162 @@ test('searchByDate reflects doc_dates cleanup after deletion', () => {
   db.close();
   fs.rmSync(memDir, { recursive: true, force: true });
 });
+
+test('memory doc with no frontmatter at all falls back to file mtime for created_at', () => {
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const roots = [{ name: 'root', path: memDir }];
+  const spec = memorySyncSpec(roots);
+  const repo = new MemoryRepository(db, roots);
+
+  const filePath = path.join(memDir, 'dropped-in-notes.md');
+  fs.writeFileSync(filePath, 'Just some plain notes, no frontmatter.');
+  initialScan(db, spec);
+
+  const docs = repo.getByKey('DROPPED-IN-NOTES');
+  assert.equal(docs.length, 1);
+  const doc = docs[0]!;
+  assert.ok(doc.created_at && !Number.isNaN(Date.parse(doc.created_at)));
+
+  const expectedDate = toLocalDate(new Date(fs.statSync(filePath).mtimeMs).toISOString());
+  assert.equal(searchByDate(db, expectedDate, expectedDate).length, 1);
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+});
+
+test('memory doc with no frontmatter falls back to mtime, not birthtime (survives a copy that preserves birthtime)', () => {
+  // Regression test: some filesystems/tools (e.g. macOS cp in some cases) preserve a copied
+  // file's birthtime from its source rather than stamping "now" — mtime is always reset by the
+  // write itself, so it's the fallback that actually reflects when this doc came into being.
+  // Simulated here by writing the file, then rewinding its mtime backward via touch/utimes to a
+  // date distinct from its (untouched, "now") birthtime, and confirming the derived created_at
+  // tracks the rewound mtime, not the original birthtime.
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const roots = [{ name: 'root', path: memDir }];
+  const spec = memorySyncSpec(roots);
+  const repo = new MemoryRepository(db, roots);
+
+  const filePath = path.join(memDir, 'copied-notes.md');
+  fs.writeFileSync(filePath, 'Copied content, no frontmatter.');
+  const birthtimeMs = fs.statSync(filePath).birthtimeMs;
+  const rewoundMtime = new Date('2020-03-15T00:00:00.000Z');
+  fs.utimesSync(filePath, rewoundMtime, rewoundMtime);
+  initialScan(db, spec);
+
+  const docs = repo.getByKey('COPIED-NOTES');
+  const doc = docs[0]!;
+  assert.equal(toLocalDate(doc.created_at!), toLocalDate(rewoundMtime.toISOString()));
+  assert.notEqual(toLocalDate(doc.created_at!), toLocalDate(new Date(birthtimeMs).toISOString()));
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+});
+
+test('SKILL.md predating created_at falls back to file mtime instead of null', () => {
+  const skillDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const roots = [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }];
+  const spec = skillSyncSpec(roots);
+  const repo = new SkillRepository(db, roots);
+
+  const legacySkillDir = path.join(skillDir, 'legacy-skill');
+  fs.mkdirSync(legacySkillDir, { recursive: true });
+  const filePath = path.join(legacySkillDir, 'SKILL.md');
+  fs.writeFileSync(
+    filePath,
+    `---\nname: "legacy-skill"\ndescription: "Legacy skill predating created_at."\ntags: []\ntrigger_phrases: []\n---\nLegacy body.\n`
+  );
+  initialScan(db, spec);
+
+  const skill = repo.get('legacy-skill');
+  assert.ok(skill?.created_at && !Number.isNaN(Date.parse(skill.created_at)));
+
+  db.close();
+  fs.rmSync(skillDir, { recursive: true, force: true });
+});
+
+test('skill rename moves the folder and updates the frontmatter name', () => {
+  const skillDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const roots = [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }];
+  const repo = new SkillRepository(db, roots);
+
+  repo.create(
+    { name: 'old-name', description: 'Rename target. Use for testing.', owner: null, status: 'unreviewed', tags: [], trigger_phrases: [] },
+    'Body.'
+  );
+
+  const renamed = repo.rename('old-name', 'new-name');
+  assert.equal(renamed.name, 'new-name');
+  assert.equal(repo.get('old-name'), null);
+  assert.equal(repo.get('new-name')?.description, 'Rename target. Use for testing.');
+  assert.equal(fs.existsSync(path.join(skillDir, 'new-name', 'SKILL.md')), true);
+  assert.equal(fs.existsSync(path.join(skillDir, 'old-name')), false);
+
+  db.close();
+  fs.rmSync(skillDir, { recursive: true, force: true });
+});
+
+test('memory stripFrontmatter leaves a bare file; deriveFrontmatter re-seeds key from the filename', () => {
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const roots = [{ name: 'root', path: memDir }];
+  const repo = new MemoryRepository(db, roots);
+
+  const doc = repo.create({
+    key: 'strip-test',
+    key_type: 'freeform',
+    doc_type: 'other',
+    description: 'To be stripped',
+    body: 'Body content survives stripping.',
+  });
+  assert.equal(repo.getByKey('strip-test').length, 1);
+  assert.equal(doc.key, 'STRIP-TEST');
+
+  repo.stripFrontmatter(doc.id);
+  const raw = fs.readFileSync(doc.source_path, 'utf-8');
+  assert.equal(raw.includes('---'), false);
+  assert.equal(raw.trim(), 'Body content survives stripping.');
+
+  // stripFrontmatter's own upsertFile call re-derives frontmatter from the filename right away
+  // (deriveFrontmatter's fallback) — since the file is still named `<id>.md` (never renamed),
+  // the id round-trips to the same value, but `key`/`doc_type`/`status` are reset to fallback
+  // defaults (the original key/doc_type only existed in the now-deleted frontmatter block).
+  const rows = db.prepare(`SELECT id, key, doc_type FROM memory_docs`).all() as Array<{
+    id: string;
+    key: string;
+    doc_type: string;
+  }>;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.id, doc.id);
+  assert.notEqual(rows[0]!.key, 'STRIP-TEST');
+  assert.equal(rows[0]!.doc_type, 'other');
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+});
+
+test('memory update() can change key in place, normalized', () => {
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const roots = [{ name: 'root', path: memDir }];
+  const repo = new MemoryRepository(db, roots);
+
+  const doc = repo.create({
+    key: 'old-key',
+    key_type: 'freeform',
+    doc_type: 'other',
+    description: 'Key change target',
+    body: 'Body.',
+  });
+
+  const updated = repo.update(doc.id, { key: 'new key' });
+  assert.equal(updated.key, 'NEW-KEY');
+  assert.equal(repo.getByKey('old-key').length, 0);
+  assert.equal(repo.getByKey('new key').length, 1);
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+});

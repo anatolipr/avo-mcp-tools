@@ -80,7 +80,7 @@ function buildMcpServer(): McpServer {
 
 const app = express();
 app.use(express.json());
-app.use(buildWebRouter(db, config, skillRepo, memoryRepo));
+app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec));
 app.use(express.static(path.join(packageRoot, 'dist', 'client')));
 
 app.post('/mcp', async (req, res) => {

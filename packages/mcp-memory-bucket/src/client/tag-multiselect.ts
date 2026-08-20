@@ -8,11 +8,16 @@ export class TagMultiselect extends LitElement {
     tags: { attribute: false },
     active: { attribute: false },
     onToggle: { attribute: false },
+    allowCreate: { attribute: false },
   };
 
   declare tags: string[];
   declare active: string[];
   declare onToggle: (tag: string) => void;
+  /** When true, a query that matches nothing renders a "No match. Create '<query>'" row that
+   * toggles it on via onToggle — same as picking any existing tag. Off by default so the
+   * shared tags-filter usage (a fixed, browsable vocabulary) is unaffected. */
+  declare allowCreate: boolean;
 
   #query = new Signal<string>('');
   #open = new Signal<boolean>(false);
@@ -124,6 +129,7 @@ export class TagMultiselect extends LitElement {
     .option:hover, .option.highlighted { background: var(--hover); }
     .option input { margin: 0; pointer-events: none; }
     .empty { padding: 6px 8px; opacity: 0.6; font-style: italic; font-size: 12px; }
+    .create-option { color: var(--accent); font-style: italic; }
   `;
 
   constructor() {
@@ -132,6 +138,7 @@ export class TagMultiselect extends LitElement {
     this.tags = [];
     this.active = [];
     this.onToggle = () => {};
+    this.allowCreate = false;
     this.#anchorName = `--tag-multiselect-${++_instanceCounter}`;
     this.#listboxId = `tag-multiselect-listbox-${_instanceCounter}`;
   }
@@ -190,6 +197,12 @@ export class TagMultiselect extends LitElement {
     this.#highlighted.set(-1);
   }
 
+  get #canCreate(): boolean {
+    if (!this.allowCreate) return false;
+    const q = this.#query.value.trim();
+    return q.length > 0 && !this.tags.includes(q) && !this.active.includes(q);
+  }
+
   #clearAll(e: Event) {
     e.stopPropagation();
     this.active.forEach((t) => this.onToggle(t));
@@ -208,11 +221,14 @@ export class TagMultiselect extends LitElement {
       e.preventDefault();
       this.#openMenu();
       if (items.length) this.#highlighted.set((this.#highlighted.value - 1 + items.length) % items.length);
-    } else if (e.key === 'Enter') {
+    } else if (e.key === 'Enter' || (this.allowCreate && e.key === ',')) {
       const highlighted = items[this.#highlighted.value];
       if (highlighted !== undefined) {
         e.preventDefault();
         this.#selectOption(highlighted);
+      } else if (this.#canCreate) {
+        e.preventDefault();
+        this.#selectOption(this.#query.value.trim());
       }
     } else if (e.key === 'Backspace' && !this.#query.value && this.active.length > 0) {
       const last = this.active[this.active.length - 1];
@@ -288,7 +304,17 @@ export class TagMultiselect extends LitElement {
                 </li>
               `
             )
-          : html`<li class="empty">No matches</li>`}
+          : this.#canCreate
+            ? html`
+                <li
+                  class="option create-option"
+                  @mousedown=${(e: Event) => e.preventDefault()}
+                  @click=${() => this.#selectOption(this.#query.value.trim())}
+                >
+                  No match. Create '${this.#query.value.trim()}'
+                </li>
+              `
+            : html`<li class="empty">${this.allowCreate ? 'Type to create a tag' : 'No matches'}</li>`}
       </ul>
     `;
   }

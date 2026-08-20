@@ -3,11 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Router, Request, Response } from 'express';
 import express from 'express';
+import matter from 'gray-matter';
 import type Database from 'better-sqlite3';
 import type { BucketConfig } from '../config.js';
 import { saveRoot, removeRoot as removeRootFromConfig, sanitizeRootName } from '../config.js';
 import type { SkillRepository } from '../skills/repository.js';
 import type { MemoryRepository } from '../memory/repository.js';
+import { initialScan, type TableSyncSpec } from '../store/sync.js';
 
 type EntryType = 'skill' | 'memory' | 'all';
 
@@ -378,9 +380,24 @@ export function buildWebRouter(
   db: Database.Database,
   config: BucketConfig,
   skillRepo: SkillRepository,
-  memoryRepo: MemoryRepository
+  memoryRepo: MemoryRepository,
+  skillSpec: TableSyncSpec<any>,
+  memorySpec: TableSyncSpec<any>
 ): Router {
   const router = express.Router();
+
+  router.post('/api/rebuild-cache', (_req: Request, res: Response) => {
+    try {
+      db.exec(`DELETE FROM skills; DELETE FROM memory_docs; DELETE FROM search_index; DELETE FROM doc_dates;`);
+      initialScan(db, skillSpec);
+      initialScan(db, memorySpec);
+      const skillCount = (db.prepare(`SELECT COUNT(*) AS n FROM skills`).get() as { n: number }).n;
+      const memoryCount = (db.prepare(`SELECT COUNT(*) AS n FROM memory_docs`).get() as { n: number }).n;
+      res.json({ skillCount, memoryCount });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 
   router.get('/api/entries', (req: Request, res: Response) => {
     res.json(queryEntries(db, req));
@@ -399,7 +416,25 @@ export function buildWebRouter(
     }
     const tags = JSON.parse(row.tags as string);
     const trigger_phrases = row.trigger_phrases ? JSON.parse(row.trigger_phrases as string) : undefined;
-    res.json({ ...row, tags, trigger_phrases });
+    // A memory doc's cache row always looks fully populated even for a bare file (deriveFrontmatter's
+    // fallback backfills id/key/etc — see sync.ts), so whether it actually has an authored
+    // frontmatter block has to be checked on disk. This drives "Add frontmatter" (memory only —
+    // write real values in for the first time) vs "Edit"/"Delete frontmatter". Skills have no such
+    // fallback, so a skills row reaching this route always has real frontmatter; this stays false
+    // only in the memory_docs case in practice.
+    //
+    // `raw_file` is the true on-disk content (frontmatter block + body) for the Raw view — distinct
+    // from the cache's `body` column, which is always frontmatter-stripped (see readMarkdownFile).
+    let has_frontmatter = true;
+    let raw_file: string | undefined;
+    try {
+      raw_file = fs.readFileSync(row.source_path as string, 'utf-8');
+      has_frontmatter = Object.keys(matter(raw_file).data).length > 0;
+    } catch {
+      // file unreadable/missing — treat as having frontmatter so the UI doesn't offer to "add"
+      // one for a doc it can't actually reach; the existing edit/delete-doc paths will 404 instead.
+    }
+    res.json({ ...row, tags, trigger_phrases, has_frontmatter, raw_file });
   });
 
   router.patch('/api/entries/:table/:id/deprecated', (req: Request, res: Response) => {
@@ -439,6 +474,73 @@ export function buildWebRouter(
     }
     const results = table === 'skills' ? skillRepo.bulkUpdate(ids, { deprecated }) : memoryRepo.bulkUpdate(ids, { deprecated });
     res.json({ results });
+  });
+
+  // General frontmatter edit — covers both "edit an existing doc's fields" and "add frontmatter
+  // to a bare file" (a bare memory doc already has a derived id/key from deriveFrontmatter, so
+  // "add" is just this same call supplying real values). Memory `key` is editable here (update()
+  // normalizes it). Skill `name` is not — SkillRepository.update() rejects it outright since
+  // renaming requires a real folder move (see the rename route below).
+  router.patch('/api/entries/:table/:id', (req: Request, res: Response) => {
+    const { table, id } = req.params;
+    const { frontmatter } = req.body as { frontmatter?: Record<string, unknown> };
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    if (!frontmatter || typeof frontmatter !== 'object') {
+      res.status(400).json({ error: 'body must be { frontmatter: object }' });
+      return;
+    }
+    if (table === 'skills' && 'name' in frontmatter) {
+      res.status(400).json({ error: 'name cannot be changed via this route — use rename' });
+      return;
+    }
+    try {
+      const updated = table === 'skills' ? skillRepo.update(id, frontmatter) : memoryRepo.update(id, frontmatter);
+      res.json(updated);
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  router.post('/api/entries/skills/:name/rename', (req: Request, res: Response) => {
+    const { name } = req.params;
+    const { new_name } = req.body as { new_name?: string };
+    if (!name) {
+      res.status(400).json({ error: 'name is required' });
+      return;
+    }
+    if (!new_name) {
+      res.status(400).json({ error: 'body must be { new_name: string }' });
+      return;
+    }
+    try {
+      const renamed = skillRepo.rename(name, new_name);
+      res.json(renamed);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Memory docs only — skill frontmatter (name/description) is required by the agentskills.io
+  // spec, so stripping it would produce a non-conformant SKILL.md no compliant agent can load.
+  router.delete('/api/entries/memory_docs/:id/frontmatter', (req: Request, res: Response) => {
+    const { id } = req.params;
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    try {
+      memoryRepo.stripFrontmatter(id);
+      res.json({ id, frontmatterRemoved: true });
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
   });
 
   // `paused` is a local-only cache toggle (see SkillRepository/MemoryRepository#setPaused) — it

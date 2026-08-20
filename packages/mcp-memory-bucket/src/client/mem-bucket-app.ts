@@ -112,6 +112,29 @@ export class MemBucketApp extends LitElement {
       opacity: 0.75;
     }
     .theme-toggle:hover { opacity: 1; background: var(--hover); }
+    .reindex-toggle {
+      position: fixed;
+      top: 10px;
+      right: 46px;
+      z-index: 10;
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--border-strong);
+      border-radius: 50%;
+      background: var(--bg);
+      color: inherit;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.75;
+    }
+    .reindex-toggle:hover { opacity: 1; background: var(--hover); }
+    .reindex-toggle:disabled { cursor: default; opacity: 0.4; }
+    .reindex-toggle.spinning { animation: reindex-spin 0.8s linear infinite; }
+    @keyframes reindex-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
     .filters {
       padding: 12px 16px;
       border-bottom: 1px solid var(--border);
@@ -295,6 +318,7 @@ export class MemBucketApp extends LitElement {
   #dateTo = new Signal<string>(this.#initialFilters.dateTo ?? '');
   #selectedIds = new Signal<Set<string>>(new Set());
   #theme = new Signal<ThemeMode>(loadTheme());
+  #reindexing = new Signal<boolean>(false);
 
   #boundOnDragMove = (e: PointerEvent) => this.#onDragMove(e);
   #boundOnDragEnd = () => this.#onDragEnd();
@@ -314,6 +338,17 @@ export class MemBucketApp extends LitElement {
   #cycleTheme() {
     const next = THEME_CYCLE[(THEME_CYCLE.indexOf(this.#theme.value) + 1) % THEME_CYCLE.length]!;
     this.#setTheme(next);
+  }
+
+  async #reindex() {
+    if (this.#reindexing.value) return;
+    this.#reindexing.set(true);
+    try {
+      await fetch('/api/rebuild-cache', { method: 'POST' });
+      await Promise.all([this.#refetchRoots(), this.#refetchFacets(), this.#refetch()]);
+    } finally {
+      this.#reindexing.set(false);
+    }
   }
 
   #onDragStart(e: PointerEvent) {
@@ -439,6 +474,24 @@ export class MemBucketApp extends LitElement {
   #toggleTag(tag: string) {
     const current = this.#activeTags.value;
     this.#activeTags.set(current.includes(tag) ? current.filter((t) => t !== tag) : [...current, tag]);
+    this.#refetch();
+  }
+
+  // Adds-only (never toggles off) — used when a tag/root pill in the detail panel is clicked as a
+  // shortcut to filter by it, which reads as "show me more like this," not an on/off control.
+  #addTagFilter(tag: string) {
+    if (!this.#activeTags.value.includes(tag)) this.#activeTags.set([...this.#activeTags.value, tag]);
+    this.#refetch();
+  }
+
+  #addRootFilter(name: string) {
+    if (!this.#activeRoots.value.includes(name)) this.#activeRoots.set([...this.#activeRoots.value, name]);
+    this.#refetch();
+  }
+
+  #setDateFilter(date: string) {
+    this.#dateFrom.set(date);
+    this.#dateTo.set(date);
     this.#refetch();
   }
 
@@ -572,6 +625,21 @@ export class MemBucketApp extends LitElement {
     `;
   }
 
+  #renderReindexToggle() {
+    const reindexing = this.#reindexing.value;
+    return html`
+      <button
+        class=${`reindex-toggle${reindexing ? ' spinning' : ''}`}
+        title=${reindexing ? 'Reindexing…' : 'Rebuild cache from disk'}
+        aria-label="Rebuild cache from disk"
+        ?disabled=${reindexing}
+        @click=${() => this.#reindex()}
+      >
+        ♻
+      </button>
+    `;
+  }
+
   render() {
     const facets = this.#facets.value;
     const allRoots = this.#allRoots();
@@ -599,6 +667,7 @@ export class MemBucketApp extends LitElement {
     }
 
     return html`
+      ${this.#renderReindexToggle()}
       ${this.#renderThemeToggle()}
       <div class="roots-bar">
         <span class="filter-label">Roots:</span>
@@ -735,7 +804,14 @@ export class MemBucketApp extends LitElement {
           class="splitter ${this.#dragging.value ? 'dragging' : ''}"
           @pointerdown=${(e: PointerEvent) => this.#onDragStart(e)}
         ></div>
-        <detail-panel .selected=${this.#selected.value} .onChanged=${() => this.#refetch()}></detail-panel>
+        <detail-panel
+          .selected=${this.#selected.value}
+          .facets=${facets}
+          .onChanged=${() => this.#refetch()}
+          .onTagClick=${(t: string) => this.#addTagFilter(t)}
+          .onRootClick=${(r: string) => this.#addRootFilter(r)}
+          .onDateClick=${(d: string) => this.#setDateFilter(d)}
+        ></detail-panel>
       </div>
       ${this.#showAddRoot.value
         ? html`<add-root-modal

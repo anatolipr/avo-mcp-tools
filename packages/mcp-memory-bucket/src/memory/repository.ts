@@ -360,6 +360,21 @@ export class MemoryRepository {
   }
 
   /**
+   * Strips the doc's frontmatter entirely, leaving a bare markdown file with just the body — the
+   * inverse of memory_create, for turning a managed memory doc back into a plain dropped-in file.
+   * The file stays at the same path, but loses its `key` (so it drops out of key-based lookup) and
+   * its `id` — the upsertFile call below immediately re-derives a fresh one from the filename via
+   * deriveFrontmatter's fallback, so the caller should treat this doc as gone under its old id
+   * once this returns (look it up by the new filename-derived id/key instead).
+   */
+  stripFrontmatter(id: string): void {
+    const existing = this.get(id);
+    if (!existing) throw new Error(`memory doc with id "${id}" not found`);
+    writeMarkdownFile(existing.source_path, {}, existing.body);
+    upsertFile(this.db, this.syncSpec, existing.source_path);
+  }
+
+  /**
    * Deletes many memory docs by id in one call — e.g. cleaning up a batch of
    * abandoned docs found via search(). Returns per-id results so one bad id
    * doesn't abort the rest of the batch.

@@ -17,14 +17,19 @@ export interface TableSyncSpec<TFrontmatter> {
   matchesFile: (filePath: string) => boolean;
   columns: string[]; // column names in insert order, excluding body/mtime_ms/source_path/root
   getId: (fm: TFrontmatter) => string | undefined;
-  toRow: (fm: TFrontmatter, sourcePath: string) => Record<string, unknown>;
+  // `mtimeMs` (last-modified time, see readMarkdownFile) is used as a created_at fallback for
+  // docs/skills that predate that frontmatter field. Deliberately mtime, not birthtime: birthtime
+  // can be preserved across `cp`/duplicate operations (some tools/filesystems copy it from the
+  // source file), which would make a freshly-copied doc report a stale "created" date. mtime is
+  // reliably reset to "now" by any write, so it's the more trustworthy fallback in practice.
+  toRow: (fm: TFrontmatter, sourcePath: string, mtimeMs: number) => Record<string, unknown>;
   /**
    * Optional fallback for files with no (or incomplete) frontmatter — fills in defaults derived
    * from the file itself so a plain dropped-in .md still gets indexed rather than skipped. Runs
    * before getId/toRow. Skills omit this: SKILL.md's `name`/`description` are spec-required and
    * meaningful, so a skill missing them is a real authoring error, not a file to paper over.
    */
-  deriveFrontmatter?: (fm: TFrontmatter, filePath: string) => TFrontmatter;
+  deriveFrontmatter?: (fm: TFrontmatter, filePath: string, mtimeMs: number) => TFrontmatter;
 }
 
 // `paused` is deliberately absent from both lists: it's a local-only cache column (see
@@ -40,7 +45,7 @@ export function skillSyncSpec(sources: NamedRoot[]): TableSyncSpec<SkillFrontmat
     matchesFile: (filePath) => path.basename(filePath) === 'SKILL.md',
     columns: skillColumns,
     getId: (fm) => fm.name,
-    toRow: (fm) => ({
+    toRow: (fm, _sourcePath, mtimeMs) => ({
       id: fm.name,
       description: fm.description,
       owner: fm.metadata?.owner ?? null,
@@ -49,7 +54,7 @@ export function skillSyncSpec(sources: NamedRoot[]): TableSyncSpec<SkillFrontmat
       trigger_phrases: JSON.stringify(fm.trigger_phrases ?? []),
       extends: fm.metadata?.extends ?? null,
       deprecated: fm.deprecated ? 1 : 0,
-      created_at: fm.created_at ?? null,
+      created_at: fm.created_at ?? new Date(mtimeMs).toISOString(),
     }),
   };
 }
@@ -61,7 +66,7 @@ export function memorySyncSpec(sources: NamedRoot[]): TableSyncSpec<MemoryFrontm
     matchesFile: (filePath) => filePath.endsWith('.md'),
     columns: memoryColumns,
     getId: (fm) => fm.id,
-    deriveFrontmatter: (fm, filePath) => {
+    deriveFrontmatter: (fm, filePath, mtimeMs) => {
       const basename = path.basename(filePath, '.md');
       const fallbackId = slugify(basename) || 'untitled';
       return {
@@ -74,6 +79,7 @@ export function memorySyncSpec(sources: NamedRoot[]): TableSyncSpec<MemoryFrontm
         status: fm.status ?? 'active',
         tags: fm.tags ?? [],
         related_to: fm.related_to ?? null,
+        created_at: fm.created_at ?? new Date(mtimeMs).toISOString(),
       };
     },
     toRow: (fm) => ({
@@ -123,7 +129,7 @@ export function upsertFile<TFrontmatter>(
   if (existing && existing.mtime_ms === parsed.mtimeMs) return; // unchanged, skip reprocessing
 
   const frontmatter = spec.deriveFrontmatter
-    ? spec.deriveFrontmatter(parsed.frontmatter, filePath)
+    ? spec.deriveFrontmatter(parsed.frontmatter, filePath, parsed.mtimeMs)
     : parsed.frontmatter;
 
   const id = spec.getId(frontmatter);
@@ -132,7 +138,7 @@ export function upsertFile<TFrontmatter>(
     return;
   }
 
-  const row = spec.toRow(frontmatter, filePath);
+  const row = spec.toRow(frontmatter, filePath, parsed.mtimeMs);
   const root = rootForFile(spec.sources, filePath);
   const cols = [...spec.columns, 'source_path', 'root', 'body', 'mtime_ms'];
   const values = [...spec.columns.map((c) => row[c]), filePath, root, parsed.body, parsed.mtimeMs];

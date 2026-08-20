@@ -1,28 +1,168 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { marked } from 'marked';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
-import type { EntryDetail, Selection } from './types.js';
+import './tag-multiselect.js';
+import type { EntryDetail, Selection, Facets } from './types.js';
 
 const VIEW_MODE_KEY = 'mem-bucket-detail-view-mode';
+
+/**
+ * Converts a UTC ISO timestamp to the calendar date it falls on in the browser's local timezone
+ * — mirrors the server's toLocalDate (src/store/date-extract.ts), which is what actually populates
+ * doc_dates (and therefore what the date-range filter and the "click date to filter" shortcut key
+ * off of). A naive `.slice(0, 10)` on the raw UTC string can show a different date than what's
+ * actually filterable — e.g. a doc created at 2026-08-20T04:10:00Z is still 2026-08-19 evening in
+ * US Pacific time, so filtering by "08/20" would find nothing despite the UI showing "2026-08-20".
+ */
+function toLocalDate(isoTimestamp: string): string {
+  const formatter = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit' });
+  return formatter.format(new Date(isoTimestamp));
+}
+
+const SKILL_STATUSES = ['stable', 'beta', 'unreviewed'];
+const MEMORY_STATUSES = ['active', 'shipped', 'abandoned'];
+const MEMORY_DOC_TYPES = ['plan', 'spec', 'sql', 'testing-todo', 'discovery', 'session-summary', 'other'];
+const MEMORY_KEY_TYPES = ['ticket', 'freeform'];
+
+interface Draft {
+  description: string;
+  tags: string[];
+  status: string;
+  // skills
+  name: string;
+  owner: string;
+  extends: string;
+  trigger_phrases: string[];
+  // memory
+  key: string;
+  key_type: string;
+  doc_type: string;
+  related_to: string;
+}
+
+function draftFrom(d: EntryDetail): Draft {
+  return {
+    description: d.description ?? '',
+    tags: d.tags ?? [],
+    status: d.status ?? '',
+    name: d.name ?? '',
+    owner: d.owner ?? '',
+    extends: d.extends ?? '',
+    trigger_phrases: d.trigger_phrases ?? [],
+    key: d.key ?? '',
+    key_type: d.key_type ?? '',
+    doc_type: d.doc_type ?? '',
+    related_to: d.related_to ?? '',
+  };
+}
 
 export class DetailPanel extends LitElement {
   static properties = {
     selected: { attribute: false },
     onChanged: { attribute: false },
+    facets: { attribute: false },
+    onTagClick: { attribute: false },
+    onRootClick: { attribute: false },
+    onDateClick: { attribute: false },
     _doc: { state: true },
     _viewMode: { state: true },
+    _editing: { state: true },
+    _draft: { state: true },
+    _addingFrontmatter: { state: true },
+    _renaming: { state: true },
+    _renameValue: { state: true },
   };
 
   declare selected: Selection | null;
   declare onChanged: (() => void) | undefined;
+  declare facets: Facets | undefined;
+  declare onTagClick: ((tag: string) => void) | undefined;
+  declare onRootClick: ((root: string) => void) | undefined;
+  declare onDateClick: ((date: string) => void) | undefined;
   private _doc?: EntryDetail | null;
   private _viewMode: 'markdown' | 'raw' =
     (localStorage.getItem(VIEW_MODE_KEY) as 'markdown' | 'raw' | null) ?? 'markdown';
+  private _editing = false;
+  private _draft: Draft | null = null;
+  private _addingFrontmatter = false;
+  private _renaming = false;
+  private _renameValue = '';
 
   static styles = css`
     :host { display: block; padding: 16px; }
     h2 { margin: 0 0 4px; font-size: 16px; }
-    .meta { font-size: 12px; opacity: 0.7; margin-bottom: 12px; }
+    .title-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .title-row h2 { margin: 0; }
+    .pill {
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 2px 9px;
+      font-size: 11px;
+      display: inline-flex;
+      align-items: center;
+      background: none;
+      color: inherit;
+      font-family: inherit;
+    }
+    .pill.root-pill {
+      cursor: pointer;
+      color: var(--purple-fg);
+      border-color: var(--purple);
+      background: var(--purple-tint);
+    }
+    .pill.root-pill:hover { background: var(--hover-strong); }
+    .pill.tag-pill {
+      cursor: pointer;
+      background: var(--bg-subtle);
+    }
+    .pill.tag-pill:hover { background: var(--hover); border-color: var(--border-strong); }
+    .pill.warn-pill {
+      border-color: var(--danger);
+      color: var(--danger);
+      background: none;
+    }
+    .pill.muted-pill {
+      opacity: 0.65;
+    }
+    .info-grid {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      column-gap: 10px;
+      row-gap: 7px;
+      font-size: 12px;
+      margin-bottom: 12px;
+      align-items: start;
+    }
+    .info-grid dt {
+      opacity: 0.55;
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding-top: 2px;
+      white-space: nowrap;
+    }
+    .info-grid dd {
+      margin: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      align-items: center;
+    }
+    .info-grid dd.description { opacity: 0.85; }
+    .info-grid .date-value {
+      cursor: pointer;
+      text-decoration: underline dotted;
+      text-underline-offset: 2px;
+    }
+    .info-grid .date-value:hover { opacity: 0.75; }
+    .info-grid .hint { opacity: 0.5; font-style: italic; }
+    .bare-notice { font-size: 12px; opacity: 0.6; font-style: italic; margin-bottom: 12px; }
     .source-path {
       font-family: monospace;
       font-size: 11px;
@@ -38,6 +178,19 @@ export class DetailPanel extends LitElement {
       border-radius: 6px;
       max-height: 60vh;
       overflow-y: auto;
+    }
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      font-family: monospace;
+      font-size: 12px;
+      background: var(--bg-subtle);
+      color: inherit;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      min-height: 30vh;
+      resize: vertical;
     }
     .empty { opacity: 0.5; font-size: 13px; }
     .view-toggle {
@@ -80,6 +233,7 @@ export class DetailPanel extends LitElement {
     }
     .actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       margin-bottom: 12px;
     }
@@ -96,10 +250,93 @@ export class DetailPanel extends LitElement {
       border-color: var(--danger);
       color: var(--danger);
     }
+    .actions button.primary {
+      border-color: var(--accent);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .edit-form {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 12px;
+      padding: 12px;
+      background: var(--bg-subtle);
+      border-radius: 6px;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .field label {
+      font-size: 11px;
+      font-weight: 600;
+      opacity: 0.7;
+    }
+    .field input[type='text'],
+    .field select,
+    .field textarea {
+      font-size: 13px;
+      padding: 6px 8px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      background: var(--bg);
+      color: inherit;
+      font-family: inherit;
+    }
+    .field textarea {
+      min-height: 60px;
+      resize: vertical;
+    }
+    .field-row {
+      display: flex;
+      gap: 10px;
+    }
+    .field-row .field { flex: 1; }
+    .form-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .form-actions button {
+      font-size: 12px;
+      padding: 5px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .form-actions button.save {
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: var(--accent-fg);
+    }
+    .form-actions button.cancel {
+      border: 1px solid var(--border);
+      background: transparent;
+      color: inherit;
+    }
+    .rename-row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .rename-row input {
+      flex: 1;
+      font-size: 12px;
+      padding: 4px 6px;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      background: var(--bg);
+      color: inherit;
+    }
+    .hint { font-size: 11px; opacity: 0.6; }
   `;
 
   updated(changed: Map<string, unknown>) {
     if (changed.has('selected') && this.selected) {
+      this._editing = false;
+      this._addingFrontmatter = false;
+      this._renaming = false;
       this.#load();
       this.scrollTop = 0;
     }
@@ -155,27 +392,402 @@ export class DetailPanel extends LitElement {
     this.onChanged?.();
   }
 
+  #startEdit() {
+    if (!this._doc) return;
+    this._draft = draftFrom(this._doc);
+    this._editing = true;
+    this._addingFrontmatter = false;
+  }
+
+  #startAddFrontmatter() {
+    if (!this._doc) return;
+    // Bare memory doc: deriveFrontmatter already seeded a usable id/key from the filename, but
+    // doc_type/description/key are just filename-derived guesses — ask doc_type first since it
+    // shapes which fields matter, then land in the same form startEdit() uses.
+    this._draft = draftFrom(this._doc);
+    this._addingFrontmatter = true;
+    this._editing = false;
+  }
+
+  #confirmDocType(docType: string) {
+    if (!this._draft) return;
+    this._draft = { ...this._draft, doc_type: docType };
+    this._addingFrontmatter = false;
+    this._editing = true;
+  }
+
+  #cancelEdit() {
+    this._editing = false;
+    this._addingFrontmatter = false;
+    this._draft = null;
+  }
+
+  #updateDraft(patch: Partial<Draft>) {
+    if (!this._draft) return;
+    this._draft = { ...this._draft, ...patch };
+  }
+
+  #toggleDraftTag(tag: string) {
+    if (!this._draft) return;
+    const tags = this._draft.tags.includes(tag)
+      ? this._draft.tags.filter((t) => t !== tag)
+      : [...this._draft.tags, tag];
+    this.#updateDraft({ tags });
+  }
+
+  #toggleDraftTriggerPhrase(phrase: string) {
+    if (!this._draft) return;
+    const trigger_phrases = this._draft.trigger_phrases.includes(phrase)
+      ? this._draft.trigger_phrases.filter((p) => p !== phrase)
+      : [...this._draft.trigger_phrases, phrase];
+    this.#updateDraft({ trigger_phrases });
+  }
+
+  async #saveEdit() {
+    if (!this._draft || !this.selected) return;
+    const { table, id } = this.selected;
+    const isSkill = table === 'skills';
+    const frontmatter: Record<string, unknown> = {
+      description: this._draft.description,
+      tags: this._draft.tags,
+      status: this._draft.status,
+    };
+    if (isSkill) {
+      frontmatter.owner = this._draft.owner || null;
+      frontmatter.extends = this._draft.extends || null;
+      frontmatter.trigger_phrases = this._draft.trigger_phrases;
+    } else {
+      frontmatter.key = this._draft.key;
+      frontmatter.key_type = this._draft.key_type;
+      frontmatter.doc_type = this._draft.doc_type;
+      frontmatter.related_to = this._draft.related_to || null;
+    }
+    const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ frontmatter }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      window.alert(`Save failed: ${body.error ?? res.statusText}`);
+      return;
+    }
+    this._editing = false;
+    this._draft = null;
+    await this.#load();
+    this.onChanged?.();
+  }
+
+  // Memory docs only — skill frontmatter is required by the agentskills.io spec (name/description
+  // are both mandatory), so a "delete frontmatter" action there would produce a non-conformant
+  // SKILL.md no compliant agent (Claude Code included) can discover or load. Not offered in the UI.
+  async #deleteFrontmatter() {
+    if (!this.selected || !this._doc || this.selected.table !== 'memory_docs') return;
+    const { table, id } = this.selected;
+    const consequence =
+      "This removes the doc's key, tags, and status — it drops out of key-based lookup and full-text search, and becomes a plain unmanaged file, until frontmatter is added again.";
+    if (!window.confirm(`Delete frontmatter for "${this._doc.key}"?\n\n${consequence}`)) return;
+    const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/frontmatter`, { method: 'DELETE' });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      window.alert(`Delete failed: ${body.error ?? res.statusText}`);
+      return;
+    }
+    this._doc = null;
+    this.selected = null;
+    this.onChanged?.();
+  }
+
+  #startRename() {
+    if (!this._doc) return;
+    this._renameValue = this._doc.name ?? '';
+    this._renaming = true;
+  }
+
+  async #confirmRename() {
+    if (!this._doc || !this._renameValue.trim()) return;
+    const newName = this._renameValue.trim();
+    if (newName === this._doc.name) {
+      this._renaming = false;
+      return;
+    }
+    const res = await fetch(`/api/entries/skills/${encodeURIComponent(this._doc.name!)}/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_name: newName }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      window.alert(`Rename failed: ${body.error ?? res.statusText}`);
+      return;
+    }
+    this._renaming = false;
+    this.selected = { table: 'skills', id: newName };
+    await this.#load();
+    this.onChanged?.();
+  }
+
+  #renderDocTypePrompt() {
+    return html`
+      <div class="edit-form">
+        <div class="hint">What kind of doc is this? This shapes which fields apply next.</div>
+        <div class="field">
+          <label>doc_type</label>
+          <select
+            @change=${(e: Event) => this.#confirmDocType((e.target as HTMLSelectElement).value)}
+          >
+            <option value="" selected disabled>Choose…</option>
+            ${MEMORY_DOC_TYPES.map((t) => html`<option value=${t}>${t}</option>`)}
+          </select>
+        </div>
+        <div class="form-actions">
+          <button class="cancel" @click=${() => this.#cancelEdit()}>Cancel</button>
+        </div>
+      </div>
+    `;
+  }
+
+  #renderEditForm(isSkill: boolean) {
+    const d = this._draft!;
+    const facets = this.facets;
+    return html`
+      <div class="edit-form">
+        ${isSkill
+          ? html`
+              <div class="field">
+                <label>name</label>
+                <div class="hint">Renaming moves the skill's folder on disk — kept as a separate action.</div>
+              </div>
+            `
+          : html`
+              <div class="field-row">
+                <div class="field">
+                  <label>key</label>
+                  <input
+                    type="text"
+                    .value=${d.key}
+                    @input=${(e: Event) => this.#updateDraft({ key: (e.target as HTMLInputElement).value })}
+                  />
+                </div>
+                <div class="field">
+                  <label>key_type</label>
+                  <select
+                    .value=${d.key_type}
+                    @change=${(e: Event) => this.#updateDraft({ key_type: (e.target as HTMLSelectElement).value })}
+                  >
+                    ${MEMORY_KEY_TYPES.map((t) => html`<option value=${t} ?selected=${t === d.key_type}>${t}</option>`)}
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label>doc_type</label>
+                <select
+                  .value=${d.doc_type}
+                  @change=${(e: Event) => this.#updateDraft({ doc_type: (e.target as HTMLSelectElement).value })}
+                >
+                  ${MEMORY_DOC_TYPES.map((t) => html`<option value=${t} ?selected=${t === d.doc_type}>${t}</option>`)}
+                </select>
+              </div>
+            `}
+        <div class="field">
+          <label>description</label>
+          <textarea
+            .value=${d.description}
+            @input=${(e: Event) => this.#updateDraft({ description: (e.target as HTMLTextAreaElement).value })}
+          ></textarea>
+        </div>
+        <div class="field">
+          <label>tags</label>
+          <tag-multiselect
+            .tags=${facets?.tags ?? []}
+            .active=${d.tags}
+            .allowCreate=${true}
+            .onToggle=${(t: string) => this.#toggleDraftTag(t)}
+          ></tag-multiselect>
+        </div>
+        <div class="field">
+          <label>status</label>
+          <select
+            .value=${d.status}
+            @change=${(e: Event) => this.#updateDraft({ status: (e.target as HTMLSelectElement).value })}
+          >
+            ${(isSkill ? SKILL_STATUSES : MEMORY_STATUSES).map(
+              (s) => html`<option value=${s} ?selected=${s === d.status}>${s}</option>`
+            )}
+          </select>
+        </div>
+        ${isSkill
+          ? html`
+              <div class="field-row">
+                <div class="field">
+                  <label>owner</label>
+                  <input
+                    type="text"
+                    .value=${d.owner}
+                    @input=${(e: Event) => this.#updateDraft({ owner: (e.target as HTMLInputElement).value })}
+                  />
+                </div>
+                <div class="field">
+                  <label>extends</label>
+                  <input
+                    type="text"
+                    .value=${d.extends}
+                    @input=${(e: Event) => this.#updateDraft({ extends: (e.target as HTMLInputElement).value })}
+                  />
+                </div>
+              </div>
+              <div class="field">
+                <label>trigger_phrases</label>
+                <tag-multiselect
+                  .tags=${[]}
+                  .active=${d.trigger_phrases}
+                  .allowCreate=${true}
+                  .onToggle=${(p: string) => this.#toggleDraftTriggerPhrase(p)}
+                ></tag-multiselect>
+              </div>
+            `
+          : html`
+              <div class="field">
+                <label>related_to</label>
+                <input
+                  type="text"
+                  .value=${d.related_to}
+                  @input=${(e: Event) => this.#updateDraft({ related_to: (e.target as HTMLInputElement).value })}
+                />
+              </div>
+            `}
+        <div class="form-actions">
+          <button class="save" @click=${() => this.#saveEdit()}>Save</button>
+          <button class="cancel" @click=${() => this.#cancelEdit()}>Cancel</button>
+        </div>
+      </div>
+    `;
+  }
+
+  #renderTitleRow(d: EntryDetail) {
+    return html`
+      <div class="title-row">
+        <h2>${d.name ?? d.key ?? d.id}</h2>
+        <button class="pill root-pill" title="Filter by root '${d.root}'" @click=${() => this.onRootClick?.(d.root)}>
+          ${d.root}
+        </button>
+      </div>
+    `;
+  }
+
+  #renderInfoGrid(d: EntryDetail, isSkill: boolean) {
+    const dateStr = d.created_at ? toLocalDate(d.created_at) : null;
+    return html`
+      <dl class="info-grid">
+        <dt>Description</dt>
+        <dd class="description">${d.description || '—'}</dd>
+
+        <dt>Tags</dt>
+        <dd>
+          ${d.tags?.length
+            ? d.tags.map(
+                (t) => html`<button class="pill tag-pill" @click=${() => this.onTagClick?.(t)}>${t}</button>`
+              )
+            : html`<span class="hint">no tags</span>`}
+        </dd>
+
+        <dt>Status</dt>
+        <dd>${d.status}</dd>
+
+        ${d.deprecated || d.paused
+          ? html`
+              <dt>Flags</dt>
+              <dd>
+                ${d.deprecated ? html`<span class="pill warn-pill">deprecated</span>` : nothing}
+                ${d.paused ? html`<span class="pill muted-pill">paused</span>` : nothing}
+              </dd>
+            `
+          : nothing}
+
+        ${isSkill
+          ? html`
+              ${d.owner
+                ? html`<dt>Owner</dt>
+                    <dd>${d.owner}</dd>`
+                : nothing}
+              ${d.extends
+                ? html`<dt>Extends</dt>
+                    <dd>${d.extends}</dd>`
+                : nothing}
+            `
+          : html`
+              <dt>Key</dt>
+              <dd>${d.key}</dd>
+
+              <dt>Key type</dt>
+              <dd>${d.key_type}</dd>
+
+              <dt>Doc type</dt>
+              <dd>${d.doc_type}</dd>
+
+              ${d.related_to
+                ? html`<dt>Related to</dt>
+                    <dd>${d.related_to}</dd>`
+                : nothing}
+            `}
+
+        <dt>Created</dt>
+        <dd>
+          ${dateStr
+            ? html`<span class="date-value" title="Filter to this day" @click=${() => this.onDateClick?.(dateStr)}
+                >${dateStr}</span
+              >`
+            : html`<span class="hint">unknown</span>`}
+        </dd>
+      </dl>
+    `;
+  }
+
   render() {
     if (!this.selected) return html`<div class="empty">Select an entry to view its details.</div>`;
     if (!this._doc) return nothing;
     const d = this._doc;
-    const isBuiltin = this.selected.table === 'skills' && d.root === 'builtin';
+    const isSkill = this.selected.table === 'skills';
+    const isBuiltin = isSkill && d.root === 'builtin';
+    const bare = !isSkill && d.has_frontmatter === false;
+
+    if (this._addingFrontmatter) return html`${this.#renderTitleRow(d)}${this.#renderDocTypePrompt()}`;
+    if (this._editing && this._draft) return html`${this.#renderTitleRow(d)}${this.#renderEditForm(isSkill)}`;
+
     return html`
-      <h2>${d.name ?? d.key ?? d.id}</h2>
-      <div class="meta">
-        ${d.tags?.join(', ') || 'no tags'} · ${d.status}${d.owner ? ` · owner: ${d.owner}` : ''}
-        ${d.deprecated ? ' · deprecated' : ''}${d.paused ? ' · paused' : ''} · created
-        ${d.created_at ? d.created_at.slice(0, 10) : 'unknown'}
-      </div>
-      <div class="meta">${d.description}</div>
+      ${this.#renderTitleRow(d)}
+      ${bare ? html`<div class="bare-notice">No frontmatter — this is a plain, unmanaged file.</div>` : this.#renderInfoGrid(d, isSkill)}
       ${isBuiltin
         ? nothing
         : html`
             <div class="actions">
-              <button @click=${() => this.#toggleDeprecated()}>${d.deprecated ? 'Un-deprecate' : 'Mark deprecated'}</button>
-              <button @click=${() => this.#togglePaused()}>${d.paused ? 'Resume' : 'Pause'}</button>
+              ${bare
+                ? html`<button class="primary" @click=${() => this.#startAddFrontmatter()}>Add frontmatter</button>`
+                : html`
+                    <button @click=${() => this.#startEdit()}>Edit</button>
+                    ${isSkill ? html`<button @click=${() => this.#startRename()}>Rename</button>` : nothing}
+                    <button @click=${() => this.#toggleDeprecated()}>${d.deprecated ? 'Un-deprecate' : 'Mark deprecated'}</button>
+                    <button @click=${() => this.#togglePaused()}>${d.paused ? 'Resume' : 'Pause'}</button>
+                    ${isSkill
+                      ? nothing
+                      : html`<button class="danger" @click=${() => this.#deleteFrontmatter()}>Delete frontmatter</button>`}
+                  `}
               <button class="danger" @click=${() => this.#deleteDoc()}>Delete</button>
             </div>
+            ${this._renaming
+              ? html`
+                  <div class="rename-row">
+                    <input
+                      type="text"
+                      .value=${this._renameValue}
+                      @input=${(e: Event) => (this._renameValue = (e.target as HTMLInputElement).value)}
+                      @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && this.#confirmRename()}
+                    />
+                    <button @click=${() => this.#confirmRename()}>Save</button>
+                    <button @click=${() => (this._renaming = false)}>Cancel</button>
+                  </div>
+                `
+              : nothing}
           `}
       <div class="view-toggle">
         <button
@@ -193,7 +805,7 @@ export class DetailPanel extends LitElement {
       </div>
       ${this._viewMode === 'markdown'
         ? html`<div class="markdown-body">${unsafeHTML(marked.parse(d.body ?? '', { async: false }) as string)}</div>`
-        : html`<pre>${d.body}</pre>`}
+        : html`<pre>${d.raw_file ?? d.body}</pre>`}
       <div class="source-path" title="click to copy" @click=${() => this.#copyPath()}>${d.source_path}</div>
     `;
   }
