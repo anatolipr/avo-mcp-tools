@@ -3,6 +3,7 @@ import { marked } from 'marked';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import './tag-multiselect.js';
 import './status-select.js';
+import './help-tooltip.js';
 import type { EntryDetail, Selection, Facets } from './types.js';
 
 const VIEW_MODE_KEY = 'mem-bucket-detail-view-mode';
@@ -24,6 +25,23 @@ const SKILL_STATUS_DEFAULTS = ['stable', 'beta', 'unreviewed'];
 const MEMORY_STATUS_DEFAULTS = ['active', 'shipped', 'abandoned'];
 const MEMORY_DOC_TYPES = ['plan', 'spec', 'sql', 'testing-todo', 'discovery', 'session-summary', 'other'];
 const MEMORY_KEY_TYPES = ['ticket', 'freeform'];
+
+const FIELD_HELP = {
+  description:
+    'What this doc is / does, shown in search results and list views. For skills, this is also the only thing an agent sees before deciding whether to load the full body — so state both what it does and when to use it.',
+  tags: 'Free-form keywords used to filter and search. Not the only thing matched during full-text search, but the fastest way to narrow a list view.',
+  status:
+    'Lifecycle state — stable/beta/unreviewed for skills, active/shipped/abandoned for memory docs. Skills default to "unreviewed" if left unset, so low-trust content doesn\'t read as equivalent to a reviewed pattern.',
+  name: "The skill's identifier — becomes its containing folder name on disk. Lowercase letters, numbers, and hyphens only.",
+  owner: 'Who authored or maintains this skill — a person or team name, free text.',
+  extends: "Name of another skill this one builds on or specializes, if any. Leave blank if it doesn't extend anything.",
+  trigger_phrases:
+    "Extra keyword phrases beyond the description that should surface this skill in search — phrasings a user might type that don't literally appear in the description text.",
+  key: 'The lookup handle for this memory doc — usually a ticket ID, sometimes a free-form name. One key can have several docs attached (a plan, a spec, session notes) all retrievable together.',
+  key_type: '"ticket" if the key is a real ticket ID, "freeform" for a name like "Spot Chart Design".',
+  doc_type: 'What kind of content this is — shapes how it should be read (a plan reads differently than raw SQL or a session summary).',
+  related_to: 'Another key this doc relates to, if any — free text, not validated against existing keys.',
+} as const;
 
 interface Draft {
   description: string;
@@ -274,6 +292,9 @@ export class DetailPanel extends LitElement {
       font-size: 11px;
       font-weight: 600;
       opacity: 0.7;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
     }
     .field input[type='text'],
     .field select,
@@ -537,7 +558,7 @@ export class DetailPanel extends LitElement {
       <div class="edit-form">
         <div class="hint">What kind of doc is this? This shapes which fields apply next.</div>
         <div class="field">
-          <label>doc_type</label>
+          <label>doc_type <help-tooltip .text=${FIELD_HELP.doc_type}></help-tooltip></label>
           <select
             @change=${(e: Event) => this.#confirmDocType((e.target as HTMLSelectElement).value)}
           >
@@ -560,14 +581,14 @@ export class DetailPanel extends LitElement {
         ${isSkill
           ? html`
               <div class="field">
-                <label>name</label>
+                <label>name <help-tooltip .text=${FIELD_HELP.name}></help-tooltip></label>
                 <div class="hint">Renaming moves the skill's folder on disk — kept as a separate action.</div>
               </div>
             `
           : html`
               <div class="field-row">
                 <div class="field">
-                  <label>key</label>
+                  <label>key <help-tooltip .text=${FIELD_HELP.key}></help-tooltip></label>
                   <input
                     type="text"
                     .value=${d.key}
@@ -575,7 +596,7 @@ export class DetailPanel extends LitElement {
                   />
                 </div>
                 <div class="field">
-                  <label>key_type</label>
+                  <label>key_type <help-tooltip .text=${FIELD_HELP.key_type}></help-tooltip></label>
                   <select
                     .value=${d.key_type}
                     @change=${(e: Event) => this.#updateDraft({ key_type: (e.target as HTMLSelectElement).value })}
@@ -585,7 +606,7 @@ export class DetailPanel extends LitElement {
                 </div>
               </div>
               <div class="field">
-                <label>doc_type</label>
+                <label>doc_type <help-tooltip .text=${FIELD_HELP.doc_type}></help-tooltip></label>
                 <select
                   .value=${d.doc_type}
                   @change=${(e: Event) => this.#updateDraft({ doc_type: (e.target as HTMLSelectElement).value })}
@@ -595,14 +616,14 @@ export class DetailPanel extends LitElement {
               </div>
             `}
         <div class="field">
-          <label>description</label>
+          <label>description <help-tooltip .text=${FIELD_HELP.description}></help-tooltip></label>
           <textarea
             .value=${d.description}
             @input=${(e: Event) => this.#updateDraft({ description: (e.target as HTMLTextAreaElement).value })}
           ></textarea>
         </div>
         <div class="field">
-          <label>tags</label>
+          <label>tags <help-tooltip .text=${FIELD_HELP.tags}></help-tooltip></label>
           <tag-multiselect
             .tags=${facets?.tags ?? []}
             .active=${d.tags}
@@ -611,7 +632,7 @@ export class DetailPanel extends LitElement {
           ></tag-multiselect>
         </div>
         <div class="field">
-          <label>status</label>
+          <label>status <help-tooltip .text=${FIELD_HELP.status}></help-tooltip></label>
           <status-select
             .options=${[...new Set([...(isSkill ? SKILL_STATUS_DEFAULTS : MEMORY_STATUS_DEFAULTS), ...(facets?.statuses ?? [])])]}
             .value=${d.status}
@@ -622,7 +643,7 @@ export class DetailPanel extends LitElement {
           ? html`
               <div class="field-row">
                 <div class="field">
-                  <label>owner</label>
+                  <label>owner <help-tooltip .text=${FIELD_HELP.owner}></help-tooltip></label>
                   <input
                     type="text"
                     .value=${d.owner}
@@ -630,7 +651,7 @@ export class DetailPanel extends LitElement {
                   />
                 </div>
                 <div class="field">
-                  <label>extends</label>
+                  <label>extends <help-tooltip .text=${FIELD_HELP.extends}></help-tooltip></label>
                   <input
                     type="text"
                     .value=${d.extends}
@@ -639,7 +660,7 @@ export class DetailPanel extends LitElement {
                 </div>
               </div>
               <div class="field">
-                <label>trigger_phrases</label>
+                <label>trigger_phrases <help-tooltip .text=${FIELD_HELP.trigger_phrases}></help-tooltip></label>
                 <tag-multiselect
                   .tags=${[]}
                   .active=${d.trigger_phrases}
@@ -650,7 +671,7 @@ export class DetailPanel extends LitElement {
             `
           : html`
               <div class="field">
-                <label>related_to</label>
+                <label>related_to <help-tooltip .text=${FIELD_HELP.related_to}></help-tooltip></label>
                 <input
                   type="text"
                   .value=${d.related_to}
