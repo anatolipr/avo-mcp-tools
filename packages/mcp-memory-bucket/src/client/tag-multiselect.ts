@@ -9,6 +9,7 @@ export class TagMultiselect extends LitElement {
     active: { attribute: false },
     onToggle: { attribute: false },
     allowCreate: { attribute: false },
+    width: { attribute: false },
   };
 
   declare tags: string[];
@@ -18,6 +19,10 @@ export class TagMultiselect extends LitElement {
    * toggles it on via onToggle — same as picking any existing tag. Off by default so the
    * shared tags-filter usage (a fixed, browsable vocabulary) is unaffected. */
   declare allowCreate: boolean;
+  /** Fixed host width (e.g. "260px") for compact usages like the filters row. When unset, the
+   * field grows to fill the width of its container — for usages like frontmatter editing that
+   * have room to spare. */
+  declare width?: string;
 
   #query = new Signal<string>('');
   #open = new Signal<boolean>(false);
@@ -29,7 +34,9 @@ export class TagMultiselect extends LitElement {
     :host {
       display: inline-block;
       position: relative;
-      width: 260px;
+      width: fit-content;
+      min-width: 200px;
+      max-width: 100%;
       font: inherit;
       font-size: 13px;
     }
@@ -148,6 +155,10 @@ export class TagMultiselect extends LitElement {
     this.allowCreate = false;
     this.#anchorName = `--tag-multiselect-${++_instanceCounter}`;
     this.#listboxId = `tag-multiselect-listbox-${_instanceCounter}`;
+  }
+
+  willUpdate() {
+    this.style.width = this.width ?? '';
   }
 
   #boundOnDocumentClick = (e: MouseEvent) => {

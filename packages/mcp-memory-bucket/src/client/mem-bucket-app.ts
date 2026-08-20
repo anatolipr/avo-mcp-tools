@@ -731,6 +731,7 @@ export class MemBucketApp extends LitElement {
                   .tags=${facets.tags}
                   .active=${this.#activeTags.value}
                   .onToggle=${(tag: string) => this.#toggleTag(tag)}
+                  .width=${'260px'}
                 ></tag-multiselect>
               `}
           <span class="filter-label">Dates:</span>
