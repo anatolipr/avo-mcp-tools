@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -44,7 +45,29 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => {
+function killExistingServer(port: number): void {
+  try {
+    const pids = execFileSync('lsof', ['-ti', `:${port}`], { encoding: 'utf8' })
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((pid) => Number(pid) !== process.pid);
+    for (const pid of pids) {
+      try {
+        process.kill(Number(pid), 'SIGKILL');
+        console.error(`[screenmarker] killed previous instance (pid ${pid}) on port ${port}`);
+      } catch {
+        // process may have already exited
+      }
+    }
+  } catch {
+    // lsof exits non-zero when nothing is listening on the port — nothing to kill
+  }
+}
+
+killExistingServer(PORT);
+
+server.once('listening', () => {
   const url = `http://localhost:${PORT}`;
   console.error(`[screenmarker] running at ${url}`);
   if (!process.env.SCREENMARKER_NO_OPEN) {
@@ -53,5 +76,20 @@ server.listen(PORT, () => {
     });
   }
 });
+
+function listen(): void {
+  server.listen(PORT);
+}
+
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[screenmarker] port ${PORT} still in use, retrying...`);
+    setTimeout(listen, 200);
+    return;
+  }
+  throw err;
+});
+
+listen();
 
 export { server };
