@@ -10,25 +10,25 @@ const AUTHORING_SKILL_HINT =
   "Before your first call in a session, run skill_get(\"memory-bucket-authoring\") to learn the exact frontmatter schema and conventions — don't guess the shape.";
 
 export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void {
-  const roots = repo.listRoots();
-  const multiRoot = roots.length > 1;
-  const rootNames = roots.map((r) => r.name).join(', ');
+  const folders = repo.listFolders();
+  const multiFolder = folders.length > 1;
+  const folderNames = folders.map((f) => f.name).join(', ');
 
   mcp.tool(
     'skill_list',
     'Lists skills (reusable coding patterns, one SKILL.md per folder per the agentskills.io open standard), optionally filtered by a keyword matched against description/tags/trigger phrases. Paused skills are hidden by default — pass include_paused to see them.',
-    multiRoot
+    multiFolder
       ? {
           query: z.string().optional(),
-          root: z.string().optional().describe(`filter to one root: ${rootNames}`),
+          folder: z.string().optional().describe(`filter to one folder: ${folderNames}`),
           include_paused: z.boolean().optional().describe('include paused skills, which are hidden by default (see skill_set_paused)'),
         }
       : {
           query: z.string().optional(),
           include_paused: z.boolean().optional().describe('include paused skills, which are hidden by default (see skill_set_paused)'),
         },
-    async ({ query, root, include_paused }: { query?: string; root?: string; include_paused?: boolean }) => {
-      const items = repo.list(query, root, { includePaused: include_paused });
+    async ({ query, folder, include_paused }: { query?: string; folder?: string; include_paused?: boolean }) => {
+      const items = repo.list(query, folder, { includePaused: include_paused });
       return { content: [{ type: 'text', text: JSON.stringify(items, null, 2) }] };
     }
   );
@@ -44,11 +44,11 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       limit: z.number().int().positive().max(100).optional(),
       offset: z.number().int().nonnegative().optional(),
       include_paused: z.boolean().optional().describe('include paused skills, which are hidden by default (see skill_set_paused)'),
-      ...(multiRoot ? { root: z.string().optional().describe(`filter to one root: ${rootNames}`) } : {}),
+      ...(multiFolder ? { folder: z.string().optional().describe(`filter to one folder: ${folderNames}`) } : {}),
     },
-    async ({ query, status, owner, tag, limit, offset, root, include_paused }: any) => {
+    async ({ query, status, owner, tag, limit, offset, folder, include_paused }: any) => {
       try {
-        const hits = repo.search(query, { root, status, owner, tag, limit, offset, includePaused: include_paused });
+        const hits = repo.search(query, { folder, status, owner, tag, limit, offset, includePaused: include_paused });
         return { content: [{ type: 'text', text: JSON.stringify(hits, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -99,7 +99,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_create',
-    `Creates a new skill as <root>/[folder/]<name>/SKILL.md, per the agentskills.io open standard — a folder containing SKILL.md, optionally alongside scripts/references/assets subfolders you create separately on disk. ${AUTHORING_SKILL_HINT}`,
+    `Creates a new skill as <folder>/[subfolder/]<name>/SKILL.md, per the agentskills.io open standard — a folder containing SKILL.md, optionally alongside scripts/references/assets subfolders you create separately on disk. ${AUTHORING_SKILL_HINT}`,
     {
       name: z.string().describe(SKILL_NAME_DESCRIPTION),
       description: z
@@ -114,16 +114,16 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       tags: z.array(z.string()).optional(),
       trigger_phrases: z.array(z.string()).optional(),
       extends: z.string().optional().describe('reserved for a future overlay mechanism — stored in frontmatter.metadata'),
-      folder: z.string().optional().describe('optional subdirectory under the skill root, e.g. "frontend"'),
-      ...(multiRoot ? { root: z.string().describe(`which configured skill root to write into: ${rootNames}`) } : {}),
+      subfolder: z.string().optional().describe('optional subdirectory under the skill folder, e.g. "frontend"'),
+      ...(multiFolder ? { folder: z.string().describe(`which configured skill folder to write into: ${folderNames}`) } : {}),
     },
-    async ({ name, description, body, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId, folder, root }: any) => {
+    async ({ name, description, body, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId, subfolder, folder }: any) => {
       try {
         const doc = repo.create(
           { name, description, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId },
           body,
-          folder,
-          root
+          subfolder,
+          folder
         );
         return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
       } catch (err) {
@@ -143,8 +143,8 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     tags: z.array(z.string()).optional(),
     trigger_phrases: z.array(z.string()).optional(),
     extends: z.string().optional(),
-    folder: z.string().optional(),
-    ...(multiRoot ? { root: z.string().describe(`which configured skill root to write into: ${rootNames}`) } : {}),
+    subfolder: z.string().optional(),
+    ...(multiFolder ? { folder: z.string().describe(`which configured skill folder to write into: ${folderNames}`) } : {}),
   });
 
   mcp.tool(
@@ -166,8 +166,8 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
             extends: e.extends,
           },
           body: e.body,
+          subfolder: e.subfolder,
           folder: e.folder,
-          root: e.root,
         }))
       );
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };

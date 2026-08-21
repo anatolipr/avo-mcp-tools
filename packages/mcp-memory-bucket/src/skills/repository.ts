@@ -5,9 +5,9 @@ import type { FSWatcher } from 'chokidar';
 import { writeMarkdownFile } from '../store/markdown-file.js';
 import { assertValidSkillName } from '../store/skill-name.js';
 import { resolveWithinBase } from '../store/safe-path.js';
-import { upsertFile, removeFile, scanSingleRoot, unregisterRoot, skillSyncSpec, type TableSyncSpec } from '../store/sync.js';
+import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, skillSyncSpec, type TableSyncSpec } from '../store/sync.js';
 import { SearchQueryError } from '../store/search.js';
-import type { NamedRoot } from '../config.js';
+import type { NamedFolder } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
 
 interface SkillRow {
@@ -19,7 +19,7 @@ interface SkillRow {
   trigger_phrases: string; // JSON
   extends: string | null;
   source_path: string;
-  root: string;
+  folder: string;
   deprecated: number;
   paused: number;
   created_at: string | null;
@@ -37,7 +37,7 @@ function rowToDoc(row: SkillRow): SkillDoc {
     paused: !!row.paused,
     created_at: row.created_at ?? undefined,
     source_path: row.source_path,
-    root: row.root,
+    folder: row.folder,
     body: row.body,
   };
 }
@@ -48,7 +48,7 @@ export interface SkillListItem {
   owner: string | null;
   status: SkillStatus;
   tags: string[];
-  root: string;
+  folder: string;
   paused: boolean;
 }
 
@@ -56,71 +56,71 @@ export class SkillRepository {
   private syncSpec: TableSyncSpec<SkillFrontmatter>;
   private watcher?: FSWatcher;
 
-  /** `roots[0]` is always the builtin skills dir — never exposed for create()/removal. */
-  constructor(private db: Database.Database, private roots: NamedRoot[]) {
-    this.syncSpec = skillSyncSpec(roots);
+  /** `folders[0]` is always the builtin skills dir — never exposed for create()/removal. */
+  constructor(private db: Database.Database, private folders: NamedFolder[]) {
+    this.syncSpec = skillSyncSpec(folders);
   }
 
-  /** Attaches the live chokidar watcher so addRoot/removeRoot can mutate it without a restart. */
+  /** Attaches the live chokidar watcher so addFolder/removeFolder can mutate it without a restart. */
   setWatcher(watcher: FSWatcher): void {
     this.watcher = watcher;
   }
 
-  /** User-addable roots — excludes the always-present builtin skills dir at roots[0]. */
-  listRoots(): NamedRoot[] {
-    return this.roots.slice(1);
+  /** User-addable folders — excludes the always-present builtin skills dir at folders[0]. */
+  listFolders(): NamedFolder[] {
+    return this.folders.slice(1);
   }
 
-  private resolveRoot(rootName: string | undefined): NamedRoot {
-    const userRoots = this.listRoots();
-    if (rootName) {
-      const found = userRoots.find((r) => r.name === rootName);
+  private resolveFolder(folderName: string | undefined): NamedFolder {
+    const userFolders = this.listFolders();
+    if (folderName) {
+      const found = userFolders.find((f) => f.name === folderName);
       if (!found) {
-        throw new Error(`unknown skill root "${rootName}" — valid roots: ${userRoots.map((r) => r.name).join(', ') || '(none configured)'}`);
+        throw new Error(`unknown skill folder "${folderName}" — valid folders: ${userFolders.map((f) => f.name).join(', ') || '(none configured)'}`);
       }
       return found;
     }
-    if (userRoots.length === 1) return userRoots[0]!;
-    if (userRoots.length === 0) {
-      throw new Error('no skill root configured — add one first (see bucket_open_ui)');
+    if (userFolders.length === 1) return userFolders[0]!;
+    if (userFolders.length === 0) {
+      throw new Error('no skill folder configured — add one first (see bucket_open_ui)');
     }
-    throw new Error(`multiple skill roots configured — specify root: one of ${userRoots.map((r) => r.name).join(', ')}`);
+    throw new Error(`multiple skill folders configured — specify folder: one of ${userFolders.map((f) => f.name).join(', ')}`);
   }
 
-  /** Registers a new root: appends it, scans it once, and starts watching it live. */
-  addRoot(root: NamedRoot): void {
-    if (this.roots.some((r) => r.name === root.name)) {
-      throw new Error(`a skill root named "${root.name}" already exists`);
+  /** Registers a new folder: appends it, scans it once, and starts watching it live. */
+  addFolder(folder: NamedFolder): void {
+    if (this.folders.some((f) => f.name === folder.name)) {
+      throw new Error(`a skill folder named "${folder.name}" already exists`);
     }
-    this.roots.push(root);
-    scanSingleRoot(this.db, this.syncSpec, root.path);
-    this.watcher?.add(root.path);
+    this.folders.push(folder);
+    scanSingleFolder(this.db, this.syncSpec, folder.path);
+    this.watcher?.add(folder.path);
   }
 
-  /** Unregisters a root: stops watching it and drops its cached rows. Never touches files on disk. */
-  removeRoot(name: string): void {
-    const idx = this.roots.findIndex((r) => r.name === name);
-    if (idx <= 0) throw new Error(`skill root "${name}" not found or is not removable`); // index 0 is builtin
-    const [removed] = this.roots.splice(idx, 1);
+  /** Unregisters a folder: stops watching it and drops its cached rows. Never touches files on disk. */
+  removeFolder(name: string): void {
+    const idx = this.folders.findIndex((f) => f.name === name);
+    if (idx <= 0) throw new Error(`skill folder "${name}" not found or is not removable`); // index 0 is builtin
+    const [removed] = this.folders.splice(idx, 1);
     this.watcher?.unwatch(removed!.path);
-    unregisterRoot(this.db, 'skills', name);
+    unregisterFolder(this.db, 'skills', name);
   }
 
   /** `includePaused` defaults to false: paused skills are hidden from discovery (see setPaused). */
-  list(query?: string, root?: string, opts: { includePaused?: boolean } = {}): SkillListItem[] {
+  list(query?: string, folder?: string, opts: { includePaused?: boolean } = {}): SkillListItem[] {
     const conditions: string[] = [];
     const params: unknown[] = [];
-    if (root) {
-      conditions.push('root = ?');
-      params.push(root);
+    if (folder) {
+      conditions.push('folder = ?');
+      params.push(folder);
     }
     if (!opts.includePaused) {
       conditions.push('paused = 0');
     }
     const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
     const rows = this.db
-      .prepare(`SELECT id, description, owner, status, tags, trigger_phrases, root, paused FROM skills${where}`)
-      .all(...params) as Array<Pick<SkillRow, 'id' | 'description' | 'owner' | 'status' | 'tags' | 'trigger_phrases' | 'root' | 'paused'>>;
+      .prepare(`SELECT id, description, owner, status, tags, trigger_phrases, folder, paused FROM skills${where}`)
+      .all(...params) as Array<Pick<SkillRow, 'id' | 'description' | 'owner' | 'status' | 'tags' | 'trigger_phrases' | 'folder' | 'paused'>>;
 
     const needle = query?.trim().toLowerCase();
     const items = rows.map((r) => ({
@@ -130,7 +130,7 @@ export class SkillRepository {
       status: r.status,
       tags: JSON.parse(r.tags) as string[],
       triggerPhrases: JSON.parse(r.trigger_phrases) as string[],
-      root: r.root,
+      folder: r.folder,
       paused: !!r.paused,
     }));
 
@@ -149,13 +149,13 @@ export class SkillRepository {
   /**
    * Full-text search over skill description/body/tags via FTS5 — `query` is
    * raw FTS5 MATCH syntax (AND/OR/NOT, "phrases", prefix*). Ranked by bm25.
-   * Optional metadata filters (root/status/owner/tag) apply before limit/offset,
+   * Optional metadata filters (folder/status/owner/tag) apply before limit/offset,
    * so pagination stays correct even when filtering narrows the FTS hit set.
    */
   search(
     query: string,
     opts: {
-      root?: string;
+      folder?: string;
       status?: SkillStatus;
       owner?: string;
       tag?: string;
@@ -164,13 +164,13 @@ export class SkillRepository {
       /** Defaults to false: paused skills are hidden from discovery (see setPaused). */
       includePaused?: boolean;
     } = {}
-  ): Array<{ name: string; description: string; root: string; snippet: string; score: number }> {
-    const { root, status, owner, tag, limit = 20, offset = 0, includePaused = false } = opts;
+  ): Array<{ name: string; description: string; folder: string; snippet: string; score: number }> {
+    const { folder, status, owner, tag, limit = 20, offset = 0, includePaused = false } = opts;
     const conditions: string[] = [];
     const params: unknown[] = [query];
-    if (root) {
-      conditions.push('s.root = ?');
-      params.push(root);
+    if (folder) {
+      conditions.push('s.folder = ?');
+      params.push(folder);
     }
     if (status) {
       conditions.push('s.status = ?');
@@ -192,7 +192,7 @@ export class SkillRepository {
     try {
       const rows = this.db
         .prepare(
-          `SELECT s.id AS name, s.description, s.root,
+          `SELECT s.id AS name, s.description, s.folder,
                   snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
                   -bm25(search_index) AS score
            FROM search_index
@@ -201,7 +201,7 @@ export class SkillRepository {
            ORDER BY bm25(search_index)
            LIMIT ? OFFSET ?`
         )
-        .all(...params) as Array<{ name: string; description: string; root: string; snippet: string; score: number }>;
+        .all(...params) as Array<{ name: string; description: string; folder: string; snippet: string; score: number }>;
       return rows;
     } catch (err) {
       throw new SearchQueryError(query, err);
@@ -219,10 +219,10 @@ export class SkillRepository {
   }
 
   /**
-   * Creates <root>/[folder/]<name>/SKILL.md — folder-per-skill, per the
+   * Creates <folder>/[subfolder/]<name>/SKILL.md — folder-per-skill, per the
    * agentskills.io spec (`name` must equal the containing folder's name).
-   * `root` selects which configured skill root to write into; required only
-   * when more than one user root is configured.
+   * `folder` selects which configured skill folder to write into; required only
+   * when more than one user folder is configured.
    */
   create(
     frontmatter: { name: string; description: string; license?: string; compatibility?: string; tags?: string[]; trigger_phrases?: string[] } & {
@@ -231,15 +231,15 @@ export class SkillRepository {
       extends?: string | null;
     },
     body: string,
-    folder?: string,
-    root?: string
+    subfolder?: string,
+    folder?: string
   ): SkillDoc {
     assertValidSkillName(frontmatter.name);
     if (this.get(frontmatter.name)) {
       throw new Error(`skill with name "${frontmatter.name}" already exists`);
     }
-    const targetRoot = this.resolveRoot(root);
-    const skillDir = resolveWithinBase(targetRoot.path, folder, frontmatter.name);
+    const targetFolder = this.resolveFolder(folder);
+    const skillDir = resolveWithinBase(targetFolder.path, subfolder, frontmatter.name);
     if (fs.existsSync(skillDir)) {
       throw new Error(`skill directory already exists at ${skillDir}`);
     }
@@ -261,7 +261,7 @@ export class SkillRepository {
       deprecated: false,
       created_at: new Date().toISOString(),
       source_path: filePath,
-      root: targetRoot.name,
+      folder: targetFolder.name,
     };
     writeMarkdownFile(filePath, stripSourcePath(fm), body);
     upsertFile(this.db, this.syncSpec, filePath);
@@ -281,13 +281,13 @@ export class SkillRepository {
         extends?: string | null;
       };
       body: string;
+      subfolder?: string;
       folder?: string;
-      root?: string;
     }>
   ): Array<{ name: string; ok: boolean; error?: string }> {
     return entries.map((entry) => {
       try {
-        this.create(entry.frontmatter, entry.body, entry.folder, entry.root);
+        this.create(entry.frontmatter, entry.body, entry.subfolder, entry.folder);
         return { name: entry.frontmatter.name, ok: true };
       } catch (err) {
         return { name: entry.frontmatter.name, ok: false, error: (err as Error).message };
@@ -295,9 +295,9 @@ export class SkillRepository {
     });
   }
 
-  /** Name of the always-present, non-removable builtin root (roots[0]) — never user content, never deprecatable. */
-  private isBuiltin(doc: Pick<SkillDoc, 'root'>): boolean {
-    return doc.root === this.roots[0]?.name;
+  /** Name of the always-present, non-removable builtin folder (folders[0]) — never user content, never deprecatable. */
+  private isBuiltin(doc: Pick<SkillDoc, 'folder'>): boolean {
+    return doc.folder === this.folders[0]?.name;
   }
 
   update(
@@ -338,7 +338,7 @@ export class SkillRepository {
   }
 
   /**
-   * Renames a skill: moves <sourceDir>/[folder/]<oldName>/ to .../<newName>/ (keeping any
+   * Renames a skill: moves <sourceDir>/[subfolder/]<oldName>/ to .../<newName>/ (keeping any
    * scripts/references/assets alongside SKILL.md) and updates the `name` frontmatter field to match.
    */
   rename(name: string, newName: string): SkillDoc {
@@ -474,7 +474,7 @@ export class SkillRepository {
   }
 }
 
-function stripSourcePath<T extends { source_path: string; root: string }>(fm: T): Omit<T, 'source_path' | 'root'> {
-  const { source_path: _sp, root: _root, ...rest } = fm;
+function stripSourcePath<T extends { source_path: string; folder: string }>(fm: T): Omit<T, 'source_path' | 'folder'> {
+  const { source_path: _sp, folder: _folder, ...rest } = fm;
   return rest;
 }

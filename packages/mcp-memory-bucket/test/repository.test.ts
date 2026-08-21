@@ -20,9 +20,9 @@ function makeTmpDir(): string {
 test('skill create/get/list/update/delete round-trip, including nested subdirectories', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const roots = [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }];
-  const spec = skillSyncSpec(roots);
-  const repo = new SkillRepository(db, roots);
+  const folders = [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }];
+  const spec = skillSyncSpec(folders);
+  const repo = new SkillRepository(db, folders);
 
   const created = repo.create(
     { name: 'demo-skill', description: 'Demo skill. Use when testing.', owner: null, status: 'unreviewed', tags: ['demo'], trigger_phrases: ['demo'] },
@@ -60,10 +60,10 @@ test('skill create/get/list/update/delete round-trip, including nested subdirect
   fs.rmSync(skillDir, { recursive: true, force: true });
 });
 
-test('memory create with folder param + getByKey exact match', () => {
+test('memory create with subfolder param + getByKey exact match', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const doc = repo.create({
     key: 'rmxs-14',
@@ -71,14 +71,14 @@ test('memory create with folder param + getByKey exact match', () => {
     doc_type: 'plan',
     description: 'bulk edit plan',
     body: 'Plan body.',
-    folder: 'rmxs',
+    subfolder: 'rmxs',
   });
   assert.equal(doc.key, 'RMXS-14');
   assert.ok(doc.source_path.includes(path.join('rmxs', '')));
   assert.equal(doc.deprecated, false);
   assert.ok(doc.created_at && !Number.isNaN(Date.parse(doc.created_at)));
 
-  const spec = memorySyncSpec([{ name: 'root', path: memDir }]);
+  const spec = memorySyncSpec([{ name: 'folder', path: memDir }]);
   initialScan(db, spec);
 
   const found = repo.getByKey('rmxs-14');
@@ -92,7 +92,7 @@ test('memory create with folder param + getByKey exact match', () => {
 test('resolveWithinBase rejects folder traversal', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   assert.throws(() =>
     repo.create({
@@ -101,7 +101,7 @@ test('resolveWithinBase rejects folder traversal', () => {
       doc_type: 'other',
       description: 'attempt',
       body: 'x',
-      folder: '../../etc',
+      subfolder: '../../etc',
     })
   );
 
@@ -127,8 +127,8 @@ test('relocate moves a file into memory and skips a repeat bulk relocate', () =>
   const memDir = makeTmpDir();
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
-  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   const srcDir = makeTmpDir();
   const srcFile = path.join(srcDir, '2026-08-12-pde-433-partner-configuration-management-v3.md');
@@ -154,8 +154,8 @@ test('relocate to skill requires an explicit description, but infers a valid nam
   const memDir = makeTmpDir();
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
-  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   const srcDir = makeTmpDir();
   const srcFile = path.join(srcDir, 'Lit Dropdown Pattern.md');
@@ -184,8 +184,8 @@ test('relocate to skill requires an explicit description, but infers a valid nam
 test('skill search finds body text via FTS5 and bulkUpdate merges/subtracts tags across a batch', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const roots = [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }];
-  const repo = new SkillRepository(db, roots);
+  const folders = [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }];
+  const repo = new SkillRepository(db, folders);
 
   repo.create(
     { name: 'blue-green-deploy', description: 'Deploy pattern.', tags: ['ops'], trigger_phrases: [] },
@@ -219,7 +219,7 @@ test('skill search finds body text via FTS5 and bulkUpdate merges/subtracts tags
 test('memory search finds body text via FTS5 and bulkUpdate flips status across a batch', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const doc1 = repo.create({ key: 'RMXS-1', key_type: 'ticket', doc_type: 'plan', description: 'first plan', body: 'Migrate the widget schema.' });
   const doc2 = repo.create({ key: 'RMXS-2', key_type: 'ticket', doc_type: 'plan', description: 'second plan', body: 'Totally unrelated notes.' });
@@ -243,7 +243,7 @@ test('memory search finds body text via FTS5 and bulkUpdate flips status across 
 test('skill search: status/tag filters and offset paginate correctly', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   repo.create({ name: 'skill-a', description: 'A', tags: ['ops'], status: 'stable', trigger_phrases: [] }, 'Widget migration notes for skill A.');
   repo.create({ name: 'skill-b', description: 'B', tags: ['misc'], status: 'unreviewed', trigger_phrases: [] }, 'Widget migration notes for skill B.');
@@ -269,8 +269,8 @@ test('bucket_search finds hits across both skills and memory docs, ranked togeth
   const skillDir = makeTmpDir();
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
-  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   skillRepo.create({ name: 'widget-skill', description: 'Widget skill.', tags: [], trigger_phrases: [] }, 'A widget pattern.');
   memoryRepo.create({ key: 'RMXS-9', key_type: 'ticket', doc_type: 'plan', description: 'widget plan', body: 'A widget migration plan.' });
@@ -289,7 +289,7 @@ test('bucket_search finds hits across both skills and memory docs, ranked togeth
 test('search throws a SearchQueryError with actionable guidance on malformed FTS5 syntax', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   assert.throws(() => repo.search('blue-green'), (err: unknown) => {
     assert.ok(err instanceof SearchQueryError);
@@ -304,7 +304,7 @@ test('search throws a SearchQueryError with actionable guidance on malformed FTS
 test('skill bulkGet/bulkCreate/bulkDelete: partial failures do not abort the batch', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   repo.create({ name: 'existing-skill', description: 'Pre-existing.', tags: [], trigger_phrases: [] }, 'Body.');
 
@@ -336,11 +336,11 @@ test('skill bulkGet/bulkCreate/bulkDelete: partial failures do not abort the bat
 test('memory bulkGet/bulkCreate/bulkDelete: partial failures do not abort the batch', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const createResults = repo.bulkCreate([
     { key: 'RMXS-10', key_type: 'ticket', doc_type: 'plan', description: 'plan a', body: 'Body a.' },
-    { key: 'RMXS-11', key_type: 'ticket', doc_type: 'plan', description: 'plan b', body: 'Body b.', folder: '../../etc' }, // traversal fails
+    { key: 'RMXS-11', key_type: 'ticket', doc_type: 'plan', description: 'plan b', body: 'Body b.', subfolder: '../../etc' }, // traversal fails
     { key: 'RMXS-12', key_type: 'ticket', doc_type: 'plan', description: 'plan c', body: 'Body c.' },
   ]);
   assert.deepEqual(
@@ -370,8 +370,8 @@ test('relocateMany relocates each file independently, one bad entry does not blo
   const skillDir = makeTmpDir();
   const srcDir = makeTmpDir();
   const db = openCache(':memory:');
-  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
-  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   const goodFile = path.join(srcDir, '2026-08-12-pde-500-good-relocate.md');
   const ambiguousFile = path.join(srcDir, 'notes.md');
@@ -400,7 +400,7 @@ test('relocateMany relocates each file independently, one bad entry does not blo
 test('skill bulkUpdate flips deprecated across a batch, partial failure does not abort the rest', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   repo.create({ name: 'skill-x', description: 'X', tags: [], trigger_phrases: [] }, 'Body X.');
   repo.create({ name: 'skill-y', description: 'Y', tags: [], trigger_phrases: [] }, 'Body Y.');
@@ -425,9 +425,9 @@ test('builtin skills cannot be deprecated or deleted, individually or via bulk o
   const builtinDir = makeTmpDir();
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new SkillRepository(db, [{ name: 'builtin', path: builtinDir }, { name: 'root', path: skillDir }]);
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: builtinDir }, { name: 'folder', path: skillDir }]);
 
-  // create() can't target roots[0] (builtin is never user-addable), so simulate the server's
+  // create() can't target folders[0] (builtin is never user-addable), so simulate the server's
   // builtin-skills bootstrap by writing the file directly and rescanning.
   const builtinSkillDir = path.join(builtinDir, 'authoring-guide');
   fs.mkdirSync(builtinSkillDir, { recursive: true });
@@ -435,7 +435,7 @@ test('builtin skills cannot be deprecated or deleted, individually or via bulk o
     path.join(builtinSkillDir, 'SKILL.md'),
     `---\nname: "authoring-guide"\ndescription: "Builtin guide."\ntags: []\ntrigger_phrases: []\n---\nBody.\n`
   );
-  initialScan(db, skillSyncSpec([{ name: 'builtin', path: builtinDir }, { name: 'root', path: skillDir }]));
+  initialScan(db, skillSyncSpec([{ name: 'builtin', path: builtinDir }, { name: 'folder', path: skillDir }]));
 
   repo.create({ name: 'user-skill', description: 'User skill.', tags: [], trigger_phrases: [] }, 'Body.');
 
@@ -471,7 +471,7 @@ test('builtin skills cannot be deprecated or deleted, individually or via bulk o
 test('memory bulkUpdate flips deprecated across a batch, partial failure does not abort the rest', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const doc1 = repo.create({ key: 'RMXS-20', key_type: 'ticket', doc_type: 'plan', description: 'a', body: 'Body a.' });
   const doc2 = repo.create({ key: 'RMXS-21', key_type: 'ticket', doc_type: 'plan', description: 'b', body: 'Body b.' });
@@ -498,13 +498,13 @@ test('ensureColumns migration adds deprecated/created_at columns to a pre-existi
     CREATE TABLE skills (
       id TEXT PRIMARY KEY, description TEXT NOT NULL, owner TEXT, status TEXT NOT NULL,
       tags TEXT NOT NULL, trigger_phrases TEXT NOT NULL, extends TEXT,
-      source_path TEXT NOT NULL UNIQUE, root TEXT NOT NULL DEFAULT '',
+      source_path TEXT NOT NULL UNIQUE, folder TEXT NOT NULL DEFAULT '',
       body TEXT NOT NULL, mtime_ms INTEGER NOT NULL
     );
     CREATE TABLE memory_docs (
       id TEXT PRIMARY KEY, key TEXT NOT NULL, key_type TEXT NOT NULL, description TEXT NOT NULL,
       doc_type TEXT NOT NULL, tags TEXT NOT NULL, status TEXT NOT NULL, related_to TEXT,
-      source_path TEXT NOT NULL UNIQUE, root TEXT NOT NULL DEFAULT '',
+      source_path TEXT NOT NULL UNIQUE, folder TEXT NOT NULL DEFAULT '',
       body TEXT NOT NULL, mtime_ms INTEGER NOT NULL
     );
   `);
@@ -529,7 +529,7 @@ test('ensureColumns migration adds deprecated/created_at columns to a pre-existi
 test('skill setPaused hides skills from list/search by default, never writes paused into SKILL.md', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   const created = repo.create({ name: 'pausable', description: 'Pausable skill.', tags: [], trigger_phrases: [] }, 'Body text.');
   assert.equal(created.paused, false);
@@ -573,7 +573,7 @@ test('builtin skills cannot be paused', () => {
   const builtinDir = makeTmpDir();
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new SkillRepository(db, [{ name: 'builtin', path: builtinDir }, { name: 'root', path: skillDir }]);
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: builtinDir }, { name: 'folder', path: skillDir }]);
 
   const builtinSkillDir = path.join(builtinDir, 'authoring-guide');
   fs.mkdirSync(builtinSkillDir, { recursive: true });
@@ -581,7 +581,7 @@ test('builtin skills cannot be paused', () => {
     path.join(builtinSkillDir, 'SKILL.md'),
     `---\nname: "authoring-guide"\ndescription: "Builtin guide."\ntags: []\ntrigger_phrases: []\n---\nBody.\n`
   );
-  initialScan(db, skillSyncSpec([{ name: 'builtin', path: builtinDir }, { name: 'root', path: skillDir }]));
+  initialScan(db, skillSyncSpec([{ name: 'builtin', path: builtinDir }, { name: 'folder', path: skillDir }]));
 
   const results = repo.setPaused(['authoring-guide'], true);
   assert.equal(results[0]?.ok, false);
@@ -596,7 +596,7 @@ test('builtin skills cannot be paused', () => {
 test('memory setPaused hides docs from getByKey/search by default, never writes paused into the doc file', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const doc = repo.create({ key: 'RMXS-30', key_type: 'ticket', doc_type: 'plan', description: 'pausable plan', body: 'Plan body.' });
   assert.equal(doc.paused, false);
@@ -636,8 +636,8 @@ test('relocate preserves created_at on the resulting doc', () => {
   const skillDir = makeTmpDir();
   const srcDir = makeTmpDir();
   const db = openCache(':memory:');
-  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
-  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   const srcFile = path.join(srcDir, '2026-08-12-pde-600-relocate-created-at.md');
   fs.writeFileSync(srcFile, 'Some plan content.');
@@ -665,8 +665,8 @@ test('searchByDate finds memory docs and skills by dates mentioned in their body
   const memDir = makeTmpDir();
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
-  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   memoryRepo.create({
     key: 'date-test',
@@ -720,7 +720,7 @@ test('searchByDate finds memory docs and skills by dates mentioned in their body
 test('searchByDate also matches on created_at when no date is mentioned in the body', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const doc = memoryRepo.create({
     key: 'created-at-only',
@@ -745,10 +745,10 @@ test('wiping all cache tables and re-running initialScan fully restores state fr
   const memDir = makeTmpDir();
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const skillSpec = skillSyncSpec([{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
-  const memorySpec = memorySyncSpec([{ name: 'root', path: memDir }]);
-  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }]);
-  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const skillSpec = skillSyncSpec([{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
+  const memorySpec = memorySyncSpec([{ name: 'folder', path: memDir }]);
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   memoryRepo.create({
     key: 'rebuild-test',
@@ -785,7 +785,7 @@ test('wiping all cache tables and re-running initialScan fully restores state fr
 test('searchByDate reflects doc_dates cleanup after deletion', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const memoryRepo = new MemoryRepository(db, [{ name: 'root', path: memDir }]);
+  const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const doc = memoryRepo.create({
     key: 'delete-test',
@@ -806,9 +806,9 @@ test('searchByDate reflects doc_dates cleanup after deletion', () => {
 test('memory doc with no frontmatter at all falls back to file mtime for created_at', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const roots = [{ name: 'root', path: memDir }];
-  const spec = memorySyncSpec(roots);
-  const repo = new MemoryRepository(db, roots);
+  const folders = [{ name: 'folder', path: memDir }];
+  const spec = memorySyncSpec(folders);
+  const repo = new MemoryRepository(db, folders);
 
   const filePath = path.join(memDir, 'dropped-in-notes.md');
   fs.writeFileSync(filePath, 'Just some plain notes, no frontmatter.');
@@ -835,9 +835,9 @@ test('memory doc with no frontmatter falls back to mtime, not birthtime (survive
   // tracks the rewound mtime, not the original birthtime.
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const roots = [{ name: 'root', path: memDir }];
-  const spec = memorySyncSpec(roots);
-  const repo = new MemoryRepository(db, roots);
+  const folders = [{ name: 'folder', path: memDir }];
+  const spec = memorySyncSpec(folders);
+  const repo = new MemoryRepository(db, folders);
 
   const filePath = path.join(memDir, 'copied-notes.md');
   fs.writeFileSync(filePath, 'Copied content, no frontmatter.');
@@ -858,9 +858,9 @@ test('memory doc with no frontmatter falls back to mtime, not birthtime (survive
 test('SKILL.md predating created_at falls back to file mtime instead of null', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const roots = [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }];
-  const spec = skillSyncSpec(roots);
-  const repo = new SkillRepository(db, roots);
+  const folders = [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }];
+  const spec = skillSyncSpec(folders);
+  const repo = new SkillRepository(db, folders);
 
   const legacySkillDir = path.join(skillDir, 'legacy-skill');
   fs.mkdirSync(legacySkillDir, { recursive: true });
@@ -881,8 +881,8 @@ test('SKILL.md predating created_at falls back to file mtime instead of null', (
 test('skill rename moves the folder and updates the frontmatter name', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
-  const roots = [{ name: 'builtin', path: '/nonexistent' }, { name: 'root', path: skillDir }];
-  const repo = new SkillRepository(db, roots);
+  const folders = [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }];
+  const repo = new SkillRepository(db, folders);
 
   repo.create(
     { name: 'old-name', description: 'Rename target. Use for testing.', owner: null, status: 'unreviewed', tags: [], trigger_phrases: [] },
@@ -903,8 +903,8 @@ test('skill rename moves the folder and updates the frontmatter name', () => {
 test('memory stripFrontmatter leaves a bare file; deriveFrontmatter re-seeds key from the filename', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const roots = [{ name: 'root', path: memDir }];
-  const repo = new MemoryRepository(db, roots);
+  const folders = [{ name: 'folder', path: memDir }];
+  const repo = new MemoryRepository(db, folders);
 
   const doc = repo.create({
     key: 'strip-test',
@@ -942,8 +942,8 @@ test('memory stripFrontmatter leaves a bare file; deriveFrontmatter re-seeds key
 test('memory update() can change key in place, normalized', () => {
   const memDir = makeTmpDir();
   const db = openCache(':memory:');
-  const roots = [{ name: 'root', path: memDir }];
-  const repo = new MemoryRepository(db, roots);
+  const folders = [{ name: 'folder', path: memDir }];
+  const repo = new MemoryRepository(db, folders);
 
   const doc = repo.create({
     key: 'old-key',

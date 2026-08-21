@@ -7,7 +7,7 @@ interface FsListResponse {
   entries: Array<{ name: string; path: string }>;
 }
 
-export class AddRootModal extends LitElement {
+export class AddFolderModal extends LitElement {
   static properties = {
     defaultKind: { attribute: false },
     lockKind: { attribute: false },
@@ -185,7 +185,7 @@ export class AddRootModal extends LitElement {
     }
   }
 
-  #selectCurrentAsRoot() {
+  #selectCurrentAsFolder() {
     this.#selectedPath.set(this.#currentPath.value);
     if (!this.#name.value) {
       this.#name.set(this.#currentPath.value.split('/').filter(Boolean).pop() ?? '');
@@ -198,14 +198,14 @@ export class AddRootModal extends LitElement {
     this.#submitting.set(true);
     this.#error.set('');
     try {
-      const res = await fetch('/api/roots', {
+      const res = await fetch('/api/folders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind: this.#kind.value, name: this.#name.value || undefined, path: dirPath }),
       });
       const data = await res.json();
       if (!res.ok) {
-        this.#error.set(data.error ?? 'failed to add root');
+        this.#error.set(data.error ?? 'failed to add folder');
         return;
       }
       this.onAdded();
@@ -219,7 +219,7 @@ export class AddRootModal extends LitElement {
     return html`
       <div class="backdrop" @click=${(e: Event) => e.target === e.currentTarget && this.onCancel()}>
         <div class="modal">
-          <div class="header"><h2>Add a root</h2></div>
+          <div class="header"><h2>Add a folder</h2></div>
           ${this.lockKind
             ? html``
             : html`
@@ -228,13 +228,13 @@ export class AddRootModal extends LitElement {
                     class=${this.#kind.value === 'skill' ? 'active' : ''}
                     @click=${() => this.#kind.set('skill')}
                   >
-                    Skill root
+                    Skill folder
                   </button>
                   <button
                     class=${this.#kind.value === 'memory' ? 'active' : ''}
                     @click=${() => this.#kind.set('memory')}
                   >
-                    Memory root
+                    Memory folder
                   </button>
                 </div>
               `}
@@ -279,14 +279,14 @@ export class AddRootModal extends LitElement {
                 )}
           </div>
           <div class="footer">
-            <button class="secondary" @click=${() => this.#selectCurrentAsRoot()}>
+            <button class="secondary" @click=${() => this.#selectCurrentAsFolder()}>
               Select this folder
             </button>
             ${this.#selectedPath.value
               ? html`<div class="selected-row">Selected: <span class="path">${this.#selectedPath.value}</span></div>`
               : ''}
             <div>
-              <label>Root name</label>
+              <label>Folder name</label>
               <input
                 type="text"
                 .value=${this.#name.value}
@@ -302,7 +302,7 @@ export class AddRootModal extends LitElement {
                 ?disabled=${!this.#selectedPath.value || this.#submitting.value}
                 @click=${() => this.#submit()}
               >
-                ${this.#submitting.value ? 'Adding…' : 'Add root'}
+                ${this.#submitting.value ? 'Adding…' : 'Add folder'}
               </button>
             </div>
           </div>
@@ -312,4 +312,4 @@ export class AddRootModal extends LitElement {
   }
 }
 
-customElements.define('add-root-modal', AddRootModal);
+customElements.define('add-folder-modal', AddFolderModal);

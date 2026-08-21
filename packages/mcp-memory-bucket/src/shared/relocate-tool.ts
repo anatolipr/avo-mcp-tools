@@ -23,8 +23,8 @@ const overridesSchema = z
     doc_type: z.enum(['plan', 'spec', 'sql', 'testing-todo', 'discovery', 'session-summary', 'other']).optional().describe('memory target only'),
     tags: z.array(z.string()).optional(),
     status: statusSchema(['stable', 'beta', 'unreviewed', 'active', 'shipped', 'abandoned']).optional(),
-    folder: z.string().optional().describe('optional subdirectory under the target root'),
-    root: z.string().optional().describe('which configured root to write into; required if multiple roots exist for the target type'),
+    subfolder: z.string().optional().describe('optional subdirectory under the target folder'),
+    folder: z.string().optional().describe('which configured folder to write into; required if multiple folders exist for the target type'),
   })
   .optional();
 

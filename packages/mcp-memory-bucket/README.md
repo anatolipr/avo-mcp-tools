@@ -81,28 +81,28 @@ or `MEMORY_BUCKET_DIR`/`--memory-dir` — see Configuration below). It's a
 scan cache, not the source of truth — the markdown files on disk always
 are, and the cache can be safely deleted; it's rebuilt on next startup.
 
-- **On startup**, every configured root is fully walked and each file is
+- **On startup**, every configured folder is fully walked and each file is
   upserted into the cache, keyed by mtime — a file whose mtime hasn't
   changed since it was last cached is skipped, so restarting is cheap
-  even with a large root.
-- **While running**, each root is watched (via `chokidar`) for `add`,
+  even with a large folder.
+- **While running**, each folder is watched (via `chokidar`) for `add`,
   `change`, and `unlink` events on matching files, and the cache is
   updated incrementally as they happen — no polling, no manual reindex.
-  Only `SKILL.md` files count for skill roots; any `.md` file counts for
-  memory roots. The watcher only looks 10 directories deep. A rename
+  Only `SKILL.md` files count for skill folders; any `.md` file counts for
+  memory folders. The watcher only looks 10 directories deep. A rename
   arrives as a delete-then-add, not a single rename event.
-- **Adding a root** (via the web UI, or a `skill_sources`/`memory_sources`
-  entry present at startup) triggers a scan of just that root, not a
-  full rescan of every root already cached.
-- **Removing a root** (via the web UI) drops its rows from the cache and
+- **Adding a folder** (via the web UI, or a `skill_sources`/`memory_sources`
+  entry present at startup) triggers a scan of just that folder, not a
+  full rescan of every folder already cached.
+- **Removing a folder** (via the web UI) drops its rows from the cache and
   search index immediately — it never touches files on disk.
 
 The same process also serves a browser UI at `http://localhost:8767/` for
-searching/filtering skills and memory docs by tag, root, status, owner,
+searching/filtering skills and memory docs by tag, folder, status, owner,
 deprecated flag, and fulltext (SQLite FTS5), and sorting by creation date
 or last-touched — a way to review and clean up what's in the index
-without going through an agent. It also manages **roots**: add a skill or
-memory root by browsing the filesystem, or remove one (unregisters it and
+without going through an agent. It also manages **folders**: add a skill or
+memory folder by browsing the filesystem, or remove one (unregisters it and
 drops its cached rows — never deletes files on disk). Beyond browsing,
 the UI supports marking entries **deprecated** (independent of `status`,
 so you don't lose "shipped"/"active" context when flagging something
@@ -110,8 +110,8 @@ stale) and **deleting** entries — both single-item and multi-select bulk,
 with a confirm dialog before any delete. Deeper edits (renaming, editing
 body content, changing tags) still go through the `skill_*`/`memory_*`
 tools or the files directly. From an MCP session connected to this
-server, call `bucket_open_ui` to get the URL. If no roots are configured
-yet, the UI opens straight into a first-run "add your first root" screen.
+server, call `bucket_open_ui` to get the URL. If no folders are configured
+yet, the UI opens straight into a first-run "add your first folder" screen.
 The UI is a Lit + `avosignals` app built with Vite (`src/client/`,
 bundled to `dist/client/`) — `npm run build` builds it (along with the
 server); `npm start` does **not** rebuild it, so run `npm run build`
@@ -133,10 +133,10 @@ memory/skill sources. Override that with one of:
   Paths are resolved relative to the working directory. If no
   `skill_sources`/`memory_sources` key is present, each defaults to the
   example above only when that directory already exists on disk;
-  otherwise the server starts with zero roots and the UI's first-run
+  otherwise the server starts with zero folders and the UI's first-run
   screen offers to add one.
 
-  **Multiple roots** (e.g. a personal skills folder plus a shared company
+  **Multiple folders** (e.g. a personal skills folder plus a shared company
   repo) are supported — give each source a name instead of a bare path:
 
   ```json
@@ -149,11 +149,11 @@ memory/skill sources. Override that with one of:
   ```
 
   Bare-string and `{name, path}` entries can be mixed in the same array.
-  With a single root of a kind, `skill_create`/`memory_create`/etc. work
-  exactly as before. Once 2+ roots exist, those tools require an explicit
-  `root` argument (and `skill_list`/`memory_list` gain an optional `root`
-  filter) — every list/get response also includes which `root` each item
-  came from. Roots can be added or removed at runtime through the web UI
+  With a single folder of a kind, `skill_create`/`memory_create`/etc. work
+  exactly as before. Once 2+ folders exist, those tools require an explicit
+  `folder` argument (and `skill_list`/`memory_list` gain an optional `folder`
+  filter) — every list/get response also includes which `folder` each item
+  came from. Folders can be added or removed at runtime through the web UI
   without a restart; adding one there also appends it to this config file.
 
 - the `MEMORY_BUCKET_DIR` environment variable, or the `--memory-dir <path>`

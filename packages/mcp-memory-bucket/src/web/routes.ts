@@ -6,7 +6,7 @@ import express from 'express';
 import matter from 'gray-matter';
 import type Database from 'better-sqlite3';
 import type { BucketConfig } from '../config.js';
-import { saveRoot, removeRoot as removeRootFromConfig, sanitizeRootName } from '../config.js';
+import { saveFolder, removeFolder as removeFolderFromConfig, sanitizeFolderName } from '../config.js';
 import type { SkillRepository } from '../skills/repository.js';
 import type { MemoryRepository } from '../memory/repository.js';
 import { initialScan, type TableSyncSpec } from '../store/sync.js';
@@ -23,7 +23,7 @@ interface EntryRow {
   owner: string | null;
   doc_type: string | null;
   key_type: string | null;
-  root: string;
+  folder: string;
   mtime_ms: number;
   deprecated: boolean;
   paused: boolean;
@@ -48,7 +48,7 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
   const owners = asArray(req.query.owner);
   const docTypes = asArray(req.query.doc_type);
   const keyTypes = asArray(req.query.key_type);
-  const roots = asArray(req.query.root);
+  const folders = asArray(req.query.folder);
   const q = (req.query.q as string | undefined)?.trim();
   const deprecatedParam = req.query.deprecated as string | undefined;
   const deprecated = deprecatedParam === '0' || deprecatedParam === '1' ? deprecatedParam : undefined;
@@ -77,7 +77,7 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
       ...queryTable(
         db,
         'skills',
-        { tags, statuses, owners, docTypes: [], keyTypes: [], roots, deprecated, paused },
+        { tags, statuses, owners, docTypes: [], keyTypes: [], folders, deprecated, paused },
         intersectIds(matchedIds?.skills, dateIds?.skills)
       )
     );
@@ -87,7 +87,7 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
       ...queryTable(
         db,
         'memory_docs',
-        { tags, statuses, owners: [], docTypes, keyTypes, roots, deprecated, paused },
+        { tags, statuses, owners: [], docTypes, keyTypes, folders, deprecated, paused },
         intersectIds(matchedIds?.memory_docs, dateIds?.memory_docs)
       )
     );
@@ -118,7 +118,7 @@ function queryTable(
     owners: string[];
     docTypes: string[];
     keyTypes: string[];
-    roots: string[];
+    folders: string[];
     deprecated?: string;
     paused?: string;
   },
@@ -149,9 +149,9 @@ function queryTable(
     where += ` AND key_type IN (${filters.keyTypes.map(() => '?').join(', ')})`;
     params.push(...filters.keyTypes);
   }
-  if (filters.roots.length > 0) {
-    where += ` AND root IN (${filters.roots.map(() => '?').join(', ')})`;
-    params.push(...filters.roots);
+  if (filters.folders.length > 0) {
+    where += ` AND folder IN (${filters.folders.map(() => '?').join(', ')})`;
+    params.push(...filters.folders);
   }
   if (filters.deprecated !== undefined) {
     where += ` AND deprecated = ?`;
@@ -168,14 +168,14 @@ function queryTable(
 
   if (table === 'skills') {
     const rows = db
-      .prepare(`SELECT id, description, owner, status, tags, root, mtime_ms, deprecated, paused, created_at FROM skills WHERE ${where}`)
+      .prepare(`SELECT id, description, owner, status, tags, folder, mtime_ms, deprecated, paused, created_at FROM skills WHERE ${where}`)
       .all(...params) as Array<{
       id: string;
       description: string;
       owner: string | null;
       status: string;
       tags: string;
-      root: string;
+      folder: string;
       mtime_ms: number;
       deprecated: number;
       paused: number;
@@ -191,7 +191,7 @@ function queryTable(
       owner: r.owner,
       doc_type: null,
       key_type: null,
-      root: r.root,
+      folder: r.folder,
       mtime_ms: r.mtime_ms,
       deprecated: !!r.deprecated,
       paused: !!r.paused,
@@ -201,7 +201,7 @@ function queryTable(
 
   const rows = db
     .prepare(
-      `SELECT id, key, description, doc_type, key_type, status, tags, root, mtime_ms, deprecated, paused, created_at FROM memory_docs WHERE ${where}`
+      `SELECT id, key, description, doc_type, key_type, status, tags, folder, mtime_ms, deprecated, paused, created_at FROM memory_docs WHERE ${where}`
     )
     .all(...params) as Array<{
     id: string;
@@ -211,7 +211,7 @@ function queryTable(
     key_type: string;
     status: string;
     tags: string;
-    root: string;
+    folder: string;
     mtime_ms: number;
     deprecated: number;
     paused: number;
@@ -227,7 +227,7 @@ function queryTable(
     owner: null,
     doc_type: r.doc_type,
     key_type: r.key_type,
-    root: r.root,
+    folder: r.folder,
     mtime_ms: r.mtime_ms,
     deprecated: !!r.deprecated,
     paused: !!r.paused,
@@ -294,36 +294,36 @@ function buildFacets(db: Database.Database, type: EntryType) {
   const owners = new Set<string>();
   const docTypes = new Set<string>();
   const keyTypes = new Set<string>();
-  const roots = new Set<string>();
+  const folders = new Set<string>();
 
   if (type === 'skill' || type === 'all') {
-    const rows = db.prepare(`SELECT tags, status, owner, root FROM skills`).all() as Array<{
+    const rows = db.prepare(`SELECT tags, status, owner, folder FROM skills`).all() as Array<{
       tags: string;
       status: string;
       owner: string | null;
-      root: string;
+      folder: string;
     }>;
     for (const r of rows) {
       (JSON.parse(r.tags) as string[]).forEach((t) => tags.add(t));
       statuses.add(r.status);
       if (r.owner) owners.add(r.owner);
-      if (r.root) roots.add(r.root);
+      if (r.folder) folders.add(r.folder);
     }
   }
   if (type === 'memory' || type === 'all') {
-    const rows = db.prepare(`SELECT tags, status, doc_type, key_type, root FROM memory_docs`).all() as Array<{
+    const rows = db.prepare(`SELECT tags, status, doc_type, key_type, folder FROM memory_docs`).all() as Array<{
       tags: string;
       status: string;
       doc_type: string;
       key_type: string;
-      root: string;
+      folder: string;
     }>;
     for (const r of rows) {
       (JSON.parse(r.tags) as string[]).forEach((t) => tags.add(t));
       statuses.add(r.status);
       docTypes.add(r.doc_type);
       keyTypes.add(r.key_type);
-      if (r.root) roots.add(r.root);
+      if (r.folder) folders.add(r.folder);
     }
   }
 
@@ -333,7 +333,7 @@ function buildFacets(db: Database.Database, type: EntryType) {
     owners: [...owners].sort(),
     doc_types: [...docTypes].sort(),
     key_types: [...keyTypes].sort(),
-    roots: [...roots].sort(),
+    folders: [...folders].sort(),
   };
 }
 
@@ -626,14 +626,14 @@ export function buildWebRouter(
     res.json(buildHealth(db));
   });
 
-  router.get('/api/roots', (_req: Request, res: Response) => {
+  router.get('/api/folders', (_req: Request, res: Response) => {
     res.json({
-      skill: skillRepo.listRoots().map((r) => ({ ...r, kind: 'skill' as const })),
-      memory: memoryRepo.listRoots().map((r) => ({ ...r, kind: 'memory' as const })),
+      skill: skillRepo.listFolders().map((f) => ({ ...f, kind: 'skill' as const })),
+      memory: memoryRepo.listFolders().map((f) => ({ ...f, kind: 'memory' as const })),
     });
   });
 
-  router.post('/api/roots', (req: Request, res: Response) => {
+  router.post('/api/folders', (req: Request, res: Response) => {
     const { kind, name, path: dirPath } = req.body as { kind?: string; name?: string; path?: string };
     if (kind !== 'skill' && kind !== 'memory') {
       res.status(400).json({ error: 'kind must be "skill" or "memory"' });
@@ -647,36 +647,36 @@ export function buildWebRouter(
       res.status(400).json({ error: `not a directory: ${dirPath}` });
       return;
     }
-    const rootName = sanitizeRootName(name || path.basename(dirPath));
-    if (!rootName) {
-      res.status(400).json({ error: 'could not derive a valid root name — provide one explicitly' });
+    const folderName = sanitizeFolderName(name || path.basename(dirPath));
+    if (!folderName) {
+      res.status(400).json({ error: 'could not derive a valid folder name — provide one explicitly' });
       return;
     }
 
     const repo = kind === 'skill' ? skillRepo : memoryRepo;
     try {
-      repo.addRoot({ name: rootName, path: dirPath });
-      saveRoot(config, kind, { name: rootName, path: dirPath });
-      res.json({ name: rootName, path: dirPath, kind });
+      repo.addFolder({ name: folderName, path: dirPath });
+      saveFolder(config, kind, { name: folderName, path: dirPath });
+      res.json({ name: folderName, path: dirPath, kind });
     } catch (err) {
       res.status(409).json({ error: (err as Error).message });
     }
   });
 
-  router.delete('/api/roots/:kind/:name', (req: Request, res: Response) => {
+  router.delete('/api/folders/:kind/:name', (req: Request, res: Response) => {
     const { kind, name } = req.params;
     if (kind !== 'skill' && kind !== 'memory') {
       res.status(400).json({ error: 'kind must be "skill" or "memory"' });
       return;
     }
     if (!name) {
-      res.status(400).json({ error: 'root name is required' });
+      res.status(400).json({ error: 'folder name is required' });
       return;
     }
     const repo = kind === 'skill' ? skillRepo : memoryRepo;
     try {
-      repo.removeRoot(name);
-      removeRootFromConfig(config, kind, name);
+      repo.removeFolder(name);
+      removeFolderFromConfig(config, kind, name);
       res.json({ removed: name, kind });
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });

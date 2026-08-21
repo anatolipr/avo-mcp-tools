@@ -129,7 +129,7 @@ export interface CombinedSearchHit {
   ref_table: 'skills' | 'memory_docs';
   id: string; // skill name, or memory doc id
   description: string;
-  root: string;
+  folder: string;
   snippet: string;
   score: number;
 }
@@ -146,7 +146,7 @@ export function searchCombined(db: Database.Database, query: string, limit = 20,
       .prepare(
         `SELECT ref_table, ref_id AS id,
                 COALESCE(s.description, m.description) AS description,
-                COALESCE(s.root, m.root) AS root,
+                COALESCE(s.folder, m.folder) AS folder,
                 snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
                 -bm25(search_index) AS score
          FROM search_index

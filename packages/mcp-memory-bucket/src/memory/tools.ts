@@ -10,9 +10,9 @@ const AUTHORING_SKILL_HINT =
   "Before your first call in a session, run skill_get(\"memory-bucket-authoring\") to learn the exact frontmatter schema and conventions — don't guess the shape.";
 
 export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): void {
-  const roots = repo.listRoots();
-  const multiRoot = roots.length > 1;
-  const rootNames = roots.map((r) => r.name).join(', ');
+  const folders = repo.listFolders();
+  const multiFolder = folders.length > 1;
+  const folderNames = folders.map((f) => f.name).join(', ');
 
   mcp.tool(
     'memory_get',
@@ -56,14 +56,14 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       doc_type: z.enum(MEMORY_DOC_TYPES).optional(),
       status: statusSchema(MEMORY_STATUS_DEFAULTS).optional(),
       tag: z.string().optional(),
-      ...(multiRoot ? { root: z.string().optional().describe(`filter to one root: ${rootNames}`) } : {}),
+      ...(multiFolder ? { folder: z.string().optional().describe(`filter to one folder: ${folderNames}`) } : {}),
       limit: z.number().int().positive().max(100).optional(),
       offset: z.number().int().nonnegative().optional(),
       include_paused: z.boolean().optional().describe('include paused docs, which are hidden by default (see memory_set_paused)'),
     },
-    async ({ query, doc_type, status, tag, root, limit, offset, include_paused }: any) => {
+    async ({ query, doc_type, status, tag, folder, limit, offset, include_paused }: any) => {
       try {
-        const hits = repo.search(query, { docType: doc_type, status, tag, root, limit, offset, includePaused: include_paused });
+        const hits = repo.search(query, { docType: doc_type, status, tag, folder, limit, offset, includePaused: include_paused });
         return { content: [{ type: 'text', text: JSON.stringify(hits, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -90,7 +90,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
 
   mcp.tool(
     'memory_create',
-    `Writes a new memory doc (plan, spec, SQL, testing notes, discovery, etc.) into the memory root under the given key. ${AUTHORING_SKILL_HINT}`,
+    `Writes a new memory doc (plan, spec, SQL, testing notes, discovery, etc.) into the memory folder under the given key. ${AUTHORING_SKILL_HINT}`,
     {
       key: z.string().describe('lookup handle — ticket ID or free-form name; normalized on write'),
       key_type: z.enum(MEMORY_KEY_TYPES),
@@ -100,12 +100,12 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       tags: z.array(z.string()).optional(),
       status: statusSchema(MEMORY_STATUS_DEFAULTS).optional().describe('defaults to "active"'),
       related_to: z.string().optional().describe('id of a related doc, e.g. a spec linking to its plan'),
-      folder: z.string().optional().describe('optional subdirectory under the memory root'),
-      ...(multiRoot ? { root: z.string().describe(`which configured memory root to write into: ${rootNames}`) } : {}),
+      subfolder: z.string().optional().describe('optional subdirectory under the memory folder'),
+      ...(multiFolder ? { folder: z.string().describe(`which configured memory folder to write into: ${folderNames}`) } : {}),
     },
-    async ({ key, key_type, doc_type, description, body, tags, status, related_to, folder, root }: any) => {
+    async ({ key, key_type, doc_type, description, body, tags, status, related_to, subfolder, folder }: any) => {
       try {
-        const doc = repo.create({ key, key_type, doc_type, description, body, tags, status, related_to, folder, root });
+        const doc = repo.create({ key, key_type, doc_type, description, body, tags, status, related_to, subfolder, folder });
         return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -122,8 +122,8 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
     tags: z.array(z.string()).optional(),
     status: statusSchema(MEMORY_STATUS_DEFAULTS).optional().describe('defaults to "active"'),
     related_to: z.string().optional(),
-    folder: z.string().optional(),
-    ...(multiRoot ? { root: z.string().describe(`which configured memory root to write into: ${rootNames}`) } : {}),
+    subfolder: z.string().optional(),
+    ...(multiFolder ? { folder: z.string().describe(`which configured memory folder to write into: ${folderNames}`) } : {}),
   });
 
   mcp.tool(
@@ -206,9 +206,9 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       key: z.string().optional(),
       description: z.string().optional(),
       tags: z.array(z.string()).optional(),
-      ...(multiRoot ? { root: z.string().optional().describe(`which configured memory root to write into: ${rootNames}`) } : {}),
+      ...(multiFolder ? { folder: z.string().optional().describe(`which configured memory folder to write into: ${folderNames}`) } : {}),
     },
-    async ({ summary, key, description, tags, root }: any) => {
+    async ({ summary, key, description, tags, folder }: any) => {
       if (!key || !description) {
         const missing = [!key && 'key', !description && 'description'].filter(Boolean).join(' and ');
         return {
@@ -229,7 +229,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
           description,
           body: summary,
           tags,
-          root,
+          folder,
         });
         return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
       } catch (err) {

@@ -31,7 +31,7 @@ export interface SkillFrontmatter {
   deprecated?: boolean; // independent of metadata.status; defaults to false
   created_at?: string; // ISO date string, stamped once at create() time; absent on files predating this field
   source_path: string; // filled in at runtime, not authored — path to the SKILL.md file
-  root: string; // filled in at runtime, not authored — name of the configured root this file lives under
+  folder: string; // filled in at runtime, not authored — name of the configured folder this file lives under
 }
 
 // `paused` lives only in the SQLite cache (see SkillRepository#setPaused) — it is deliberately
@@ -63,7 +63,7 @@ export interface MemoryFrontmatter {
   deprecated?: boolean; // independent of status; defaults to false
   created_at?: string; // ISO date string, stamped once at create() time; absent on docs predating this field
   source_path: string;
-  root: string;
+  folder: string;
 }
 
 // `paused` lives only in the SQLite cache (see MemoryRepository#setPaused) — it is deliberately

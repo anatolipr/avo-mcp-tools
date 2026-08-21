@@ -16,14 +16,14 @@ function formatAge(createdAt: string | null): string {
 export class ResultList extends LitElement {
   static properties = {
     results: { attribute: false },
-    showRoot: { attribute: false },
+    showFolder: { attribute: false },
     onSelect: { attribute: false },
     selectedIds: { attribute: false },
     onToggleSelect: { attribute: false },
   };
 
   declare results: Entry[];
-  declare showRoot: boolean;
+  declare showFolder: boolean;
   declare onSelect: (entry: Entry) => void;
   declare selectedIds: Set<string>;
   declare onToggleSelect: (entry: Entry) => void;
@@ -53,7 +53,7 @@ export class ResultList extends LitElement {
     .tags { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
     .tag { font-size: 10px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 6px; }
     .type-badge { font-size: 10px; text-transform: uppercase; opacity: 0.6; }
-    .root-badge {
+    .folder-badge {
       font-size: 10px; text-transform: uppercase; opacity: 0.9; border: 1px solid var(--purple);
       color: var(--purple-fg); background: var(--purple-tint); border-radius: 4px; padding: 0 4px;
     }
@@ -75,7 +75,7 @@ export class ResultList extends LitElement {
     return html`
       <div class="count-header">${this.results.length} result${this.results.length === 1 ? '' : 's'}</div>
       ${this.results.map((r) => {
-        const isBuiltin = r._table === 'skills' && r.root === 'builtin';
+        const isBuiltin = r._table === 'skills' && r.folder === 'builtin';
         return html`
           <div class="row ${r.deprecated ? 'deprecated' : ''} ${r.paused ? 'paused' : ''}" @click=${() => this.onSelect(r)}>
             <input
@@ -97,7 +97,7 @@ export class ResultList extends LitElement {
               <div class="desc">${r.description}</div>
               <div class="tags">
                 <span class="type-badge">${r._table === 'skills' ? 'skill' : 'memory'}</span>
-                ${this.showRoot && r.root ? html`<span class="root-badge">${r.root}</span>` : ''}
+                ${this.showFolder && r.folder ? html`<span class="folder-badge">📁 ${r.folder}</span>` : ''}
                 ${r.deprecated ? html`<span class="deprecated-badge">deprecated</span>` : ''}
                 ${r.paused ? html`<span class="paused-badge">paused</span>` : ''}
                 ${r.tags.map((t) => html`<span class="tag">${t}</span>`)}

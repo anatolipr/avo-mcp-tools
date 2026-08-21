@@ -12,13 +12,13 @@ import { registerSkillTools } from './skills/tools.js';
 import { registerMemoryTools } from './memory/tools.js';
 import { registerRelocateTool } from './shared/relocate-tool.js';
 import { registerSearchTool } from './shared/search-tool.js';
-import { registerBucketRootTools } from './shared/bucket-root-tool.js';
+import { registerBucketFolderTools } from './shared/bucket-folder-tool.js';
 import { buildWebRouter } from './web/routes.js';
 import { registerUiTool } from './web/ui-tool.js';
 
 // server.ts is rebuilt from `buildMcpServer()` on every /mcp request (see below),
-// so tool schemas (which conditionally include `root` based on root count) always
-// reflect the current roots — no restart needed after an add/remove-root call.
+// so tool schemas (which conditionally include `folder` based on folder count) always
+// reflect the current folders — no restart needed after an add/remove-folder call.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // __dirname is <pkg>/src when run via tsx (dev/test) and <pkg>/dist/src once
@@ -37,22 +37,22 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 8767;
 const config = loadConfig();
 const db = openCache(config.cacheDbPath);
 
-const skillSpec = skillSyncSpec([{ name: 'builtin', path: builtinSkillsDir }, ...config.skillRoots]);
-const memorySpec = memorySyncSpec(config.memoryRoots);
+const skillSpec = skillSyncSpec([{ name: 'builtin', path: builtinSkillsDir }, ...config.skillFolders]);
+const memorySpec = memorySyncSpec(config.memoryFolders);
 
 initialScan(db, skillSpec);
 initialScan(db, memorySpec);
 const skillWatcher = watchSources(db, skillSpec);
 const memoryWatcher = watchSources(db, memorySpec);
 
-const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: builtinSkillsDir }, ...config.skillRoots]);
-const memoryRepo = new MemoryRepository(db, config.memoryRoots);
+const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: builtinSkillsDir }, ...config.skillFolders]);
+const memoryRepo = new MemoryRepository(db, config.memoryFolders);
 skillRepo.setWatcher(skillWatcher);
 memoryRepo.setWatcher(memoryWatcher);
 
-if (config.skillRoots.length === 0 && config.memoryRoots.length === 0) {
+if (config.skillFolders.length === 0 && config.memoryFolders.length === 0) {
   console.error(
-    `[memory-bucket] no roots configured — open http://localhost:${PORT} to add one`
+    `[memory-bucket] no folders configured — open http://localhost:${PORT} to add one`
   );
 }
 
@@ -62,7 +62,7 @@ if (config.skillRoots.length === 0 && config.memoryRoots.length === 0) {
 // clients that expose either to the model can make that association.
 const SERVER_DESCRIPTION =
   'Also known as "memory bucket", "mem bucket", or "skill bucket" — if the user refers to this server by any of those names, they mean this one.';
-const SERVER_INSTRUCTIONS = `${SERVER_DESCRIPTION} Exposes skill_* (reusable coding patterns, stored as agentskills.io-standard SKILL.md folders) and memory_* (point-in-time working context — plans, specs, SQL, session summaries — looked up by key) tools, plus shared relocate/bucket_search/bucket_*_root tools. Use skill_search/memory_search/bucket_search for full-text search over body content (not just metadata) — bucket_search when you don't know which bucket something landed in. Use bucket_list_roots to see what named source directories (roots) are configured before passing a root argument elsewhere, and bucket_create_root/bucket_delete_root to register or unregister one. Most operations have a _bulk_ variant (bulk_get/bulk_create/bulk_update/bulk_delete/bulk_rename, relocate_bulk) that take a list and return per-item success/failure — prefer these over looping single calls when acting on more than one item. A memory doc's key can be changed in place via memory_update(id, key: ...) — no separate rename tool needed. Before calling any *_create/*_update/relocate tool, call skill_get("memory-bucket-authoring") first to learn the exact frontmatter schema — don't guess the shape.`;
+const SERVER_INSTRUCTIONS = `${SERVER_DESCRIPTION} Exposes skill_* (reusable coding patterns, stored as agentskills.io-standard SKILL.md folders) and memory_* (point-in-time working context — plans, specs, SQL, session summaries — looked up by key) tools, plus shared relocate/bucket_search/bucket_*_folder tools. Use skill_search/memory_search/bucket_search for full-text search over body content (not just metadata) — bucket_search when you don't know which bucket something landed in. Use bucket_list_folders to see what named source directories (folders) are configured before passing a folder argument elsewhere, and bucket_create_folder/bucket_delete_folder to register or unregister one. Most operations have a _bulk_ variant (bulk_get/bulk_create/bulk_update/bulk_delete/bulk_rename, relocate_bulk) that take a list and return per-item success/failure — prefer these over looping single calls when acting on more than one item. A memory doc's key can be changed in place via memory_update(id, key: ...) — no separate rename tool needed. Before calling any *_create/*_update/relocate tool, call skill_get("memory-bucket-authoring") first to learn the exact frontmatter schema — don't guess the shape.`;
 
 function buildMcpServer(): McpServer {
   const server = new McpServer(
@@ -73,7 +73,7 @@ function buildMcpServer(): McpServer {
   registerMemoryTools(server, memoryRepo);
   registerRelocateTool(server, skillRepo, memoryRepo);
   registerSearchTool(server, db);
-  registerBucketRootTools(server, config, skillRepo, memoryRepo, db, skillSpec, memorySpec);
+  registerBucketFolderTools(server, config, skillRepo, memoryRepo, db, skillSpec, memorySpec);
   registerUiTool(server, PORT);
   return server;
 }
@@ -110,8 +110,8 @@ app.delete('/mcp', methodNotAllowed);
 app.listen(PORT, () => {
   console.error(`[memory-bucket] MCP server listening on http://localhost:${PORT}/mcp`);
   console.error(`[memory-bucket] UI available at http://localhost:${PORT}`);
-  console.error(`[memory-bucket] skill roots: ${config.skillRoots.map((r) => `${r.name}=${r.path}`).join(', ') || '(none)'}`);
-  console.error(`[memory-bucket] memory roots: ${config.memoryRoots.map((r) => `${r.name}=${r.path}`).join(', ') || '(none)'}`);
+  console.error(`[memory-bucket] skill folders: ${config.skillFolders.map((f) => `${f.name}=${f.path}`).join(', ') || '(none)'}`);
+  console.error(`[memory-bucket] memory folders: ${config.memoryFolders.map((f) => `${f.name}=${f.path}`).join(', ') || '(none)'}`);
 });
 
 process.on('SIGINT', () => {

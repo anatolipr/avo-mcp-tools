@@ -14,7 +14,7 @@ export function openCache(dbPath: string): Database.Database {
       trigger_phrases TEXT NOT NULL,  -- JSON array
       extends TEXT,
       source_path TEXT NOT NULL UNIQUE, -- path to SKILL.md
-      root TEXT NOT NULL DEFAULT '',  -- name of the configured root this file lives under
+      folder TEXT NOT NULL DEFAULT '',  -- name of the configured folder this file lives under
       deprecated INTEGER NOT NULL DEFAULT 0,
       paused INTEGER NOT NULL DEFAULT 0, -- local-only: never synced from/to SKILL.md, cache-file scoped
       created_at TEXT,
@@ -32,7 +32,7 @@ export function openCache(dbPath: string): Database.Database {
       status TEXT NOT NULL,
       related_to TEXT,
       source_path TEXT NOT NULL UNIQUE,
-      root TEXT NOT NULL DEFAULT '',  -- name of the configured root this file lives under
+      folder TEXT NOT NULL DEFAULT '',  -- name of the configured folder this file lives under
       deprecated INTEGER NOT NULL DEFAULT 0,
       paused INTEGER NOT NULL DEFAULT 0, -- local-only: never synced from/to the doc's markdown file, cache-file scoped
       created_at TEXT,
@@ -62,13 +62,13 @@ export function openCache(dbPath: string): Database.Database {
   `);
 
   ensureColumns(db, 'skills', [
-    ['root', "TEXT NOT NULL DEFAULT ''"],
+    ['folder', "TEXT NOT NULL DEFAULT ''"],
     ['deprecated', 'INTEGER NOT NULL DEFAULT 0'],
     ['paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['created_at', 'TEXT'],
   ]);
   ensureColumns(db, 'memory_docs', [
-    ['root', "TEXT NOT NULL DEFAULT ''"],
+    ['folder', "TEXT NOT NULL DEFAULT ''"],
     ['deprecated', 'INTEGER NOT NULL DEFAULT 0'],
     ['paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['created_at', 'TEXT'],

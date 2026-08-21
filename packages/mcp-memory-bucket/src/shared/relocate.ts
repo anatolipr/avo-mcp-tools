@@ -68,8 +68,8 @@ export interface RelocateOptions {
     doc_type?: MemoryDocType;
     tags?: string[];
     status?: SkillStatus | MemoryStatus;
+    subfolder?: string;
     folder?: string;
-    root?: string;
   };
 }
 
@@ -109,8 +109,8 @@ export function relocate(
         extends: null,
       },
       body,
-      opts.overrides?.folder,
-      opts.overrides?.root
+      opts.overrides?.subfolder,
+      opts.overrides?.folder
     );
 
     if (!opts.keep_original) fs.unlinkSync(opts.path);
@@ -143,8 +143,8 @@ export function relocate(
     description,
     body,
     tags: opts.overrides?.tags,
+    subfolder: opts.overrides?.subfolder,
     folder: opts.overrides?.folder,
-    root: opts.overrides?.root,
   });
 
   if (!opts.keep_original) fs.unlinkSync(opts.path);

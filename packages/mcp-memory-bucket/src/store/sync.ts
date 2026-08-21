@@ -8,14 +8,14 @@ import { extractDates, toLocalDate } from './date-extract.js';
 import { slugify } from './slug.js';
 import { normalizeKey } from '../types.js';
 import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
-import type { NamedRoot } from '../config.js';
+import type { NamedFolder } from '../config.js';
 
 export interface TableSyncSpec<TFrontmatter> {
   table: 'skills' | 'memory_docs';
-  sources: NamedRoot[];
+  sources: NamedFolder[];
   /** Which files under `sources` count as this table's docs — skills only match SKILL.md, memory matches any .md. */
   matchesFile: (filePath: string) => boolean;
-  columns: string[]; // column names in insert order, excluding body/mtime_ms/source_path/root
+  columns: string[]; // column names in insert order, excluding body/mtime_ms/source_path/folder
   getId: (fm: TFrontmatter) => string | undefined;
   // `mtimeMs` (last-modified time, see readMarkdownFile) is used as a created_at fallback for
   // docs/skills that predate that frontmatter field. Deliberately mtime, not birthtime: birthtime
@@ -38,7 +38,7 @@ export interface TableSyncSpec<TFrontmatter> {
 const skillColumns = ['id', 'description', 'owner', 'status', 'tags', 'trigger_phrases', 'extends', 'deprecated', 'created_at'];
 const memoryColumns = ['id', 'key', 'key_type', 'description', 'doc_type', 'tags', 'status', 'related_to', 'deprecated', 'created_at'];
 
-export function skillSyncSpec(sources: NamedRoot[]): TableSyncSpec<SkillFrontmatter> {
+export function skillSyncSpec(sources: NamedFolder[]): TableSyncSpec<SkillFrontmatter> {
   return {
     table: 'skills',
     sources,
@@ -59,7 +59,7 @@ export function skillSyncSpec(sources: NamedRoot[]): TableSyncSpec<SkillFrontmat
   };
 }
 
-export function memorySyncSpec(sources: NamedRoot[]): TableSyncSpec<MemoryFrontmatter> {
+export function memorySyncSpec(sources: NamedFolder[]): TableSyncSpec<MemoryFrontmatter> {
   return {
     table: 'memory_docs',
     sources,
@@ -103,14 +103,14 @@ export function memorySyncSpec(sources: NamedRoot[]): TableSyncSpec<MemoryFrontm
  * synchronously right after their own writes — the watcher's own event for
  * that same write becomes a harmless no-op re-check once mtime matches.
  */
-/** Which configured root a file lives under, by longest matching path prefix. */
-function rootForFile(sources: NamedRoot[], filePath: string): string {
+/** Which configured folder a file lives under, by longest matching path prefix. */
+function folderForFile(sources: NamedFolder[], filePath: string): string {
   const resolved = path.resolve(filePath);
-  let best: NamedRoot | undefined;
-  for (const root of sources) {
-    const rootPath = path.resolve(root.path);
-    if (resolved === rootPath || resolved.startsWith(rootPath + path.sep)) {
-      if (!best || rootPath.length > path.resolve(best.path).length) best = root;
+  let best: NamedFolder | undefined;
+  for (const folder of sources) {
+    const folderPath = path.resolve(folder.path);
+    if (resolved === folderPath || resolved.startsWith(folderPath + path.sep)) {
+      if (!best || folderPath.length > path.resolve(best.path).length) best = folder;
     }
   }
   return best?.name ?? '';
@@ -139,9 +139,9 @@ export function upsertFile<TFrontmatter>(
   }
 
   const row = spec.toRow(frontmatter, filePath, parsed.mtimeMs);
-  const root = rootForFile(spec.sources, filePath);
-  const cols = [...spec.columns, 'source_path', 'root', 'body', 'mtime_ms'];
-  const values = [...spec.columns.map((c) => row[c]), filePath, root, parsed.body, parsed.mtimeMs];
+  const folder = folderForFile(spec.sources, filePath);
+  const cols = [...spec.columns, 'source_path', 'folder', 'body', 'mtime_ms'];
+  const values = [...spec.columns.map((c) => row[c]), filePath, folder, parsed.body, parsed.mtimeMs];
   const placeholders = cols.map(() => '?').join(', ');
   const updateClause = cols
     .filter((c) => c !== 'id')
@@ -183,9 +183,9 @@ export function removeFile(db: Database.Database, table: 'skills' | 'memory_docs
 
 /** Full scan of all configured source dirs — used once at startup before the watcher takes over. */
 export function initialScan<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): void {
-  for (const root of spec.sources) {
-    if (!fs.existsSync(root.path)) continue;
-    for (const file of walkMarkdownFiles(root.path)) {
+  for (const folder of spec.sources) {
+    if (!fs.existsSync(folder.path)) continue;
+    for (const file of walkMarkdownFiles(folder.path)) {
       if (!spec.matchesFile(file)) continue;
       try {
         upsertFile(db, spec, file);
@@ -196,8 +196,8 @@ export function initialScan<TFrontmatter>(db: Database.Database, spec: TableSync
   }
 }
 
-/** Full scan of a single dir — used when a new root is added live, after registering it in spec.sources. */
-export function scanSingleRoot<TFrontmatter>(
+/** Full scan of a single dir — used when a new folder is added live, after registering it in spec.sources. */
+export function scanSingleFolder<TFrontmatter>(
   db: Database.Database,
   spec: TableSyncSpec<TFrontmatter>,
   dirPath: string
@@ -213,10 +213,10 @@ export function scanSingleRoot<TFrontmatter>(
   }
 }
 
-/** Drops all cached rows (and search index entries) belonging to a removed root. Never touches files on disk. */
-export function unregisterRoot(db: Database.Database, table: 'skills' | 'memory_docs', rootName: string): void {
-  const rows = db.prepare(`SELECT id FROM ${table} WHERE root = ?`).all(rootName) as Array<{ id: string }>;
-  db.prepare(`DELETE FROM ${table} WHERE root = ?`).run(rootName);
+/** Drops all cached rows (and search index entries) belonging to a removed folder. Never touches files on disk. */
+export function unregisterFolder(db: Database.Database, table: 'skills' | 'memory_docs', folderName: string): void {
+  const rows = db.prepare(`SELECT id FROM ${table} WHERE folder = ?`).all(folderName) as Array<{ id: string }>;
+  db.prepare(`DELETE FROM ${table} WHERE folder = ?`).run(folderName);
   for (const row of rows) {
     db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(table, row.id);
   }
@@ -235,7 +235,7 @@ function* walkMarkdownFiles(dir: string): Generator<string> {
 
 export function watchSources<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): FSWatcher {
   const watcher = chokidar.watch(
-    spec.sources.map((r) => r.path),
+    spec.sources.map((f) => f.path),
     { ignoreInitial: true, persistent: true, depth: 10 }
   );
 

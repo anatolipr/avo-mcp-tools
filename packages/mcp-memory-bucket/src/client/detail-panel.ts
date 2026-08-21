@@ -81,7 +81,7 @@ export class DetailPanel extends LitElement {
     onChanged: { attribute: false },
     facets: { attribute: false },
     onTagClick: { attribute: false },
-    onRootClick: { attribute: false },
+    onFolderClick: { attribute: false },
     onDateClick: { attribute: false },
     _doc: { state: true },
     _viewMode: { state: true },
@@ -96,7 +96,7 @@ export class DetailPanel extends LitElement {
   declare onChanged: (() => void) | undefined;
   declare facets: Facets | undefined;
   declare onTagClick: ((tag: string) => void) | undefined;
-  declare onRootClick: ((root: string) => void) | undefined;
+  declare onFolderClick: ((folder: string) => void) | undefined;
   declare onDateClick: ((date: string) => void) | undefined;
   private _doc?: EntryDetail | null;
   private _viewMode: 'markdown' | 'raw' =
@@ -129,13 +129,13 @@ export class DetailPanel extends LitElement {
       color: inherit;
       font-family: inherit;
     }
-    .pill.root-pill {
+    .pill.folder-pill {
       cursor: pointer;
       color: var(--purple-fg);
       border-color: var(--purple);
       background: var(--purple-tint);
     }
-    .pill.root-pill:hover { background: var(--hover-strong); }
+    .pill.folder-pill:hover { background: var(--hover-strong); }
     .pill.tag-pill {
       cursor: pointer;
       background: var(--bg-subtle);
@@ -691,8 +691,8 @@ export class DetailPanel extends LitElement {
     return html`
       <div class="title-row">
         <h2>${d.name ?? d.key ?? d.id}</h2>
-        <button class="pill root-pill" title="Filter by root '${d.root}'" @click=${() => this.onRootClick?.(d.root)}>
-          ${d.root}
+        <button class="pill folder-pill" title="Filter by folder '${d.folder}'" @click=${() => this.onFolderClick?.(d.folder)}>
+          📁 ${d.folder}
         </button>
       </div>
     `;
@@ -771,7 +771,7 @@ export class DetailPanel extends LitElement {
     if (!this._doc) return nothing;
     const d = this._doc;
     const isSkill = this.selected.table === 'skills';
-    const isBuiltin = isSkill && d.root === 'builtin';
+    const isBuiltin = isSkill && d.folder === 'builtin';
     const bare = !isSkill && d.has_frontmatter === false;
 
     if (this._addingFrontmatter) return html`${this.#renderTitleRow(d)}${this.#renderDocTypePrompt()}`;

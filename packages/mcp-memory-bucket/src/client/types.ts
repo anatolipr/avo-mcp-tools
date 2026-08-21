@@ -8,7 +8,7 @@ export interface Entry {
   owner: string | null;
   doc_type: string | null;
   key_type: string | null;
-  root: string;
+  folder: string;
   mtime_ms: number;
   deprecated: boolean;
   paused: boolean;
@@ -30,7 +30,7 @@ export interface EntryDetail {
   owner?: string | null; // skills only
   body: string;
   source_path: string;
-  root: string;
+  folder: string;
   deprecated?: boolean;
   paused?: boolean;
   created_at?: string | null;
@@ -46,18 +46,18 @@ export interface Facets {
   owners: string[];
   doc_types: string[];
   key_types: string[];
-  roots: string[];
+  folders: string[];
 }
 
-export interface Root {
+export interface Folder {
   name: string;
   path: string;
   kind: 'skill' | 'memory';
 }
 
-export interface RootsResponse {
-  skill: Root[];
-  memory: Root[];
+export interface FoldersResponse {
+  skill: Folder[];
+  memory: Folder[];
 }
 
 export interface Selection {

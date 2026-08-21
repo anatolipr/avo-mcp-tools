@@ -3,9 +3,9 @@ import { Signal, Computed, SignalWatcher } from 'avosignals';
 
 import './result-list.js';
 import './detail-panel.js';
-import './add-root-modal.js';
+import './add-folder-modal.js';
 import './tag-multiselect.js';
-import type { Entry, Facets, Selection, TypeFilter, RootsResponse, Root } from './types.js';
+import type { Entry, Facets, Selection, TypeFilter, FoldersResponse, Folder } from './types.js';
 
 const TYPE_OPTIONS: Array<{ value: TypeFilter; label: string }> = [
   { value: 'all', label: 'All' },
@@ -21,8 +21,8 @@ const TRISTATE_OPTIONS: Array<{ value: TriState; label: string }> = [
   { value: 'only', label: 'Only' },
 ];
 
-const EMPTY_FACETS: Facets = { tags: [], statuses: [], owners: [], doc_types: [], key_types: [], roots: [] };
-const EMPTY_ROOTS: RootsResponse = { skill: [], memory: [] };
+const EMPTY_FACETS: Facets = { tags: [], statuses: [], owners: [], doc_types: [], key_types: [], folders: [] };
+const EMPTY_FOLDERS: FoldersResponse = { skill: [], memory: [] };
 
 const SPLIT_STORAGE_KEY = 'mem-bucket-split-pct';
 const SPLIT_MIN_PCT = 20;
@@ -53,7 +53,7 @@ interface FilterState {
   query: string;
   typeFilter: TypeFilter;
   activeTags: string[];
-  activeRoots: string[];
+  activeFolders: string[];
   sort: string;
   deprecatedFilter: TriState;
   pausedFilter: TriState;
@@ -72,8 +72,8 @@ function loadFilterState(): Partial<FilterState> {
   if (type === 'skill' || type === 'memory' || type === 'all') state.typeFilter = type;
   const tags = params.getAll('tag');
   if (tags.length) state.activeTags = tags;
-  const roots = params.getAll('root');
-  if (roots.length) state.activeRoots = roots;
+  const folders = params.getAll('folder');
+  if (folders.length) state.activeFolders = folders;
   const sort = params.get('sort');
   if (sort) state.sort = sort;
   const deprecated = params.get('deprecated');
@@ -237,7 +237,7 @@ export class MemBucketApp extends LitElement {
       left: -3px; right: -3px;
     }
     label.small { font-size: 12px; opacity: 0.7; }
-    .roots-bar {
+    .folders-bar {
       display: flex;
       gap: 6px;
       align-items: center;
@@ -246,20 +246,20 @@ export class MemBucketApp extends LitElement {
       border-bottom: 1px solid var(--border);
       background: var(--bg-subtle);
     }
-    .root-chip {
+    .folder-chip {
       border: 1px solid var(--border-strong); border-radius: 999px; padding: 3px 8px 3px 10px; font-size: 12px;
       cursor: pointer; background: none; color: inherit; display: inline-flex; align-items: center; gap: 6px;
     }
-    .root-chip.active { background: var(--purple-tint); border-color: var(--purple); color: var(--purple-fg); }
-    .root-chip .remove {
+    .folder-chip.active { background: var(--purple-tint); border-color: var(--purple); color: var(--purple-fg); }
+    .folder-chip .remove {
       opacity: 0.6; font-size: 12px; line-height: 1; padding: 2px; border-radius: 50%;
     }
-    .root-chip .remove:hover { opacity: 1; background: var(--hover-strong); }
-    .add-root-btn {
+    .folder-chip .remove:hover { opacity: 1; background: var(--hover-strong); }
+    .add-folder-btn {
       border: 1px dashed var(--border-strong); border-radius: 999px; padding: 3px 10px; font-size: 12px;
       cursor: pointer; background: none; color: inherit; opacity: 0.75;
     }
-    .add-root-btn:hover { opacity: 1; }
+    .add-folder-btn:hover { opacity: 1; }
     .first-run {
       display: flex; flex-direction: column; align-items: center; justify-content: center;
       flex: 1 1 auto; gap: 16px; text-align: center; padding: 24px;
@@ -301,14 +301,14 @@ export class MemBucketApp extends LitElement {
   #query = new Signal(this.#initialFilters.query ?? '');
   #typeFilter = new Signal<TypeFilter>(this.#initialFilters.typeFilter ?? 'all');
   #activeTags = new Signal<string[]>(this.#initialFilters.activeTags ?? []);
-  #activeRoots = new Signal<string[]>(this.#initialFilters.activeRoots ?? []);
+  #activeFolders = new Signal<string[]>(this.#initialFilters.activeFolders ?? []);
   #results = new Signal<Entry[]>([]);
   #facets = new Signal<Facets>(EMPTY_FACETS);
   #selected = new Signal<Selection | null>(null);
-  #roots = new Signal<RootsResponse>(EMPTY_ROOTS);
-  #showAddRoot = new Signal<boolean>(false);
-  #removingRoot = new Signal<string>('');
-  #rootsLoaded = new Signal<boolean>(false);
+  #folders = new Signal<FoldersResponse>(EMPTY_FOLDERS);
+  #showAddFolder = new Signal<boolean>(false);
+  #removingFolder = new Signal<string>('');
+  #foldersLoaded = new Signal<boolean>(false);
   #splitPct = new Signal<number>(loadSplitPct());
   #dragging = new Signal<boolean>(false);
   #sort = new Signal<string>(this.#initialFilters.sort ?? 'mtime_desc');
@@ -345,7 +345,7 @@ export class MemBucketApp extends LitElement {
     this.#reindexing.set(true);
     try {
       await fetch('/api/rebuild-cache', { method: 'POST' });
-      await Promise.all([this.#refetchRoots(), this.#refetchFacets(), this.#refetch()]);
+      await Promise.all([this.#refetchFolders(), this.#refetchFacets(), this.#refetch()]);
     } finally {
       this.#reindexing.set(false);
     }
@@ -378,7 +378,7 @@ export class MemBucketApp extends LitElement {
     if (this.#typeFilter.value !== 'all') params.set('type', this.#typeFilter.value);
     if (this.#query.value.trim()) params.set('q', this.#query.value.trim());
     for (const tag of this.#activeTags.value) params.append('tag', tag);
-    for (const root of this.#activeRoots.value) params.append('root', root);
+    for (const folder of this.#activeFolders.value) params.append('folder', folder);
     if (this.#sort.value !== 'mtime_desc') params.set('sort', this.#sort.value);
     if (this.#deprecatedFilter.value === 'hide') params.set('deprecated', '0');
     else if (this.#deprecatedFilter.value === 'only') params.set('deprecated', '1');
@@ -395,7 +395,7 @@ export class MemBucketApp extends LitElement {
     super.connectedCallback();
     this.#refetch();
     this.#refetchFacets();
-    this.#refetchRoots();
+    this.#refetchFolders();
     window.addEventListener('focus', this.#boundOnFocus);
     document.addEventListener('visibilitychange', this.#boundOnFocus);
   }
@@ -410,7 +410,7 @@ export class MemBucketApp extends LitElement {
     if (document.visibilityState !== 'visible') return;
     this.#refetch();
     this.#refetchFacets();
-    this.#refetchRoots();
+    this.#refetchFolders();
   }
 
   async #refetch() {
@@ -427,41 +427,41 @@ export class MemBucketApp extends LitElement {
     this.#facets.set((await res.json()) as Facets);
   }
 
-  async #refetchRoots() {
-    const res = await fetch('/api/roots');
-    this.#roots.set((await res.json()) as RootsResponse);
-    this.#rootsLoaded.set(true);
+  async #refetchFolders() {
+    const res = await fetch('/api/folders');
+    this.#folders.set((await res.json()) as FoldersResponse);
+    this.#foldersLoaded.set(true);
   }
 
-  #toggleRoot(name: string) {
-    const current = this.#activeRoots.value;
-    this.#activeRoots.set(current.includes(name) ? current.filter((r) => r !== name) : [...current, name]);
+  #toggleFolder(name: string) {
+    const current = this.#activeFolders.value;
+    this.#activeFolders.set(current.includes(name) ? current.filter((f) => f !== name) : [...current, name]);
     this.#refetch();
   }
 
-  async #removeRoot(root: Root, e: Event) {
+  async #removeFolder(folder: Folder, e: Event) {
     e.stopPropagation();
-    const confirmed = window.prompt(`Type "${root.name}" to remove this ${root.kind} root (files on disk are untouched):`);
-    if (confirmed !== root.name) return;
-    this.#removingRoot.set(root.name);
+    const confirmed = window.prompt(`Type "${folder.name}" to remove this ${folder.kind} folder (files on disk are untouched):`);
+    if (confirmed !== folder.name) return;
+    this.#removingFolder.set(folder.name);
     try {
-      await fetch(`/api/roots/${root.kind}/${encodeURIComponent(root.name)}`, { method: 'DELETE' });
-      this.#activeRoots.set(this.#activeRoots.value.filter((r) => r !== root.name));
-      await Promise.all([this.#refetchRoots(), this.#refetchFacets(), this.#refetch()]);
+      await fetch(`/api/folders/${folder.kind}/${encodeURIComponent(folder.name)}`, { method: 'DELETE' });
+      this.#activeFolders.set(this.#activeFolders.value.filter((f) => f !== folder.name));
+      await Promise.all([this.#refetchFolders(), this.#refetchFacets(), this.#refetch()]);
     } finally {
-      this.#removingRoot.set('');
+      this.#removingFolder.set('');
     }
   }
 
-  #onRootAdded() {
-    this.#showAddRoot.set(false);
-    this.#refetchRoots();
+  #onFolderAdded() {
+    this.#showAddFolder.set(false);
+    this.#refetchFolders();
     this.#refetchFacets();
     this.#refetch();
   }
 
-  #allRoots(): Root[] {
-    return [...this.#roots.value.skill, ...this.#roots.value.memory];
+  #allFolders(): Folder[] {
+    return [...this.#folders.value.skill, ...this.#folders.value.memory];
   }
 
   #setType(type: TypeFilter) {
@@ -477,15 +477,15 @@ export class MemBucketApp extends LitElement {
     this.#refetch();
   }
 
-  // Adds-only (never toggles off) — used when a tag/root pill in the detail panel is clicked as a
+  // Adds-only (never toggles off) — used when a tag/folder pill in the detail panel is clicked as a
   // shortcut to filter by it, which reads as "show me more like this," not an on/off control.
   #addTagFilter(tag: string) {
     if (!this.#activeTags.value.includes(tag)) this.#activeTags.set([...this.#activeTags.value, tag]);
     this.#refetch();
   }
 
-  #addRootFilter(name: string) {
-    if (!this.#activeRoots.value.includes(name)) this.#activeRoots.set([...this.#activeRoots.value, name]);
+  #addFolderFilter(name: string) {
+    if (!this.#activeFolders.value.includes(name)) this.#activeFolders.set([...this.#activeFolders.value, name]);
     this.#refetch();
   }
 
@@ -642,26 +642,26 @@ export class MemBucketApp extends LitElement {
 
   render() {
     const facets = this.#facets.value;
-    const allRoots = this.#allRoots();
+    const allFolders = this.#allFolders();
 
-    if (this.#rootsLoaded.value && allRoots.length === 0 && !this.#showAddRoot.value) {
+    if (this.#foldersLoaded.value && allFolders.length === 0 && !this.#showAddFolder.value) {
       return html`
         ${this.#renderThemeToggle()}
         <div class="first-run">
-          <h1>No roots configured yet</h1>
+          <h1>No folders configured yet</h1>
           <p>
-            Add a folder of skills or memory docs to get started. You can add more roots later —
+            Add a folder of skills or memory docs to get started. You can add more folders later —
             e.g. a personal skills repo plus a shared company repo.
           </p>
-          <button class="add-root-btn" @click=${() => this.#showAddRoot.set(true)}>+ Add your first root</button>
+          <button class="add-folder-btn" @click=${() => this.#showAddFolder.set(true)}>+ Add your first folder</button>
         </div>
-        ${this.#showAddRoot.value
-          ? html`<add-root-modal
+        ${this.#showAddFolder.value
+          ? html`<add-folder-modal
               .defaultKind=${'skill'}
               .lockKind=${false}
-              .onAdded=${() => this.#onRootAdded()}
-              .onCancel=${() => this.#showAddRoot.set(false)}
-            ></add-root-modal>`
+              .onAdded=${() => this.#onFolderAdded()}
+              .onCancel=${() => this.#showAddFolder.set(false)}
+            ></add-folder-modal>`
           : ''}
       `;
     }
@@ -669,26 +669,26 @@ export class MemBucketApp extends LitElement {
     return html`
       ${this.#renderReindexToggle()}
       ${this.#renderThemeToggle()}
-      <div class="roots-bar">
-        <span class="filter-label">Roots:</span>
-        ${allRoots.map(
-          (root) => html`
+      <div class="folders-bar">
+        <span class="filter-label">Folders:</span>
+        ${allFolders.map(
+          (folder) => html`
             <button
-              class="root-chip ${this.#activeRoots.value.includes(root.name) ? 'active' : ''}"
-              title=${root.path}
-              @click=${() => this.#toggleRoot(root.name)}
+              class="folder-chip ${this.#activeFolders.value.includes(folder.name) ? 'active' : ''}"
+              title=${folder.path}
+              @click=${() => this.#toggleFolder(folder.name)}
             >
-              ${root.name}
+              📁 ${folder.name}
               <span
                 class="remove"
-                title="Remove root"
-                @click=${(e: Event) => this.#removeRoot(root, e)}
-              >${this.#removingRoot.value === root.name ? '…' : '✕'}</span
+                title="Remove folder"
+                @click=${(e: Event) => this.#removeFolder(folder, e)}
+              >${this.#removingFolder.value === folder.name ? '…' : '✕'}</span
               >
             </button>
           `
         )}
-        <button class="add-root-btn" @click=${() => this.#showAddRoot.set(true)}>+ Add root</button>
+        <button class="add-folder-btn" @click=${() => this.#showAddFolder.set(true)}>+ Add folder</button>
       </div>
       <div class="filters">
         <div class="row search-row">
@@ -796,7 +796,7 @@ export class MemBucketApp extends LitElement {
         <result-list
           style=${`width: ${this.#splitPct.value}%; border-right: 1px solid var(--border);`}
           .results=${this.#results.value}
-          .showRoot=${allRoots.length > 1}
+          .showFolder=${allFolders.length > 1}
           .onSelect=${(e: Entry) => this.#onSelect(e)}
           .selectedIds=${this.#selectedIds.value}
           .onToggleSelect=${(e: Entry) => this.#onToggleSelect(e)}
@@ -813,17 +813,17 @@ export class MemBucketApp extends LitElement {
             this.#refetchFacets();
           }}
           .onTagClick=${(t: string) => this.#addTagFilter(t)}
-          .onRootClick=${(r: string) => this.#addRootFilter(r)}
+          .onFolderClick=${(f: string) => this.#addFolderFilter(f)}
           .onDateClick=${(d: string) => this.#setDateFilter(d)}
         ></detail-panel>
       </div>
-      ${this.#showAddRoot.value
-        ? html`<add-root-modal
+      ${this.#showAddFolder.value
+        ? html`<add-folder-modal
             .defaultKind=${'skill'}
             .lockKind=${false}
-            .onAdded=${() => this.#onRootAdded()}
-            .onCancel=${() => this.#showAddRoot.set(false)}
-          ></add-root-modal>`
+            .onAdded=${() => this.#onFolderAdded()}
+            .onCancel=${() => this.#showAddFolder.set(false)}
+          ></add-folder-modal>`
         : ''}
     `;
   }
