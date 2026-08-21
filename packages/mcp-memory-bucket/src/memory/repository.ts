@@ -7,10 +7,16 @@ import { writeMarkdownFile } from '../store/markdown-file.js';
 import { slugify } from '../store/slug.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, memorySyncSpec, type TableSyncSpec } from '../store/sync.js';
-import { SearchQueryError } from '../store/search.js';
+import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
 import type { NamedFolder } from '../config.js';
 import { normalizeKey } from '../types.js';
 import type { MemoryDoc, MemoryDocType, MemoryFrontmatter, MemoryKeyType, MemoryStatus } from '../types.js';
+
+/** Uppercases and strips everything but letters/digits — used to compare keys that differ only in
+ * punctuation/whitespace formatting (e.g. `RMXS-15` and `RMXS15` strip to the same `RMXS15`). */
+export function stripKey(s: string): string {
+  return s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
 
 interface MemoryRow {
   id: string;
@@ -141,7 +147,7 @@ export class MemoryRepository {
   ): Array<{ id: string; key: string; description: string; doc_type: MemoryDocType; folder: string; snippet: string; score: number }> {
     const { docType, status, folder, tag, limit = 20, offset = 0, includePaused = false } = opts;
     const conditions: string[] = [];
-    const params: unknown[] = [query];
+    const params: unknown[] = [sanitizeFtsQuery(query)];
     if (docType) {
       conditions.push('m.doc_type = ?');
       params.push(docType);
@@ -208,6 +214,33 @@ export class MemoryRepository {
     return rows
       .filter((r) => !prefix || r.key.startsWith(prefix))
       .map((r) => ({ key: r.key, docCount: r.doc_count }));
+  }
+
+  /**
+   * Fuzzy key lookup for a partial/drifted key, comparing keys with all punctuation stripped so
+   * `RMXS15` and `RMXS-15` are treated as the same candidate. Ranked: exact stripped match first,
+   * then stripped-prefix, then stripped-substring; alphabetical tiebreak within each tier.
+   */
+  suggestKeys(partial: string, limit = 5): Array<{ key: string; docCount: number }> {
+    const strippedPartial = stripKey(partial);
+    if (!strippedPartial) return [];
+    const rows = this.db
+      .prepare(`SELECT key, COUNT(*) as doc_count FROM memory_docs GROUP BY key`)
+      .all() as Array<{ key: string; doc_count: number }>;
+    return rows
+      .map((r) => ({ key: r.key, docCount: r.doc_count, stripped: stripKey(r.key) }))
+      .filter((r) => r.stripped.includes(strippedPartial))
+      .sort((a, b) => {
+        const aExact = a.stripped === strippedPartial ? 0 : 1;
+        const bExact = b.stripped === strippedPartial ? 0 : 1;
+        if (aExact !== bExact) return aExact - bExact;
+        const aPrefix = a.stripped.startsWith(strippedPartial) ? 0 : 1;
+        const bPrefix = b.stripped.startsWith(strippedPartial) ? 0 : 1;
+        if (aPrefix !== bPrefix) return aPrefix - bPrefix;
+        return a.key.localeCompare(b.key);
+      })
+      .slice(0, limit)
+      .map(({ key, docCount }) => ({ key, docCount }));
   }
 
   create(input: {

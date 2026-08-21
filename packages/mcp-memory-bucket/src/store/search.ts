@@ -19,6 +19,26 @@ export class SearchQueryError extends Error {
   }
 }
 
+const FTS_BOOLEAN_KEYWORDS = new Set(['AND', 'OR', 'NOT']);
+
+/**
+ * Auto-quotes bareword tokens that contain punctuation (e.g. a bare hyphenated ticket key like
+ * `RMXS-15`) so FTS5 doesn't interpret a bare `-` as its NOT/column-filter operator and silently
+ * return zero rows. Already-quoted phrases, `AND`/`OR`/`NOT` operators, and `prefix*` wildcards are
+ * left untouched so existing power-user query syntax keeps working exactly as before.
+ */
+export function sanitizeFtsQuery(query: string): string {
+  const tokens = query.match(/"[^"]*"|\S+/g) ?? [];
+  return tokens
+    .map((token) => {
+      if (token.startsWith('"')) return token; // already an explicit phrase
+      if (FTS_BOOLEAN_KEYWORDS.has(token.toUpperCase())) return token; // boolean operator
+      if (/^[A-Za-z0-9_*]+$/.test(token)) return token; // plain word or prefix* wildcard — no punctuation
+      return `"${token.replace(/"/g, '""')}"`; // punctuation present (hyphen, colon, etc.) — quote it literally
+    })
+    .join(' ');
+}
+
 /**
  * Full-text search over the shared FTS5 index, optionally scoped to one ref_table.
  * `query` is passed through as raw FTS5 MATCH syntax — supports `AND`/`OR`/`NOT`,
@@ -32,6 +52,7 @@ export function searchIndex(
   opts: { table?: 'skills' | 'memory_docs'; limit?: number; offset?: number } = {}
 ): SearchHit[] {
   const { table, limit = 20, offset = 0 } = opts;
+  const sanitized = sanitizeFtsQuery(query);
   try {
     const rows = db
       .prepare(
@@ -43,7 +64,7 @@ export function searchIndex(
          ORDER BY bm25(search_index)
          LIMIT ? OFFSET ?`
       )
-      .all(...(table ? [query, table, limit, offset] : [query, limit, offset])) as SearchHit[];
+      .all(...(table ? [sanitized, table, limit, offset] : [sanitized, limit, offset])) as SearchHit[];
     return rows;
   } catch (err) {
     throw new SearchQueryError(query, err);
@@ -141,6 +162,7 @@ export interface CombinedSearchHit {
  * per table); use skill_search/memory_search directly when filtering by those.
  */
 export function searchCombined(db: Database.Database, query: string, limit = 20, offset = 0): CombinedSearchHit[] {
+  const sanitized = sanitizeFtsQuery(query);
   try {
     return db
       .prepare(
@@ -156,7 +178,7 @@ export function searchCombined(db: Database.Database, query: string, limit = 20,
          ORDER BY bm25(search_index)
          LIMIT ? OFFSET ?`
       )
-      .all(query, limit, offset) as CombinedSearchHit[];
+      .all(sanitized, limit, offset) as CombinedSearchHit[];
   } catch (err) {
     throw new SearchQueryError(query, err);
   }

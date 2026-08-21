@@ -251,6 +251,36 @@ body: >-
   conversation, or ask if it's genuinely unclear.
 
 
+  **Tags are for cross-cutting labels, not grouping.** `key` is the one and
+
+  only grouping concept for memory docs — never add a doc's own key (or a
+
+  related doc's key) as a tag to link things together; that's what `key`
+
+  already does. Use `tags` for labels that cut across many keys (e.g.
+
+  `viz-team`, `datalab`), not as a second grouping axis.
+
+
+  **Before creating a doc under a `ticket`-type key, check for an existing
+
+  near-match first** — e.g. `memory_list("RMXS-15")` or `memory_search` —
+
+  rather than writing a fresh key that only differs in punctuation or
+
+  casing (`RMXS15` vs `RMXS-15` vs `Rmxs 15` are three different keys to
+
+  this system, even though they're clearly meant to be the same ticket).
+
+  Reuse the existing key's exact casing/format if one is found.
+
+  `memory_create`'s response includes a `key_warning` field if it detects a
+
+  likely near-duplicate after the fact — treat that as a signal to double
+
+  check, not to ignore.
+
+
   ### Saving a session
 
 

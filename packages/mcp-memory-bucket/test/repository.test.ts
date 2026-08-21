@@ -240,6 +240,49 @@ test('memory search finds body text via FTS5 and bulkUpdate flips status across 
   fs.rmSync(memDir, { recursive: true, force: true });
 });
 
+test('memory doc key is searchable via FTS even when the key never appears in description/body', () => {
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
+
+  repo.create({
+    key: 'RMXS-15',
+    key_type: 'ticket',
+    doc_type: 'plan',
+    description: 'campaign eligibility postbacks', // deliberately no "RMXS-15" in text
+    body: 'Body text with no mention of the ticket id either.',
+  });
+
+  const hits = repo.search('"RMXS-15"'); // quoted: isolates the indexing fix from query-sanitization (a later task)
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]!.key, 'RMXS-15');
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+});
+
+test('bare hyphenated key search does not silently return zero results', () => {
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
+
+  repo.create({
+    key: 'RMXS-15',
+    key_type: 'ticket',
+    doc_type: 'plan',
+    description: 'campaign eligibility postbacks',
+    body: 'Body text with no mention of the ticket id either.',
+  });
+
+  // Bare, unquoted, exactly what a user would type into the web UI search box.
+  const hits = repo.search('RMXS-15');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]!.key, 'RMXS-15');
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+});
+
 test('skill search: status/tag filters and offset paginate correctly', () => {
   const skillDir = makeTmpDir();
   const db = openCache(':memory:');
@@ -291,7 +334,9 @@ test('search throws a SearchQueryError with actionable guidance on malformed FTS
   const db = openCache(':memory:');
   const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
-  assert.throws(() => repo.search('blue-green'), (err: unknown) => {
+  // An unterminated quote survives sanitizeFtsQuery unchanged (it already "starts with a quote")
+  // and is still invalid FTS5 syntax, so this still exercises the SearchQueryError path.
+  assert.throws(() => repo.search('"unterminated'), (err: unknown) => {
     assert.ok(err instanceof SearchQueryError);
     assert.match((err as Error).message, /must be quoted/);
     return true;
@@ -957,6 +1002,23 @@ test('memory update() can change key in place, normalized', () => {
   assert.equal(updated.key, 'NEW-KEY');
   assert.equal(repo.getByKey('old-key').length, 0);
   assert.equal(repo.getByKey('new key').length, 1);
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+});
+
+test('suggestKeys finds a punctuation-drifted match (RMXS15 vs RMXS-15)', () => {
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
+
+  repo.create({ key: 'RMXS-15', key_type: 'ticket', doc_type: 'plan', description: 'a', body: 'a' });
+  repo.create({ key: 'RMXS-14', key_type: 'ticket', doc_type: 'plan', description: 'b', body: 'b' });
+
+  const hits = repo.suggestKeys('RMXS15'); // no hyphen — should still find RMXS-15
+  assert.equal(hits[0]!.key, 'RMXS-15');
+  assert.equal(hits[0]!.docCount, 1);
+  assert.ok(!hits.some((h) => h.key === 'RMXS-14')); // unrelated key excluded
 
   db.close();
   fs.rmSync(memDir, { recursive: true, force: true });

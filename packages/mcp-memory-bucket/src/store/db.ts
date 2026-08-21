@@ -48,6 +48,7 @@ export function openCache(dbPath: string): Database.Database {
       description,
       body,
       tags,
+      key,
       tokenize = 'porter unicode61'
     );
 
@@ -73,9 +74,34 @@ export function openCache(dbPath: string): Database.Database {
     ['paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['created_at', 'TEXT'],
   ]);
+  ensureSearchIndexHasKeyColumn(db);
   backfillSearchIndex(db);
 
   return db;
+}
+
+/**
+ * search_index is an FTS5 virtual table — existing cache files created before the `key` column
+ * existed need it added. FTS5 doesn't support ALTER TABLE ADD COLUMN reliably across versions, and
+ * search_index is a disposable cache (rebuilt from skills/memory_docs, not the source of truth), so
+ * the simplest safe migration is: drop and recreate with the new schema, then let backfillSearchIndex
+ * repopulate everything.
+ */
+function ensureSearchIndexHasKeyColumn(db: Database.Database): void {
+  const cols = db.prepare(`PRAGMA table_info(search_index)`).all() as Array<{ name: string }>;
+  if (cols.length === 0 || cols.some((c) => c.name === 'key')) return; // fresh table, or already migrated
+  db.exec(`DROP TABLE search_index`);
+  db.exec(`
+    CREATE VIRTUAL TABLE search_index USING fts5(
+      ref_table UNINDEXED,
+      ref_id UNINDEXED,
+      description,
+      body,
+      tags,
+      key,
+      tokenize = 'porter unicode61'
+    );
+  `);
 }
 
 /** Migration for cache files created before a given column existed. Safe to call every startup. */
@@ -101,8 +127,9 @@ function backfillSearchIndex(db: Database.Database): void {
     body: string;
     tags: string;
   }>;
-  const memoryRows = db.prepare(`SELECT id, description, body, tags FROM memory_docs`).all() as Array<{
+  const memoryRows = db.prepare(`SELECT id, key, description, body, tags FROM memory_docs`).all() as Array<{
     id: string;
+    key: string;
     description: string;
     body: string;
     tags: string;
@@ -110,14 +137,14 @@ function backfillSearchIndex(db: Database.Database): void {
   if (skillRows.length === 0 && memoryRows.length === 0) return;
 
   const insert = db.prepare(
-    `INSERT INTO search_index (ref_table, ref_id, description, body, tags) VALUES (?, ?, ?, ?, ?)`
+    `INSERT INTO search_index (ref_table, ref_id, description, body, tags, key) VALUES (?, ?, ?, ?, ?, ?)`
   );
   const insertAll = db.transaction(() => {
     for (const row of skillRows) {
-      insert.run('skills', row.id, row.description, row.body, flattenTags(row.tags));
+      insert.run('skills', row.id, row.description, row.body, flattenTags(row.tags), '');
     }
     for (const row of memoryRows) {
-      insert.run('memory_docs', row.id, row.description, row.body, flattenTags(row.tags));
+      insert.run('memory_docs', row.id, row.description, row.body, flattenTags(row.tags), row.key);
     }
   });
   insertAll();

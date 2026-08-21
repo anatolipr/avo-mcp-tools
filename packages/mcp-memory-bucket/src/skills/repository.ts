@@ -6,7 +6,7 @@ import { writeMarkdownFile } from '../store/markdown-file.js';
 import { assertValidSkillName } from '../store/skill-name.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, skillSyncSpec, type TableSyncSpec } from '../store/sync.js';
-import { SearchQueryError } from '../store/search.js';
+import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
 import type { NamedFolder } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
 
@@ -167,7 +167,7 @@ export class SkillRepository {
   ): Array<{ name: string; description: string; folder: string; snippet: string; score: number }> {
     const { folder, status, owner, tag, limit = 20, offset = 0, includePaused = false } = opts;
     const conditions: string[] = [];
-    const params: unknown[] = [query];
+    const params: unknown[] = [sanitizeFtsQuery(query)];
     if (folder) {
       conditions.push('s.folder = ?');
       params.push(folder);

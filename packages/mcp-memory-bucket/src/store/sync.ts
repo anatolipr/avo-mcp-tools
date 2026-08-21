@@ -155,8 +155,8 @@ export function upsertFile<TFrontmatter>(
 
   db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(spec.table, id);
   db.prepare(
-    `INSERT INTO search_index (ref_table, ref_id, description, body, tags) VALUES (?, ?, ?, ?, ?)`
-  ).run(spec.table, id, String(row.description ?? ''), parsed.body, flattenTags(String(row.tags ?? '[]')));
+    `INSERT INTO search_index (ref_table, ref_id, description, body, tags, key) VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(spec.table, id, String(row.description ?? ''), parsed.body, flattenTags(String(row.tags ?? '[]')), String(row.key ?? ''));
 
   db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ?`).run(spec.table, id);
   const dates = new Set(extractDates(parsed.body));

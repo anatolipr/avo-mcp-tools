@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MemoryRepository } from './repository.js';
+import { stripKey } from './repository.js';
 import { statusSchema } from '../shared/status.js';
+import { normalizeKey } from '../types.js';
 
 const MEMORY_DOC_TYPES = ['plan', 'spec', 'sql', 'testing-todo', 'discovery', 'session-summary', 'other'] as const;
 const MEMORY_KEY_TYPES = ['ticket', 'freeform'] as const;
@@ -105,8 +107,19 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
     },
     async ({ key, key_type, doc_type, description, body, tags, status, related_to, subfolder, folder }: any) => {
       try {
+        const normalized = normalizeKey(key);
+        const strippedNew = stripKey(normalized);
+        const nearDuplicate = repo
+          .suggestKeys(key, 3)
+          .find((m) => stripKey(m.key) === strippedNew && m.key !== normalized);
+
         const doc = repo.create({ key, key_type, doc_type, description, body, tags, status, related_to, subfolder, folder });
-        return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
+
+        const result: Record<string, unknown> = { ...doc };
+        if (nearDuplicate) {
+          result.key_warning = `A similarly-formatted key "${nearDuplicate.key}" already exists with ${nearDuplicate.docCount} doc(s) — did you mean to use that key instead of "${normalized}"? This doc was still created under "${normalized}".`;
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
       }

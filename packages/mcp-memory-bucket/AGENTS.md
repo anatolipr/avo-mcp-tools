@@ -161,8 +161,10 @@ relocate(path, target: "skill" | "memory", keep_original?, overrides?)
   but `overrides.description` is always required — a real description
   needs content a filename can't provide (what it does + when to use it),
   so ask the user rather than inventing one.
-- `overrides.folder` places the relocated file into a subdirectory of the
-  target source dir, same as `skill_create`/`memory_create`.
+- `overrides.subfolder` places the relocated file into a subdirectory of the
+  target source dir, same as `skill_create`/`memory_create`. `overrides.folder`
+  is a different thing — it picks which configured top-level named folder to
+  write into, only relevant when multiple folders of that kind are configured.
 - Bulk usage ("relocate all files under docs/plans as memory if not
   already relocated") is supported by calling `relocate` once per file —
   it's safe to re-run: if a doc with the same inferred key + doc_type +

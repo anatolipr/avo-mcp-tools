@@ -8,8 +8,9 @@ import type Database from 'better-sqlite3';
 import type { BucketConfig } from '../config.js';
 import { saveFolder, removeFolder as removeFolderFromConfig, sanitizeFolderName } from '../config.js';
 import type { SkillRepository } from '../skills/repository.js';
-import type { MemoryRepository } from '../memory/repository.js';
+import { stripKey, type MemoryRepository } from '../memory/repository.js';
 import { initialScan, type TableSyncSpec } from '../store/sync.js';
+import { sanitizeFtsQuery } from '../store/search.js';
 
 type EntryType = 'skill' | 'memory' | 'all';
 
@@ -41,7 +42,7 @@ function tagWhereClause(tags: string[]): { clause: string; params: string[] } {
   return { clause: ` AND ${clauses.join(' AND ')}`, params: tags };
 }
 
-function queryEntries(db: Database.Database, req: Request): EntryRow[] {
+function queryEntries(db: Database.Database, memoryRepo: MemoryRepository, req: Request): EntryRow[] {
   const type = (req.query.type as EntryType) ?? 'all';
   const tags = asArray(req.query.tag);
   const statuses = asArray(req.query.status);
@@ -57,10 +58,15 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
   const dateFrom = (req.query.date_from as string | undefined)?.trim() || undefined;
   const dateTo = (req.query.date_to as string | undefined)?.trim() || undefined;
 
-  const matchedIds: { skills: Set<string>; memory_docs: Set<string> } | null = q
-    ? matchSearch(db, q)
-    : null;
-  if (q && matchedIds && matchedIds.skills.size === 0 && matchedIds.memory_docs.size === 0) {
+  // If the typed query matches an existing key (ignoring punctuation/case), short-circuit straight
+  // to "every doc under this key" for memory_docs — this bypasses FTS/bm25 ranking entirely, so a
+  // doc whose body never repeats the literal key text (e.g. a session summary) still shows up.
+  // Skills have no `key` concept, so they still go through the normal FTS path below when q is set.
+  const keyMatch = q ? memoryRepo.suggestKeys(q, 1).find((m) => stripKey(m.key) === stripKey(q)) : undefined;
+
+  const matchedIds: { skills: Set<string>; memory_docs: Set<string> } | null =
+    q && !keyMatch ? matchSearch(db, q) : null;
+  if (q && !keyMatch && matchedIds && matchedIds.skills.size === 0 && matchedIds.memory_docs.size === 0) {
     return [];
   }
 
@@ -77,7 +83,7 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
       ...queryTable(
         db,
         'skills',
-        { tags, statuses, owners, docTypes: [], keyTypes: [], folders, deprecated, paused },
+        { tags, statuses, owners, docTypes: [], keyTypes: [], folders, keys: [], deprecated, paused },
         intersectIds(matchedIds?.skills, dateIds?.skills)
       )
     );
@@ -87,8 +93,8 @@ function queryEntries(db: Database.Database, req: Request): EntryRow[] {
       ...queryTable(
         db,
         'memory_docs',
-        { tags, statuses, owners: [], docTypes, keyTypes, folders, deprecated, paused },
-        intersectIds(matchedIds?.memory_docs, dateIds?.memory_docs)
+        { tags, statuses, owners: [], docTypes, keyTypes, folders, deprecated, paused, keys: keyMatch ? [keyMatch.key] : [] },
+        keyMatch ? undefined : intersectIds(matchedIds?.memory_docs, dateIds?.memory_docs)
       )
     );
   }
@@ -119,6 +125,7 @@ function queryTable(
     docTypes: string[];
     keyTypes: string[];
     folders: string[];
+    keys: string[];
     deprecated?: string;
     paused?: string;
   },
@@ -148,6 +155,10 @@ function queryTable(
   if (table === 'memory_docs' && filters.keyTypes.length > 0) {
     where += ` AND key_type IN (${filters.keyTypes.map(() => '?').join(', ')})`;
     params.push(...filters.keyTypes);
+  }
+  if (table === 'memory_docs' && filters.keys.length > 0) {
+    where += ` AND key IN (${filters.keys.map(() => '?').join(', ')})`;
+    params.push(...filters.keys);
   }
   if (filters.folders.length > 0) {
     where += ` AND folder IN (${filters.folders.map(() => '?').join(', ')})`;
@@ -277,7 +288,7 @@ function matchSearch(db: Database.Database, q: string): { skills: Set<string>; m
   try {
     rows = db
       .prepare(`SELECT ref_table, ref_id FROM search_index WHERE search_index MATCH ? ORDER BY rank`)
-      .all(q) as typeof rows;
+      .all(sanitizeFtsQuery(q)) as typeof rows;
   } catch {
     // Bad FTS5 query syntax (e.g. a bare quote) — treat as no matches rather than 500ing.
     return { skills, memory_docs };
@@ -400,7 +411,7 @@ export function buildWebRouter(
   });
 
   router.get('/api/entries', (req: Request, res: Response) => {
-    res.json(queryEntries(db, req));
+    res.json(queryEntries(db, memoryRepo, req));
   });
 
   router.get('/api/entries/:table/:id', (req: Request, res: Response) => {
@@ -620,6 +631,15 @@ export function buildWebRouter(
   router.get('/api/facets', (req: Request, res: Response) => {
     const type = (req.query.type as EntryType) ?? 'all';
     res.json(buildFacets(db, type));
+  });
+
+  router.get('/api/keys/suggest', (req: Request, res: Response) => {
+    const q = (req.query.q as string | undefined)?.trim();
+    if (!q) {
+      res.json([]);
+      return;
+    }
+    res.json(memoryRepo.suggestKeys(q, 8));
   });
 
   router.get('/api/health', (_req: Request, res: Response) => {
