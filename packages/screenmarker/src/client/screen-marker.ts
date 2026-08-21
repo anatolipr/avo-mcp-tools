@@ -1,11 +1,15 @@
 import { LitElement, html, css } from 'lit';
 import { createRef, ref } from 'lit/directives/ref.js';
-import { SignalWatcher } from 'avosignals';
+import { Signal, SignalWatcher } from 'avosignals';
 import { AnnotatorStore } from './store.js';
 import { drawShapes, drawShape, drawSelectionOutline, drawImageSelectionOutline, hitTestShapes, flattenPagesToCanvas } from './render.js';
 import { copyImageOnly, downloadImage } from './export.js';
 import { downloadDocument, readDocumentFile } from './save-load.js';
-import type { Point, Shape, Tool } from './types.js';
+import { parseContainer, promptForFileName, serializeContainer } from './container.js';
+import { getCurrentCloudUser, loadFromCloud, saveToCloud } from './cloud-sync.js';
+import { FOLDERFOO_HOST, TENANT_ID } from './server-config.js';
+import { HOSTED } from './hosted.js';
+import type { Page, Point, Shape, Tool } from './types.js';
 
 const TOOLS: { type: Tool; label: string; icon: string; key: string }[] = [
   { type: 'select', label: 'Select', icon: '↖', key: 'v' },
@@ -330,6 +334,10 @@ export class ScreenMarker extends LitElement {
   #dragOverSide: 'before' | 'after' | null = null;
   #justMovedPageId: string | null = null;
   #theme: ThemeMode = loadTheme();
+  #cloudUsername = new Signal<string | null>(null);
+  #onAuthChange = () => {
+    getCurrentCloudUser().then((user) => this.#cloudUsername.set(user?.username ?? null));
+  };
 
   constructor() {
     super();
@@ -359,12 +367,28 @@ export class ScreenMarker extends LitElement {
       this.requestUpdate();
       this.updateComplete.then(() => this.#redraw());
     });
+
+    if (HOSTED) {
+      import(/* @vite-ignore */ `${FOLDERFOO_HOST}/elements/folderfoo-profile-circle.js`).then(() => {
+        const el = document.createElement('folderfoo-profile-circle');
+        el.setAttribute('app-name', 'Screenmarker');
+        el.setAttribute('tenant-id', TENANT_ID);
+        document.body.appendChild(el);
+      });
+      window.addEventListener('folderfoo-auth-change', this.#onAuthChange);
+      document.addEventListener('folderfoo-file-open', this.#onCloudFileOpen);
+      this.#onAuthChange();
+    }
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener('paste', this.#onPaste);
     window.removeEventListener('keydown', this.#onKeydown);
+    if (HOSTED) {
+      window.removeEventListener('folderfoo-auth-change', this.#onAuthChange);
+      document.removeEventListener('folderfoo-file-open', this.#onCloudFileOpen);
+    }
   }
 
   #onDragOver = (e: DragEvent) => {
@@ -547,33 +571,65 @@ export class ScreenMarker extends LitElement {
     input.value = '';
   };
 
-  #saveDocument = () => {
-    const saved = downloadDocument(this.#store.pages.value, this.#store.activePageId.value);
+  #saveDocument = async () => {
+    const saved = await downloadDocument(this.#store.pages.value, this.#store.activePageId.value);
     if (saved) this.#flashStatus('Document saved');
   };
+
+  #confirmReplaceIfNeeded(): boolean {
+    const hasContent =
+      this.#store.pages.value.length > 1 ||
+      this.#store.pages.value.some((p) => p.imageDataUrl !== null || p.shapes.length > 0);
+    return !hasContent || window.confirm('Load this document? It will replace everything currently open. You can Undo (Cmd/Ctrl+Z) afterward.');
+  }
+
+  async #applyLoadedDocument(pages: Page[], activePageId: string): Promise<void> {
+    this.#store.loadDocument(pages, activePageId);
+    this.#store.zoomReset();
+    await this.updateComplete;
+    this.#redraw();
+  }
 
   #onLoadDocumentPick = async (e: Event) => {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';
     if (!file) return;
-
-    const hasContent =
-      this.#store.pages.value.length > 1 ||
-      this.#store.pages.value.some((p) => p.imageDataUrl !== null || p.shapes.length > 0);
-    if (hasContent && !window.confirm('Load this document? It will replace everything currently open. You can Undo (Cmd/Ctrl+Z) afterward.')) {
-      return;
-    }
+    if (!this.#confirmReplaceIfNeeded()) return;
 
     try {
       const { pages, activePageId } = await readDocumentFile(file);
-      this.#store.loadDocument(pages, activePageId);
-      this.#store.zoomReset();
-      await this.updateComplete;
-      this.#redraw();
+      await this.#applyLoadedDocument(pages, activePageId);
       this.#flashStatus('Document loaded');
     } catch (err) {
       this.#flashStatus(`Load failed: ${(err as Error).message}`);
+    }
+  };
+
+  #saveToCloud = async () => {
+    const name = promptForFileName();
+    if (name === null) return;
+    try {
+      const blob = await serializeContainer(this.#store.pages.value, this.#store.activePageId.value);
+      await saveToCloud(name, blob);
+      this.#flashStatus(`Saved '${name}' to cloud`);
+    } catch (err) {
+      this.#flashStatus(`Cloud save failed: ${(err as Error).message}`);
+    }
+  };
+
+  #onCloudFileOpen = async (e: Event) => {
+    const name = (e as CustomEvent<{ name: string }>).detail?.name;
+    if (!name) return;
+    if (!this.#confirmReplaceIfNeeded()) return;
+
+    try {
+      const blob = await loadFromCloud(name);
+      const { pages, activePageId } = await parseContainer(await blob.arrayBuffer());
+      await this.#applyLoadedDocument(pages, activePageId);
+      this.#flashStatus(`Loaded '${name}' from cloud`);
+    } catch (err) {
+      this.#flashStatus(`Cloud load failed: ${(err as Error).message}`);
     }
   };
 
@@ -1177,11 +1233,14 @@ export class ScreenMarker extends LitElement {
         <button @click=${() => this.#store.clearActivePage()}>Clear</button>
         <button @click=${this.#newDocument} title="Wipe all pages and start fresh">New document</button>
         <button @click=${this.#saveDocument} title="Save the whole document (all pages) to a file (Cmd/Ctrl+S)">Save</button>
+        ${HOSTED && this.#cloudUsername.value
+          ? html`<button @click=${this.#saveToCloud} title="Save the whole document to your folderfoo account">☁ Save to cloud</button>`
+          : ''}
         <label style="display:inline-flex; align-items:center; cursor:pointer; border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:13px;" title="Load a document file, replacing everything currently open (Cmd/Ctrl+O)">
           <input
             ${ref(this.#loadDocumentInputRef)}
             type="file"
-            accept="application/json,.json"
+            accept=".smk"
             style="display:none"
             @change=${this.#onLoadDocumentPick}
           />
