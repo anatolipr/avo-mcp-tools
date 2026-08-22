@@ -17,6 +17,8 @@ import { registerAttachmentTools } from './attachments/tools.js';
 import { AttachmentRepository } from './attachments/repository.js';
 import { buildWebRouter } from './web/routes.js';
 import { registerUiTool } from './web/ui-tool.js';
+import { registerMemoryChannelTools } from './channels/tools.js';
+import { startChannelSweep } from './channels/store.js';
 
 // server.ts is rebuilt from `buildMcpServer()` on every /mcp request (see below),
 // so tool schemas (which conditionally include `folder` based on folder count) always
@@ -66,7 +68,7 @@ if (config.skillFolders.length === 0 && config.memoryFolders.length === 0) {
 // clients that expose either to the model can make that association.
 const SERVER_DESCRIPTION =
   'Also known as "memory bucket", "mem bucket", or "skill bucket" — if the user refers to this server by any of those names, they mean this one.';
-const SERVER_INSTRUCTIONS = `${SERVER_DESCRIPTION} Exposes skill_* (reusable coding patterns, stored as agentskills.io-standard SKILL.md folders) and memory_* (point-in-time working context — plans, specs, SQL, session summaries — looked up by key) tools, plus shared relocate/bucket_search/bucket_*_folder tools. Use skill_search/memory_search/bucket_search for full-text search over body content (not just metadata) — bucket_search when you don't know which bucket something landed in. Use bucket_list_folders to see what named source directories (folders) are configured before passing a folder argument elsewhere, and bucket_create_folder/bucket_delete_folder to register or unregister one. Most operations have a _bulk_ variant (bulk_get/bulk_create/bulk_update/bulk_delete/bulk_rename, relocate_bulk) that take a list and return per-item success/failure — prefer these over looping single calls when acting on more than one item. A memory doc's key can be changed in place via memory_update(id, key: ...) — no separate rename tool needed. Before calling any *_create/*_update/relocate tool, call skill_get("memory-bucket-authoring") first to learn the exact frontmatter schema — don't guess the shape.`;
+const SERVER_INSTRUCTIONS = `${SERVER_DESCRIPTION} Exposes skill_* (reusable coding patterns, stored as agentskills.io-standard SKILL.md folders) and memory_* (point-in-time working context — plans, specs, SQL, session summaries — looked up by key) tools, plus shared relocate/bucket_search/bucket_*_folder tools. Use skill_search/memory_search/bucket_search for full-text search over body content (not just metadata) — bucket_search when you don't know which bucket something landed in. Use bucket_list_folders to see what named source directories (folders) are configured before passing a folder argument elsewhere, and bucket_create_folder/bucket_delete_folder to register or unregister one. Most operations have a _bulk_ variant (bulk_get/bulk_create/bulk_update/bulk_delete/bulk_rename, relocate_bulk) that take a list and return per-item success/failure — prefer these over looping single calls when acting on more than one item. A memory doc's key can be changed in place via memory_update(id, key: ...) — no separate rename tool needed. Before calling any *_create/*_update/relocate tool, call skill_get("memory-bucket-authoring") first to learn the exact frontmatter schema — don't guess the shape. Also exposes memory_channel_read/memory_channel_post/list_memory_channels — a SEPARATE, ephemeral in-memory layer for live cross-agent coordination (a shared scratchpad/discussion channel by name), never written to disk and never indexed by memory_search/bucket_search; do not confuse these with the persisted memory_* docs above.`;
 
 function buildMcpServer(): McpServer {
   const server = new McpServer(
@@ -80,8 +82,11 @@ function buildMcpServer(): McpServer {
   registerBucketFolderTools(server, config, skillRepo, memoryRepo, db, skillSpec, memorySpec);
   registerAttachmentTools(server, attachmentRepo);
   registerUiTool(server, PORT);
+  registerMemoryChannelTools(server);
   return server;
 }
+
+startChannelSweep((name) => console.error(`[memory-bucket] sweeping idle memory channel: ${name}`));
 
 const app = express();
 app.use(express.json());
