@@ -1,6 +1,6 @@
 {
   "name": "screenmarker",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "description": "Paste a screenshot, annotate it with arrows/boxes/text/pen/highlight, and copy the flattened image back to the clipboard.",
   "repository": {
