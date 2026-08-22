@@ -58,6 +58,9 @@ export class AttachmentRepository {
     fs.rmSync(safePath, { force: true });
     const next = (doc.attachments ?? []).filter((a) => a.filename !== filename);
     this.saveAttachmentsList(kind, docIdOrName, next);
+    if (listAttachmentFiles(dir).length === 0) {
+      fs.rmdirSync(dir, { recursive: true });
+    }
   }
 
   list(kind: DocKind, docIdOrName: string): AttachmentEntry[] {

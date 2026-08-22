@@ -12,7 +12,7 @@ import { stripKey, type MemoryRepository } from '../memory/repository.js';
 import { initialScan, type TableSyncSpec } from '../store/sync.js';
 import { sanitizeFtsQuery } from '../store/search.js';
 import { resolveWithinBase } from '../store/safe-path.js';
-import { attachmentsDirFor } from '../attachments/storage.js';
+import { attachmentsDirFor, guessMimeType } from '../attachments/storage.js';
 
 type EntryType = 'skill' | 'memory' | 'all';
 
@@ -486,6 +486,47 @@ export function buildWebRouter(
     // Content-Type from the file extension.
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.sendFile(filePath, (err) => {
+      if (err && !res.headersSent) {
+        res.status(404).json({ error: 'attachment not found' });
+      }
+    });
+  });
+
+  // Serves a single attachment for inline viewing (e.g. target="_blank" opening in a new tab
+  // instead of downloading). Sends the real Content-Type with an "inline" disposition so the
+  // browser renders it directly, but pairs that with `Content-Security-Policy: sandbox` — this
+  // disables script execution, forms, and top-level navigation for the response regardless of
+  // its Content-Type, so an HTML/SVG attachment can render inline without being able to run
+  // script in this origin. Same path-containment check as the download route above.
+  router.get('/api/entries/:table/:id/attachments/:filename/view', (req: Request, res: Response) => {
+    const { table, id, filename } = req.params;
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!filename) {
+      res.status(400).json({ error: 'filename is required' });
+      return;
+    }
+    const row = db.prepare(`SELECT source_path FROM ${table} WHERE id = ?`).get(id) as
+      | { source_path: string }
+      | undefined;
+    if (!row) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    const dir = attachmentsDirFor(row.source_path, table === 'skills' ? 'skill' : 'memory');
+    let filePath: string;
+    try {
+      filePath = resolveWithinBase(dir, undefined, filename);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+      return;
+    }
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src *");
+    res.setHeader('Content-Type', guessMimeType(filename));
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
     res.sendFile(filePath, (err) => {
       if (err && !res.headersSent) {
         res.status(404).json({ error: 'attachment not found' });

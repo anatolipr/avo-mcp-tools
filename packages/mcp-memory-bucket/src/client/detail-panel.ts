@@ -216,6 +216,12 @@ export class DetailPanel extends LitElement {
       gap: 4px;
     }
     .attachment-meta { opacity: 0.55; font-size: 11px; }
+    .attachment-download {
+      opacity: 0.55;
+      text-decoration: none;
+      margin-left: 2px;
+    }
+    .attachment-download:hover { opacity: 1; }
     .source-path {
       font-family: monospace;
       font-size: 11px;
@@ -409,6 +415,25 @@ export class DetailPanel extends LitElement {
     await this.updateComplete;
     this.shadowRoot?.querySelector('.markdown-body')?.scrollTo(0, 0);
     this.shadowRoot?.querySelector('pre')?.scrollTo(0, 0);
+  }
+
+  /**
+   * Re-fetches the currently open doc without disturbing the user's place — called on window
+   * focus so external edits (e.g. editing the file in an editor) show up when tabbing back in.
+   * Unlike #load(), this preserves scroll position rather than resetting to top, and is a no-op
+   * mid-edit/rename so it can't clobber unsaved input in the form.
+   */
+  async refresh() {
+    if (!this.selected || this._editing || this._addingFrontmatter || this._renaming) return;
+    const { table, id } = this.selected;
+    const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}`);
+    if (!res.ok) return;
+    const scrollEl = this.shadowRoot?.querySelector('.markdown-body') ?? this.shadowRoot?.querySelector('pre');
+    const scrollTop = scrollEl?.scrollTop ?? 0;
+    this._doc = (await res.json()) as EntryDetail;
+    await this.updateComplete;
+    const newScrollEl = this.shadowRoot?.querySelector('.markdown-body') ?? this.shadowRoot?.querySelector('pre');
+    if (newScrollEl) newScrollEl.scrollTop = scrollTop;
   }
 
   #copyPath() {
@@ -846,10 +871,16 @@ export class DetailPanel extends LitElement {
           ${d.attachments.map(
             (a) => html`
               <li>
-                <a href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}" target="_blank" rel="noopener"
+                <a href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}/view" target="_blank" rel="noopener"
                   >${a.filename}</a
                 >
                 <span class="attachment-meta">(${a.mime_type}, ${a.size} bytes)</span>
+                <a
+                  class="attachment-download"
+                  href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}"
+                  title="Download"
+                  >⇩</a
+                >
               </li>
             `
           )}

@@ -27,15 +27,19 @@ const MIME_BY_EXT: Record<string, string> = {
   '.json': 'application/json',
   '.xml': 'application/xml',
   '.txt': 'text/plain',
+  '.html': 'text/html',
+  '.htm': 'text/html',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
   '.pdf': 'application/pdf',
   '.csv': 'text/csv',
 };
 
-function guessMimeType(filename: string): string {
+export function guessMimeType(filename: string): string {
   return MIME_BY_EXT[path.extname(filename).toLowerCase()] ?? 'application/octet-stream';
 }
 

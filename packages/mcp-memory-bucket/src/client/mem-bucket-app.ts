@@ -411,6 +411,7 @@ export class MemBucketApp extends LitElement {
     this.#refetch();
     this.#refetchFacets();
     this.#refetchFolders();
+    (this.renderRoot.querySelector('detail-panel') as (Element & { refresh?: () => void }) | null)?.refresh?.();
   }
 
   async #refetch() {
