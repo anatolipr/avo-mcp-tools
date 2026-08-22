@@ -4,18 +4,32 @@ import type { ToolDef } from './form-tools.js';
 const listFields: ToolDef = {
   name: 'list_fields',
   description:
-    'Returns every field in the currently active form with its name, label, type, options (if select), and current value. ' +
+    'Returns the currently active form\'s state: {submitted, fields}. ' +
+    '"submitted" — true once the user has clicked Submit in the browser, regardless of whether any agent ' +
+    'tool call is (or ever was) actively waiting on it — this is the reliable "are they done" signal for the no-wait pattern below. ' +
+    '"fields" — every field with its name, label, type, options (if select), and current value. ' +
     'Use this to inspect what the user has filled in so far without waiting for a full submit, ' +
-    'or to verify the form structure after calling define_form.',
+    'or to verify the form structure after calling define_form. ' +
+    '\n\n' +
+    'NO-WAIT PATTERN: the form URL works standalone in a browser — the user does not need the agent to be ' +
+    'actively waiting (wait_for_submit / define_form wait:true) in order to open it and fill it in. ' +
+    'If the agent was stopped or the turn ended before a wait call was made, or the user says something like ' +
+    '"I filled it in" / "I\'m ready, get my answers" / "check the form" without the agent having called wait, ' +
+    'call list_fields directly to read the current values instead of assuming nothing was submitted or that ' +
+    'a fresh define_form is needed. Check "submitted" to distinguish "user says done" from "still editing" — ' +
+    'if it is false, the user has not clicked Submit yet even if some fields are already filled in.',
   schema: {},
   handler: async (_args, tenant) => ({
     content: [{
       type: 'text',
       text: JSON.stringify(
-        tenant().schema.fields.map((f) => f.type === 'html_output'
-          ? { name: f.name, type: 'html_output' }
-          : { ...f, value: tenant().store.get(f.name) }
-        ),
+        {
+          submitted: tenant().submitted,
+          fields: tenant().schema.fields.map((f) => f.type === 'html_output'
+            ? { name: f.name, type: 'html_output' }
+            : { ...f, value: tenant().store.get(f.name) }
+          ),
+        },
         null, 2
       ),
     }],

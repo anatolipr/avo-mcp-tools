@@ -109,16 +109,21 @@ export interface ToolDef {
   handler: (args: any, tenant: () => Tenant<FormDef, FieldValues>, port: number) => Promise<any>;
 }
 
+function formUrl(tenant: () => Tenant<FormDef, FieldValues>, port: number): string {
+  return `http://localhost:${port}/t/${tenant().id}`;
+}
+
 const getFormUrl: ToolDef = {
   name: 'get_form_url',
   description:
     'Returns the URL of the live browser form UI (e.g. http://localhost:8765/t/<id>). ' +
-    'Call this and share the URL with the user whenever you are about to collect input via define_form, ' +
-    'so they know where to open the form before you call wait_for_submit.',
+    'You usually do not need to call this separately — define_form and wait_for_submit already ' +
+    'include the URL in their responses. Use this only if you need the link on its own, e.g. to ' +
+    're-share it in chat mid-conversation without touching the form or its wait state.',
   schema: {},
   handler: async (_args, tenant, port) => {
     tenant();
-    return { content: [{ type: 'text', text: `http://localhost:${port}/t/${tenant().id}` }] };
+    return { content: [{ type: 'text', text: formUrl(tenant, port) }] };
   },
 };
 
@@ -136,10 +141,26 @@ const defineForm: ToolDef = {
     'multi-step wizard data, survey-style questions, form fills, onboarding info, ' +
     'search/filter criteria, or any time you would otherwise ask 2+ follow-up questions sequentially. ' +
     '\n\n' +
-    'HOW TO USE: ' +
-    '1. Call get_form_url and tell the user to open that URL in their browser. ' +
-    '2. Call define_form with a clear title and well-labelled fields. Pass wait:true to block and receive submitted values in one step (preferred). ' +
-    '   Omit wait (or pass false) only if you need to prefill fields with set_field before blocking. In that case call wait_for_submit separately afterward. ' +
+    'HOW TO USE (default, non-blocking flow — start here): ' +
+    '1. Call define_form (wait omitted or false) with a clear title and well-labelled fields. ' +
+    '   The response includes a formUrl and returns immediately — it does not block. ' +
+    '2. In the SAME turn, right after the tool call returns, tell the user in chat that the form is ready and give them the formUrl. ' +
+    '   This step only works if define_form was not blocking — with wait:true (see below) the tool call itself never returns until ' +
+    '   the user submits, so the agent gets no chance to speak first and the user is left with a form open and no idea where the link is. ' +
+    '   That is the #1 failure mode to avoid: always let the user know the URL exists before anything blocks on their input. ' +
+    '3. End the turn there (or optionally call wait_for_submit right after if you want to also block — see below). ' +
+    '   The user can fill in the form whenever they like; nothing requires the agent to be actively waiting (see list_fields below). ' +
+    '4. On a later turn — the user says they filled it in, or are ready, or asks something else entirely — call list_fields ' +
+    '   and check its "submitted" flag before assuming nothing was entered or re-defining the form from scratch. ' +
+    '\n\n' +
+    'BLOCKING (wait:true / wait_for_submit) — opt in only when you specifically want to freeze the turn until the user responds, ' +
+    'e.g. a short synchronous confirmation dialog. Understand the tradeoff first: define_form({wait:true}) combines steps 1–3 above into ' +
+    'one call that does not return AT ALL until the user submits — so it skips step 2 entirely and the agent cannot tell the user the URL, ' +
+    'or say anything else, until the wait resolves. If you use wait:true, the tool response is your only chance to relay formUrl, and by ' +
+    'then the user needed it already. Prefer the non-blocking flow above for any interactive chat session; reserve wait:true for ' +
+    'contexts where the URL was already shared by other means or blocking silently is acceptable. ' +
+    'Omit wait (or pass false) if you also need to prefill fields with set_field before waiting — call wait_for_submit separately after that. ' +
+    'wait_for_submit returns immediately, without waiting, if the user already submitted before the call was made. ' +
     '\n\n' +
     'FIELD TYPES: ' +
     '"text" — single-line free input (names, titles, short answers). ' +
@@ -197,9 +218,11 @@ const defineForm: ToolDef = {
     'shown one after another, rather than a single form with many fields. As a rough guideline, consider splitting ' +
     'once you would otherwise put more than ~6-8 fields on one screen, or whenever the fields fall into clearly ' +
     'distinct sections (e.g. "your info" then "your preferences" then "confirmation"). ' +
-    'To do this: call define_form with wait:true for step 1 (title including "Step 1 of N"), read the returned values, ' +
-    'then call define_form with wait:true again for step 2 using a fresh field set (title "Step 2 of N"), and so on — ' +
-    'no need to call get_form_url again, the same browser tab updates in place. ' +
+    'To do this: call define_form (no wait) for step 1, tell the user the form is ready and share formUrl, then call ' +
+    'wait_for_submit; once it returns, call define_form again for step 2 using a fresh field set (title "Step 2 of N") — ' +
+    'no need to re-share the URL, the same browser tab updates in place — then wait_for_submit again, and so on. ' +
+    'Only skip the announce-then-wait split (i.e. use define_form({wait:true}) directly) once the URL has already been ' +
+    'shared earlier in the conversation and there is nothing new to tell the user before blocking again. ' +
     'This is a soft preference, not a hard rule: a short, single-purpose form (e.g. one rating + one comment) should ' +
     'stay as one step. Do not split just to split — only when it genuinely improves readability or reflects distinct stages.',
   schema: {
@@ -215,15 +238,18 @@ const defineForm: ToolDef = {
     ),
     fields: z.array(fieldDefSchema).min(1),
     wait: z.boolean().optional().describe(
-      'If true, immediately block after defining the form and return the submitted values once the user clicks Submit — ' +
-      'equivalent to calling wait_for_submit right after. ' +
-      'Use this for the common case where you do not need to prefill fields with set_field between defining and waiting. ' +
-      'Omit (or set false) when you need to call set_field before waiting.'
+      'Default false — leave this unset in most cases. If true, this call itself blocks until the user clicks Submit, ' +
+      'equivalent to calling wait_for_submit immediately after define_form. Because it blocks inside this single tool call, ' +
+      'the agent gets no opportunity to send a chat message first — so the user is never told the form is ready or given its ' +
+      'URL before the wait begins. Only set true when the formUrl was already shared earlier in the conversation (e.g. a later ' +
+      'step of a multi-step form) or blocking silently is genuinely fine. Otherwise leave unset, share formUrl from the response ' +
+      'in chat, and call wait_for_submit as a separate step afterward if you also want to block.'
     ),
   },
-  handler: async ({ title, fields, wait }, tenant) => {
+  handler: async ({ title, fields, wait }, tenant, port) => {
     const formDef: FormDef = { title: title ?? '', fields };
     tenant().applyState(formDef, initialValuesFor(formDef));
+    const url = formUrl(tenant, port);
     if (wait) {
       const raw = await new Promise<SubmitPayload>((resolve) => {
         tenant().submitBus.once('submit', resolve);
@@ -236,13 +262,13 @@ const defineForm: ToolDef = {
         };
       }
       return {
-        content: [{ type: 'text', text: JSON.stringify({ status: __interrupted ? 'interrupted' : 'submitted', values }, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify({ status: __interrupted ? 'interrupted' : 'submitted', formUrl: url, values }, null, 2) }],
       };
     }
     return {
       content: [{
         type: 'text',
-        text: `Form updated with ${fields.length} field(s). Call wait_for_submit to wait for the user.`,
+        text: `Form updated with ${fields.length} field(s) at ${url} — share this link with the user, then call wait_for_submit to wait for them.`,
       }],
     };
   },
@@ -254,8 +280,10 @@ const waitForSubmit: ToolDef = {
     'Blocks until the user clicks Submit or clicks "Update form" (interrupt) on the live form UI. ' +
     'Always call define_form before this — wait_for_submit has no effect if no form has been defined. ' +
     '\n\n' +
-    'RETURN SHAPE: a JSON object with two top-level keys: ' +
+    'RETURN SHAPE: a JSON object with these top-level keys: ' +
     '"status": either "submitted" (user clicked Submit — form is done) or "interrupted" (user clicked "Update form" — agent should read chat, adjust the form via define_form, then call wait_for_submit again). ' +
+    '"formUrl": the live form URL — re-share this with the user whenever you present a "waiting for you to fill out the form" message, ' +
+    'since they may have closed or lost the original tab. ' +
     '"values": object of all current field values at the moment of submission or interruption. ' +
     '\n\n' +
     'INTERRUPTION FLOW: when status is "interrupted", the form stays open in the browser with all values intact. ' +
@@ -269,10 +297,12 @@ const waitForSubmit: ToolDef = {
     'Filter out list rows where all sub-field values are empty strings. ' +
     'file → absolute server path string; use the Read tool to access the file contents.',
   schema: {},
-  handler: async (_args, tenant) => {
-    const raw = await new Promise<SubmitPayload>((resolve) => {
-      tenant().submitBus.once('submit', resolve);
-    });
+  handler: async (_args, tenant, port) => {
+    const raw: SubmitPayload = tenant().submitted
+      ? { __interrupted: false, ...(tenant().store.snapshot() as object) }
+      : await new Promise<SubmitPayload>((resolve) => {
+          tenant().submitBus.once('submit', resolve);
+        });
     const { __interrupted, __disposed, ...values } = raw;
     if (__disposed) {
       return {
@@ -281,7 +311,7 @@ const waitForSubmit: ToolDef = {
       };
     }
     return {
-      content: [{ type: 'text', text: JSON.stringify({ status: __interrupted ? 'interrupted' : 'submitted', values }, null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify({ status: __interrupted ? 'interrupted' : 'submitted', formUrl: formUrl(tenant, port), values }, null, 2) }],
     };
   },
 };

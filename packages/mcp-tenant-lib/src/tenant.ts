@@ -63,6 +63,26 @@ export class Tenant<TSchema, TValues> {
   schema: TSchema;
   store: Store<TValues>;
   submitBus: EventEmitter;
+  /**
+   * Whether some caller currently has a `submitBus.once('submit', ...)`
+   * listener registered — i.e. wait_for_submit / define_form({wait:true})
+   * is actively blocked on this tenant right now. Tracked via submitBus's
+   * own newListener/removeListener events (see constructor) rather than a
+   * manual flag, so it can never drift from the real listener count.
+   * Broadcast to the browser as a 'waiting' WS message so the UI can show
+   * whether anyone is listening, without implying Submit is meaningless
+   * when nobody currently is (see `submitted`).
+   */
+  waiting = false;
+  /**
+   * Whether the user has clicked Submit at least once since the form was
+   * last (re)defined. Set unconditionally on the 'submit' WS message,
+   * independent of `waiting` — the user can fill in and submit a form
+   * with no agent currently waiting (e.g. it was defined with wait:false,
+   * or the agent's turn ended), and a later wait_for_submit call or
+   * list_fields read should be able to see that they're done.
+   */
+  submitted = false;
   wsClients: Set<WebSocket>;
   connections = new Map<string, TenantConnection>();
   #legacyManifest?: ToolManifestEntry[];
@@ -109,6 +129,14 @@ export class Tenant<TSchema, TValues> {
     this.store = new Store(initialValues);
     this.submitBus = new EventEmitter();
     this.submitBus.setMaxListeners(0);
+    this.submitBus.on('newListener', (event) => {
+      if (event !== 'submit') return;
+      queueMicrotask(() => this.#syncWaiting());
+    });
+    this.submitBus.on('removeListener', (event) => {
+      if (event !== 'submit') return;
+      this.#syncWaiting();
+    });
     this.wsClients = new Set();
     this.lastActivityAt = Date.now();
     this.store.onChange((field, value) => this.broadcastUpdate(field, value));
@@ -278,12 +306,13 @@ export class Tenant<TSchema, TValues> {
     this.store.dispose();
     this.schema = schema;
     this.store = new Store(values);
+    this.submitted = false;
     this.store.onChange((field, value) => this.broadcastUpdate(field, value));
     this.broadcastReinit();
   }
 
   broadcastReinit() {
-    const payload = JSON.stringify({ type: 'reinit', schema: this.schema, state: this.store.snapshot() });
+    const payload = JSON.stringify({ type: 'reinit', schema: this.schema, state: this.store.snapshot(), waiting: this.waiting, submitted: this.submitted });
     for (const client of this.wsClients) {
       if (client.readyState === client.OPEN) client.send(payload);
     }
@@ -291,6 +320,16 @@ export class Tenant<TSchema, TValues> {
 
   broadcastUpdate(field: string, value: unknown) {
     const payload = JSON.stringify({ type: 'update', field, value });
+    for (const client of this.wsClients) {
+      if (client.readyState === client.OPEN) client.send(payload);
+    }
+  }
+
+  #syncWaiting() {
+    const nowWaiting = this.submitBus.listenerCount('submit') > 0;
+    if (nowWaiting === this.waiting) return;
+    this.waiting = nowWaiting;
+    const payload = JSON.stringify({ type: 'waiting', waiting: this.waiting });
     for (const client of this.wsClients) {
       if (client.readyState === client.OPEN) client.send(payload);
     }

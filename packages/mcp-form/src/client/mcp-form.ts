@@ -404,6 +404,7 @@ export class McpForm extends LitElement {
     _fields:    { state: true },
     _connected: { state: true },
     _submitted: { state: true },
+    _waiting:   { state: true },
     _errors:    { state: true },
   };
 
@@ -411,6 +412,7 @@ export class McpForm extends LitElement {
   declare _fields: FieldDef[];
   declare _connected: boolean;
   declare _submitted: boolean;
+  declare _waiting: boolean;
   declare _errors: Record<string, string>;
 
   private _signals = new Map<string, Signal<string>>();
@@ -424,6 +426,7 @@ export class McpForm extends LitElement {
     this._fields    = [];
     this._connected = false;
     this._submitted = false;
+    this._waiting   = false;
     this._errors    = {};
     this._connect();
   }
@@ -458,11 +461,15 @@ export class McpForm extends LitElement {
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data) as ServerMessage<FormDef, FieldValues>;
       if (msg.type === 'init' || msg.type === 'reinit') {
-        this._applyFormDef(msg.schema, msg.state);
+        this._applyFormDef(msg.schema, msg.state, msg.submitted);
+        this._waiting = msg.waiting;
       }
       if (msg.type === 'update') {
         const signal = this._signals.get(msg.field);
         if (signal) signal.set(msg.value as string);
+      }
+      if (msg.type === 'waiting') {
+        this._waiting = msg.waiting;
       }
     };
   }
@@ -471,10 +478,10 @@ export class McpForm extends LitElement {
     this._ws?.send(JSON.stringify(msg));
   }
 
-  private _applyFormDef(formDef: FormDef, state: FieldValues) {
+  private _applyFormDef(formDef: FormDef, state: FieldValues, submitted: boolean) {
     this._title    = formDef.title ?? '';
     this._fields   = formDef.fields;
-    this._submitted = false;
+    this._submitted = submitted;
     this._errors   = {};
     this._signals  = new Map();
     this._fileState = new Map(); // name -> { status: 'idle'|'uploading'|'done'|'error', fileName }
@@ -1055,8 +1062,12 @@ export class McpForm extends LitElement {
             ${this._submitted ? 'Submitted' : 'Submit'}
           </button>
           ${this._submitted
-            ? html`<span class="submitted-note">Sent — waiting for agent…</span>`
-            : ''}
+            ? html`<span class="submitted-note">
+                ${this._waiting ? 'Sent — agent is waiting for this' : 'Sent — the agent will pick this up when it checks back'}
+              </span>`
+            : (this._waiting
+                ? html`<span class="submitted-note">Agent is waiting for your answers</span>`
+                : '')}
         </div>
       ` : ''}
 

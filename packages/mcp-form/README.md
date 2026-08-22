@@ -43,15 +43,28 @@ to the agent live over a WebSocket, and idle tenants are swept automatically.
 
 ## MCP tools
 
-- **`get_form_url`** — returns the tenant's form URL. Call this first and share the link with
-  the user before defining a form.
-- **`define_form`** — sets the form's title and fields. Pass `wait: true` to block and get the
-  submitted values back in one call; omit it if you need to `set_field` some defaults before
-  waiting.
+- **`define_form`** — sets the form's title and fields and returns immediately (does not
+  block) by default. The response always includes `formUrl` — share it with the user in chat
+  right after this call, before doing anything else, since that's the only chance to hand it
+  over if you're about to block on `wait_for_submit` next. Pass `wait: true` only when the URL
+  was already shared earlier (e.g. later steps of a multi-step form) — it folds `wait_for_submit`
+  into the same call, which means the tool never returns until the user submits and the agent
+  gets no opportunity to say anything first.
 - **`wait_for_submit`** — blocks until the user clicks Submit (`status: "submitted"`) or
-  "Update form" (`status: "interrupted"`, used to revise the form mid-flow), returning all
-  current field values either way.
-- **`list_fields`** — full schema + current values for the active form.
+  "Update form" (`status: "interrupted"`, used to revise the form mid-flow), returning
+  `formUrl` plus all current field values either way. Returns immediately, without blocking,
+  if the user already clicked Submit before this was called. Call this as a separate step
+  after `define_form` (rather than `wait: true`) whenever the user needs to be told the form
+  is ready first.
+- **`get_form_url`** — returns the tenant's form URL on its own. Rarely needed directly since
+  `define_form` and `wait_for_submit` already include it in their responses.
+- **`list_fields`** — `{submitted, fields}` for the active form: `submitted` is true once the
+  user has clicked Submit, independent of whether any tool call is currently waiting on it.
+  The form URL works standalone in a browser, so waiting is never required: if the agent
+  wasn't blocked on `wait_for_submit` (e.g. it was stopped, or the user just says "I filled
+  it in"), call this to read current values and check `submitted` instead of re-defining the
+  form or blocking fresh. The browser UI itself shows whether an agent is currently waiting,
+  so the user always knows if a wait call needs to be nudged into place.
 - **`get_field`** / **`set_field`** — read or programmatically set one field's value (e.g. to
   pre-fill a suggestion the user can still edit).
 

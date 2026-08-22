@@ -64,7 +64,7 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
       if (state) state.isAlive = true;
     });
 
-    ws.send(JSON.stringify({ type: 'init', schema: t.schema, state: t.store.snapshot() }));
+    ws.send(JSON.stringify({ type: 'init', schema: t.schema, state: t.store.snapshot(), waiting: t.waiting, submitted: t.submitted }));
 
     ws.on('message', (raw) => {
       t.touch();
@@ -76,6 +76,7 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
       }
 
       if (msg.type === 'submit') {
+        t.submitted = true;
         t.submitBus.emit('submit', { __interrupted: false, ...t.store.snapshot() });
       }
 
