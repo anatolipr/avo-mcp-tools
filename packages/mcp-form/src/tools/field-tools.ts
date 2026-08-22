@@ -12,8 +12,8 @@ const listFields: ToolDef = {
     'or to verify the form structure after calling define_form. ' +
     '\n\n' +
     'NO-WAIT PATTERN: the form URL works standalone in a browser — the user does not need the agent to be ' +
-    'actively waiting (wait_for_submit / define_form wait:true) in order to open it and fill it in. ' +
-    'If the agent was stopped or the turn ended before a wait call was made, or the user says something like ' +
+    'actively waiting (define_form, which blocks by default, or wait_for_submit) in order to open it and fill it in. ' +
+    'If the agent was stopped or the turn ended before a wait call resolved, or the user says something like ' +
     '"I filled it in" / "I\'m ready, get my answers" / "check the form" without the agent having called wait, ' +
     'call list_fields directly to read the current values instead of assuming nothing was submitted or that ' +
     'a fresh define_form is needed. Check "submitted" to distinguish "user says done" from "still editing" — ' +

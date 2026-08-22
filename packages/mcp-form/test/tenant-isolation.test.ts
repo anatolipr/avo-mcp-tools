@@ -118,11 +118,11 @@ test('two MCP sessions have isolated field values', async () => {
 
   await a.client.callTool({
     name: 'define_form',
-    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] },
+    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
   });
   await b.client.callTool({
     name: 'define_form',
-    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] },
+    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
   });
 
   await a.client.callTool({ name: 'set_field', arguments: { field: 'note', value: 'from A' } });
@@ -169,6 +169,7 @@ test('disposing a tenant while wait_for_submit waits resolves with an error', { 
     name: 'define_form',
     arguments: {
       fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }],
+      wait: false,
     },
   });
 
@@ -201,11 +202,11 @@ test('WebSocket broadcasts are scoped to the connecting tenant', async () => {
 
   await a.client.callTool({
     name: 'define_form',
-    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] },
+    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
   });
   await b.client.callTool({
     name: 'define_form',
-    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] },
+    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
   });
 
   const wsA = await connectWs(requireSessionId(a.transport));
@@ -274,7 +275,7 @@ test('closing an MCP session disposes its tenant and closes its WebSocket client
   const a = await connectClient();
   await a.client.callTool({
     name: 'define_form',
-    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] },
+    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
   });
   const tenantId = requireSessionId(a.transport);
   const wsA = await connectWs(tenantId);

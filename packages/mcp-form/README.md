@@ -43,21 +43,21 @@ to the agent live over a WebSocket, and idle tenants are swept automatically.
 
 ## MCP tools
 
-- **`define_form`** — sets the form's title and fields and returns immediately (does not
-  block) by default. The response always includes `formUrl` — share it with the user in chat
-  right after this call, before doing anything else, since that's the only chance to hand it
-  over if you're about to block on `wait_for_submit` next. Pass `wait: true` only when the URL
-  was already shared earlier (e.g. later steps of a multi-step form) — it folds `wait_for_submit`
-  into the same call, which means the tool never returns until the user submits and the agent
-  gets no opportunity to say anything first.
+- **`define_form`** — sets the form's title and fields and, by default, blocks until the user
+  submits or interrupts (`wait: true` is the default). The result always includes `formUrl`, so
+  re-share it whenever you relay the outcome — the user may have closed the tab since it was
+  last opened. Because MCP tool calls can't emit output until they return, the agent still can't
+  hand over the URL *while* the wait is in progress, only once it resolves. Pass `wait: false`
+  when the user doesn't yet have the URL (e.g. the first form in a conversation) or you need to
+  prefill fields with `set_field` first — it returns immediately with `formUrl`, and you follow
+  up with `wait_for_submit` as a separate step once ready to block.
 - **`wait_for_submit`** — blocks until the user clicks Submit (`status: "submitted"`) or
   "Update form" (`status: "interrupted"`, used to revise the form mid-flow), returning
   `formUrl` plus all current field values either way. Returns immediately, without blocking,
-  if the user already clicked Submit before this was called. Call this as a separate step
-  after `define_form` (rather than `wait: true`) whenever the user needs to be told the form
-  is ready first.
-- **`get_form_url`** — returns the tenant's form URL on its own. Rarely needed directly since
-  `define_form` and `wait_for_submit` already include it in their responses.
+  if the user already clicked Submit before this was called. Used after `define_form({wait:
+  false})`, or to resume waiting after an `"interrupted"` result.
+- **`get_form_url`** — returns the tenant's form URL on its own, without blocking. Useful when
+  you need to hand the user the link before `define_form`'s default blocking wait begins.
 - **`list_fields`** — `{submitted, fields}` for the active form: `submitted` is true once the
   user has clicked Submit, independent of whether any tool call is currently waiting on it.
   The form URL works standalone in a browser, so waiting is never required: if the agent
@@ -90,9 +90,12 @@ Fields support validation (`required`, `pattern` + `patternMessage`, `minLength`
 
 ## Multi-step forms
 
-Call `define_form` with `wait: true` repeatedly — once per step — reusing the same tenant/tab.
-Prefer splitting into steps once a form would otherwise carry more than ~6-8 fields or spans
-clearly distinct sections (e.g. "your info" → "your preferences" → "confirmation").
+Call `define_form` repeatedly — once per step — reusing the same tenant/tab; it blocks by
+default so each call simply picks up once that step is submitted. For the first step, if the
+user doesn't have the URL yet, use `define_form({wait: false})` + `wait_for_submit` so the link
+can be shared before blocking. Prefer splitting into steps once a form would otherwise carry
+more than ~6-8 fields or spans clearly distinct sections (e.g. "your info" → "your preferences"
+→ "confirmation").
 
 ## Development
 
