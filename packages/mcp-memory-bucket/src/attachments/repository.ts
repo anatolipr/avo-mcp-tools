@@ -59,7 +59,15 @@ export class AttachmentRepository {
     const next = (doc.attachments ?? []).filter((a) => a.filename !== filename);
     this.saveAttachmentsList(kind, docIdOrName, next);
     if (listAttachmentFiles(dir).length === 0) {
-      fs.rmdirSync(dir, { recursive: true });
+      fs.rmSync(dir, { recursive: true, force: true });
+      if (kind === 'memory') {
+        // Memory docs get a sibling <id>/ wrapper solely to hold attachments/
+        // (see attachmentsDirFor) - remove it too once it's empty.
+        const wrapperDir = path.dirname(dir);
+        if (fs.existsSync(wrapperDir) && fs.readdirSync(wrapperDir).length === 0) {
+          fs.rmdirSync(wrapperDir);
+        }
+      }
     }
   }
 
