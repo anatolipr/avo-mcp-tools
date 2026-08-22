@@ -31,7 +31,7 @@ export interface ManifestToolRegistry {
 const DESCRIBE_TOOLS_NAME = 'describe_tools';
 
 const DESCRIBE_TOOLS_DESCRIPTION =
-  'Returns manifest-level context for the tools this connected page registered: a ' +
+  'Returns manifest-level context for the tools connected to THIS SESSION\'S CURRENT CHANNEL: a ' +
   'page-authored summary (what kind of page/app this is, cross-tool sequencing rules, ' +
   'domain concepts) plus the current list of tool names and one-line descriptions. Call ' +
   'this once after connecting, before calling any other tool from this page, so you have ' +
@@ -39,7 +39,11 @@ const DESCRIBE_TOOLS_DESCRIPTION =
   'pages/tabs are connected to this session at once, tool names are prefixed per ' +
   'connection (e.g. "formalin__submit_form", "htmlpaint__clear_canvas") and this tool\'s ' +
   'response includes a `connections` array listing each connection\'s id, label, and ' +
-  'prefix — call it whenever you\'re unsure which prefix routes to which tab.';
+  'prefix — call it whenever you\'re unsure which prefix routes to which tab. ' +
+  'IMPORTANT — an empty or unexpected result here does NOT mean no page is bridged: this session may ' +
+  'simply be on the wrong channel (see join_channel). If the user expects a specific bridged app/page by ' +
+  'name (e.g. "the bulletino tab") and it\'s missing, call list_channels to check for a matching channel ' +
+  'and join_channel to it before assuming nothing is connected.';
 
 /**
  * Derives a stable, unique tool-name prefix per connection: sanitized from

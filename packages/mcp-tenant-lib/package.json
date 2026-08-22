@@ -1,6 +1,6 @@
 {
   "name": "mcp-tenant-lib",
-  "version": "0.1.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "Generic tenant/session bookkeeping + MCP wiring, reusable across projects.",
   "repository": {
@@ -35,6 +35,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "fastest-levenshtein": "^1.0.16",
     "ws": "^8.18.0",
     "zod": "^3.23.8"
   },

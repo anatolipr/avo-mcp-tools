@@ -349,6 +349,16 @@ export class Tenant<TSchema, TValues> {
   }
 }
 
+/**
+ * URL-safe slug rule for agent-chosen channel names (see channel-tools.ts):
+ * letters, digits, underscore, hyphen only. Channel names become part of the
+ * form URL path (`/t/<id>`), so anything requiring percent-encoding is
+ * rejected up front rather than silently mangled.
+ */
+function isValidChannelName(id: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(id);
+}
+
 const tenants = new Map<string, Tenant<any, any>>();
 
 function getOrCreateTenant<TSchema, TValues>(id: string, initialSchema: TSchema, initialValues: TValues): Tenant<TSchema, TValues> {
@@ -372,7 +382,7 @@ function envMs(name: string, defaultMs: number): number {
   return Number.isFinite(n) && n > 0 ? n : defaultMs;
 }
 
-const TENANT_IDLE_TIMEOUT_MS = envMs('TENANT_IDLE_TIMEOUT_MS', 30 * 60 * 1000);
+const TENANT_IDLE_TIMEOUT_MS = envMs('TENANT_IDLE_TIMEOUT_MS', 2 * 60 * 60 * 1000);
 const TENANT_SWEEP_INTERVAL_MS = envMs('TENANT_SWEEP_INTERVAL_MS', 5 * 60 * 1000);
 
 function startIdleSweep(onSweep: (id: string) => void) {
@@ -390,4 +400,4 @@ function startIdleSweep(onSweep: (id: string) => void) {
   return sweepInterval;
 }
 
-export { tenants, getOrCreateTenant, disposeTenant, startIdleSweep };
+export { tenants, getOrCreateTenant, disposeTenant, startIdleSweep, isValidChannelName };
