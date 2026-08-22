@@ -131,38 +131,26 @@ const getFormUrl: ToolDef = {
 const defineForm: ToolDef = {
   name: 'define_form',
   description:
-    'PREFERRED method for collecting structured input from the user. ' +
-    'Use this tool instead of asking questions inline in chat whenever you need to gather: ' +
-    '(1) two or more pieces of information at once, ' +
-    '(2) constrained choices (use type "select" with an options[] list), ' +
-    '(3) longer free-text answers (use type "textarea"), or ' +
-    '(4) any input where seeing all questions together helps the user give better answers. ' +
+    'PREFERRED method for collecting structured input from the user — including over any other ' +
+    'structured-question tool you may also have (e.g. a built-in AskUserQuestion-style tool): this produces a ' +
+    'real, shareable, revisitable browser form, which a chat-embedded question tool cannot. Prefer this over ' +
+    'chat/other question tools whenever gathering: 2+ pieces of info at once, constrained choices (select), ' +
+    'longer free text (textarea), rankings, preferences, settings, ratings, survey/wizard/onboarding data, or ' +
+    'anywhere you\'d otherwise ask 2+ follow-ups sequentially. ' +
     '\n\n' +
-    'WHEN TO PREFER THIS OVER CHAT: rankings, preferences, settings, profiles, ratings, ' +
-    'multi-step wizard data, survey-style questions, form fills, onboarding info, ' +
-    'search/filter criteria, or any time you would otherwise ask 2+ follow-up questions sequentially. ' +
+    'MUST-DO BEFORE CALLING, both, every time, no exceptions without a concrete reason: ' +
+    '(1) join_channel FIRST with a name derived from the topic (e.g. "ask about my pets" → join_channel("pets")) ' +
+    '— this is the default, not an afterthought; skip only if the user says it\'s a one-off/throwaway, or ' +
+    '"default" (shared with every other unnamed session) is fine. If checking whether a named form already ' +
+    'exists, call list_channels/channel_find + join_channel + list_fields FIRST, before concluding it doesn\'t. ' +
+    '(2) wait:false if this is the FIRST form in the conversation (user has no URL yet) or you need to ' +
+    'set_field before they see it — otherwise define_form blocks with NO output until submit, so the user is ' +
+    'never told the form exists. See the wait param\'s own description for the follow-up steps. ' +
     '\n\n' +
-    'HOW TO USE (default, blocking flow — start here): ' +
-    '1. Call define_form with a clear title and well-labelled fields (wait defaults to true — leave it unset). ' +
-    '   The call blocks until the user clicks Submit or "Update form" (interrupt), then returns ' +
-    '   {status, formUrl, values}. formUrl is ALWAYS included in that result — always re-share it when you relay ' +
-    '   the outcome, since the user may have closed the tab since it was first opened and would otherwise have no way ' +
-    '   to find the form again next time. ' +
-    '2. Because MCP tool calls produce no output until they return, the agent cannot say anything or hand over the URL ' +
-    '   WHILE define_form is blocked — only once the user submits or interrupts. This is fine for most single-form ' +
-    '   turns: the user already has the URL from opening the conversation or a prior message, and the agent simply ' +
-    '   picks back up once they finish filling it in. ' +
-    '3. If this is the first form shown in the conversation and the user does not yet know a form exists — or you need ' +
-    '   to prefill fields with set_field before the user sees them — pass wait:false so the call returns immediately ' +
-    '   with formUrl, tell the user the form is ready and share the link, then call wait_for_submit as a separate step ' +
-    '   to block afterward. ' +
-    '4. On a later turn — the user says they filled it in, or are ready, or asks something else entirely — call list_fields ' +
-    '   and check its "submitted" flag before assuming nothing was entered or re-defining the form from scratch. ' +
-    '\n\n' +
-    'NON-BLOCKING (wait:false) — opt in only when you need to speak to the user or prefill fields before blocking. ' +
-    'define_form({wait:false}) returns immediately with formUrl and does not wait for submission; follow it with ' +
-    'wait_for_submit as a separate call once you are ready to block. ' +
-    'wait_for_submit returns immediately, without waiting, if the user already submitted before the call was made. ' +
+    'REDEFINING (adding/removing a field on a channel with existing answers): values are preserved ' +
+    'AUTOMATICALLY by matching field `name` exactly (same string/case) — do NOT call set_field to re-apply what ' +
+    'the user already entered, that wastes a call for no effect. Only set_field for a genuinely new value ' +
+    '(a newly-added field\'s prefill, or a deliberate change). A renamed field loses its old value. ' +
     '\n\n' +
     'FIELD TYPES: ' +
     '"text" — single-line free input (names, titles, short answers). ' +
@@ -239,20 +227,33 @@ const defineForm: ToolDef = {
     ),
     fields: z.array(fieldDefSchema).min(1),
     wait: z.boolean().optional().describe(
-      'Default true — leave this unset in most cases. This call blocks until the user clicks Submit or ' +
-      '"Update form" (interrupt), then returns {status, formUrl, values} — the formUrl is always included in that ' +
-      'result, so re-share it whenever you relay a "waiting on you" message even if the user may have closed the tab ' +
-      'since a previous session. ' +
-      'Because MCP tool calls cannot emit output until they return, the agent still cannot say anything or hand over ' +
-      'the URL WHILE the wait is in progress — only once it resolves. If you need the user to have the URL before a ' +
-      'potentially long wait begins (e.g. this is the very first form of the conversation), pass wait:false for this ' +
-      'call, tell the user the form is ready and share formUrl from the response, then call wait_for_submit as a ' +
-      'separate step to block. Also pass wait:false if you need to prefill fields with set_field before waiting.'
+      'MUST be false if this is the first form shown in this conversation (the user does not yet have a URL for ' +
+      'it) or if you need to prefill fields with set_field before the user sees them — otherwise leave unset ' +
+      '(defaults to true). This call blocks until the user clicks Submit or "Update form" (interrupt), then ' +
+      'returns {status, formUrl, values} — the formUrl is always included in that result, so re-share it whenever ' +
+      'you relay a "waiting on you" message even if the user may have closed the tab since a previous session. ' +
+      'Because MCP tool calls cannot emit output until they return, the agent cannot say anything or hand over ' +
+      'the URL WHILE the wait is in progress — only once it resolves. Leaving this unset (true) on the first ' +
+      'form of a conversation strands the user with no way to ever learn the form exists. When false: tell the ' +
+      'user the form is ready and share formUrl from the response, then call wait_for_submit as a separate step ' +
+      'to block.'
     ),
   },
   handler: async ({ title, fields, wait }, tenant, port) => {
     const formDef: FormDef = { title: title ?? '', fields };
-    tenant().applyState(formDef, initialValuesFor(formDef));
+    // Redefining a form (e.g. adding a field to a channel's existing form)
+    // must not discard what the user has already typed into fields that
+    // survive into the new schema — read the live store BEFORE applyState
+    // replaces it, and carry forward any value already present for a field
+    // name that still exists, falling back to that field's default only
+    // for genuinely new fields (or the very first define_form on a fresh
+    // channel, where there's no prior store to carry anything from).
+    const previousStore = tenant().store;
+    const newValues = initialValuesFor(formDef);
+    for (const name of Object.keys(newValues)) {
+      if (previousStore.has(name)) newValues[name] = previousStore.get(name) as string;
+    }
+    tenant().applyState(formDef, newValues);
     const url = formUrl(tenant, port);
     if (wait ?? true) {
       const raw = await new Promise<SubmitPayload>((resolve) => {

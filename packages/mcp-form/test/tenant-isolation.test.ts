@@ -112,9 +112,15 @@ test('getOrCreateTenant returns independent tenants with isolated stores', async
   }
 });
 
-test('two MCP sessions have isolated field values', async () => {
+test('two MCP sessions have isolated field values once each has joined its own channel', async () => {
   const a = await connectClient();
   const b = await connectClient();
+
+  // Under defaultTenantMode: 'shared' (see server.ts), unnamed sessions
+  // share the 'default' tenant — isolation is now something a session
+  // requests via join_channel, not the automatic default.
+  await a.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-isolation-a' } });
+  await b.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-isolation-b' } });
 
   await a.client.callTool({
     name: 'define_form',
@@ -138,10 +144,22 @@ test('two MCP sessions have isolated field values', async () => {
   await b.client.close();
 });
 
-test('get_form_url returns a tenant-scoped URL containing the session id', async () => {
+test('get_form_url returns the shared "default" channel URL for a session that never joined one', async () => {
   const a = await connectClient();
   const result = await a.client.callTool({ name: 'get_form_url', arguments: {} });
-  assert.equal(textOf(result), `${BASE_URL}/t/${requireSessionId(a.transport)}`);
+  // mcp-form runs with defaultTenantMode: 'shared' (see server.ts) — an
+  // unnamed session lands on the real, shared 'default' channel, not a
+  // private per-session UUID. Naming a channel via join_channel is what
+  // gets a session its own URL (see the "Pets" scenario test below).
+  assert.equal(textOf(result), `${BASE_URL}/t/default`);
+  await a.client.close();
+});
+
+test('join_channel gives a session its own URL, distinct from the shared default', async () => {
+  const a = await connectClient();
+  await a.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-own-url' } });
+  const result = await a.client.callTool({ name: 'get_form_url', arguments: {} });
+  assert.equal(textOf(result), `${BASE_URL}/t/unit-test-own-url`);
   await a.client.close();
 });
 
@@ -200,6 +218,13 @@ test('WebSocket broadcasts are scoped to the connecting tenant', async () => {
   const a = await connectClient();
   const b = await connectClient();
 
+  // Each session must join its own channel first — under
+  // defaultTenantMode: 'shared' (see server.ts), unnamed sessions all land
+  // on the same 'default' tenant, so isolation now has to be requested
+  // explicitly rather than being the automatic per-session default.
+  await a.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-ws-scope-a' } });
+  await b.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-ws-scope-b' } });
+
   await a.client.callTool({
     name: 'define_form',
     arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
@@ -209,8 +234,8 @@ test('WebSocket broadcasts are scoped to the connecting tenant', async () => {
     arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
   });
 
-  const wsA = await connectWs(requireSessionId(a.transport));
-  const wsB = await connectWs(requireSessionId(b.transport));
+  const wsA = await connectWs('unit-test-ws-scope-a');
+  const wsB = await connectWs('unit-test-ws-scope-b');
 
   await a.client.callTool({ name: 'set_field', arguments: { field: 'note', value: 'hello from A' } });
   await new Promise((r) => setTimeout(r, 200));
@@ -285,6 +310,33 @@ test('closing an MCP session disposes its tenant and closes its WebSocket client
 
   await closed;
   assert.equal(wsA.ws.readyState, WebSocket.CLOSED);
+});
+
+test('two sessions joining the same channel share form state (the "Pets" scenario)', async () => {
+  const a = await connectClient();
+  const b = await connectClient();
+
+  await a.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-pets' } });
+  await b.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-pets' } });
+
+  await a.client.callTool({
+    name: 'define_form',
+    arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
+  });
+  await a.client.callTool({ name: 'set_field', arguments: { field: 'note', value: 'from session A' } });
+
+  // Session B never called define_form itself — it should see A's form and
+  // values purely by having joined the same channel, proving cross-session
+  // sharing works through join_channel rather than through direct Tenant
+  // access (this is the scenario the whole named-channels design targets).
+  const bResult = await b.client.callTool({ name: 'get_field', arguments: { field: 'note' } });
+  assert.equal(textOf(bResult), 'from session A');
+
+  const bUrl = await b.client.callTool({ name: 'get_form_url', arguments: {} });
+  assert.equal(textOf(bUrl), `${BASE_URL}/t/unit-test-pets`);
+
+  await a.client.close();
+  await b.client.close();
 });
 
 test('idle tenants are automatically disposed after a TTL, even without explicit session close', { timeout: 10000 }, async () => {

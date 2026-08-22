@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { getOrCreateTenant as getOrCreateTenantForForm, tenants, startIdleSweep, createHttpServer, attachWebSocketServer } from 'mcp-tenant-lib';
 import type { FormDef } from './types.js';
 import { initialValuesFor } from './types.js';
-import { registerFormTools } from './tools/register.js';
+import { makeRegisterFormTools } from './tools/register.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // __dirname is <pkg>/src when run via tsx (dev/test) and <pkg>/dist/src once
@@ -36,7 +36,14 @@ const httpServer = createHttpServer({
   initialSchema: initialFormDef,
   initialValues: initialValuesFor(initialFormDef),
   identity: { name: 'mcp-form', version: '0.2.0' },
-  registerFn: registerFormTools,
+  registerFn: makeRegisterFormTools(initialFormDef),
+  // A session that never calls join_channel lands on the shared 'default'
+  // channel rather than a private per-session UUID — same tradeoff
+  // js-bridge-mcp already makes (see its server.ts). Named channels are the
+  // encouraged path (see join_channel/define_form's tool descriptions);
+  // 'default' is the deliberate, anonymous, unscoped fallback for a
+  // genuinely one-off form, not a private sandbox.
+  defaultTenantMode: 'shared',
 });
 
 attachWebSocketServer(httpServer, PORT, initialFormDef, initialValuesFor(initialFormDef));
