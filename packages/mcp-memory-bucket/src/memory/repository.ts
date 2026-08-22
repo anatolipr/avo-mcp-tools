@@ -8,6 +8,7 @@ import { slugify } from '../store/slug.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, memorySyncSpec, type TableSyncSpec } from '../store/sync.js';
 import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
+import { attachmentsDirFor } from '../attachments/storage.js';
 import type { NamedFolder } from '../config.js';
 import { normalizeKey } from '../types.js';
 import type { MemoryDoc, MemoryDocType, MemoryFrontmatter, MemoryKeyType, MemoryStatus } from '../types.js';
@@ -32,6 +33,7 @@ interface MemoryRow {
   deprecated: number;
   paused: number;
   created_at: string | null;
+  attachments: string | null; // JSON
   body: string;
 }
 
@@ -48,6 +50,7 @@ function rowToDoc(row: MemoryRow): MemoryDoc {
     deprecated: !!row.deprecated,
     paused: !!row.paused,
     created_at: row.created_at ?? undefined,
+    attachments: row.attachments ? JSON.parse(row.attachments) : undefined,
     source_path: row.source_path,
     folder: row.folder,
     body: row.body,
@@ -390,6 +393,10 @@ export class MemoryRepository {
   delete(id: string): void {
     const existing = this.get(id);
     if (!existing) throw new Error(`memory doc with id "${id}" not found`);
+    // The <id>/ wrapper directory exists solely to hold attachments/ for this doc (memory docs
+    // are otherwise flat <id>.md files), so remove the whole wrapper — not just attachments/ —
+    // to avoid leaving an orphaned empty <id>/ directory behind. No-op if it never existed.
+    fs.rmSync(path.dirname(attachmentsDirFor(existing.source_path, 'memory')), { recursive: true, force: true });
     fs.unlinkSync(existing.source_path);
     removeFile(this.db, 'memory_docs', existing.source_path);
   }

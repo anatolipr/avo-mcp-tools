@@ -500,6 +500,11 @@ export class MemBucketApp extends LitElement {
     this.#refetch();
   }
 
+  #setSearch(value: string) {
+    this.#query.set(value);
+    this.#refetch();
+  }
+
   #clearSearch() {
     this.#query.set('');
     this.#refetch();
@@ -800,6 +805,7 @@ export class MemBucketApp extends LitElement {
           .onSelect=${(e: Entry) => this.#onSelect(e)}
           .selectedIds=${this.#selectedIds.value}
           .onToggleSelect=${(e: Entry) => this.#onToggleSelect(e)}
+          .onKeyClick=${(key: string) => this.#setSearch(key)}
         ></result-list>
         <div
           class="splitter ${this.#dragging.value ? 'dragging' : ''}"
@@ -815,6 +821,7 @@ export class MemBucketApp extends LitElement {
           .onTagClick=${(t: string) => this.#addTagFilter(t)}
           .onFolderClick=${(f: string) => this.#addFolderFilter(f)}
           .onDateClick=${(d: string) => this.#setDateFilter(d)}
+          .onKeyClick=${(key: string) => this.#setSearch(key)}
         ></detail-panel>
       </div>
       ${this.#showAddFolder.value

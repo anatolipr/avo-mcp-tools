@@ -129,3 +129,7 @@ export function removeFolder(config: BucketConfig, kind: 'skill' | 'memory', nam
   const next: ConfigFile = { ...current, [key]: filtered };
   fs.writeFileSync(config.configPath, JSON.stringify(next, null, 2) + '\n');
 }
+
+export const ATTACHMENT_MAX_BYTES = process.env.ATTACHMENT_MAX_BYTES
+  ? Number(process.env.ATTACHMENT_MAX_BYTES)
+  : 20 * 1024 * 1024; // 20MB default

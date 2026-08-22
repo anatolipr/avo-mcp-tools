@@ -23,6 +23,7 @@ interface SkillRow {
   deprecated: number;
   paused: number;
   created_at: string | null;
+  attachments: string | null; // JSON
   body: string;
 }
 
@@ -36,6 +37,7 @@ function rowToDoc(row: SkillRow): SkillDoc {
     deprecated: !!row.deprecated,
     paused: !!row.paused,
     created_at: row.created_at ?? undefined,
+    attachments: row.attachments ? JSON.parse(row.attachments) : undefined,
     source_path: row.source_path,
     folder: row.folder,
     body: row.body,

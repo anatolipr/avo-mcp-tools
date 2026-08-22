@@ -83,6 +83,7 @@ export class DetailPanel extends LitElement {
     onTagClick: { attribute: false },
     onFolderClick: { attribute: false },
     onDateClick: { attribute: false },
+    onKeyClick: { attribute: false },
     _doc: { state: true },
     _viewMode: { state: true },
     _editing: { state: true },
@@ -98,6 +99,7 @@ export class DetailPanel extends LitElement {
   declare onTagClick: ((tag: string) => void) | undefined;
   declare onFolderClick: ((folder: string) => void) | undefined;
   declare onDateClick: ((date: string) => void) | undefined;
+  declare onKeyClick: ((key: string) => void) | undefined;
   private _doc?: EntryDetail | null;
   private _viewMode: 'markdown' | 'raw' =
     (localStorage.getItem(VIEW_MODE_KEY) as 'markdown' | 'raw' | null) ?? 'markdown';
@@ -118,6 +120,17 @@ export class DetailPanel extends LitElement {
       margin-bottom: 10px;
     }
     .title-row h2 { margin: 0; }
+    .title-link {
+      background: none; border: none; padding: 0; margin: 0; font: inherit; font-weight: inherit;
+      color: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+      text-align: left;
+    }
+    .title-link:hover { opacity: 0.8; }
+    .key-link {
+      background: none; border: none; padding: 0; margin: 0; font: inherit;
+      color: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+    }
+    .key-link:hover { opacity: 0.8; }
     .pill {
       border: 1px solid var(--border-strong);
       border-radius: 999px;
@@ -182,6 +195,27 @@ export class DetailPanel extends LitElement {
     .info-grid .date-value:hover { opacity: 0.75; }
     .info-grid .hint { opacity: 0.5; font-style: italic; }
     .bare-notice { font-size: 12px; opacity: 0.6; font-style: italic; margin-bottom: 12px; }
+    .attachments-section {
+      font-size: 12px;
+      margin-bottom: 12px;
+    }
+    .attachments-section h4 {
+      margin: 0 0 6px;
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      opacity: 0.55;
+      font-weight: 600;
+    }
+    .attachments-section ul {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .attachment-meta { opacity: 0.55; font-size: 11px; }
     .source-path {
       font-family: monospace;
       font-size: 11px;
@@ -687,10 +721,17 @@ export class DetailPanel extends LitElement {
     `;
   }
 
-  #renderTitleRow(d: EntryDetail) {
+  #renderTitleRow(d: EntryDetail, isSkill: boolean) {
+    const key = isSkill ? undefined : d.key;
     return html`
       <div class="title-row">
-        <h2>${d.name ?? d.key ?? d.id}</h2>
+        <h2>
+          ${key
+            ? html`<button class="title-link" title="Search for key '${key}'" @click=${() => this.onKeyClick?.(key)}>
+                ${d.name ?? key ?? d.id}
+              </button>`
+            : (d.name ?? d.key ?? d.id)}
+        </h2>
         <button class="pill folder-pill" title="Filter by folder '${d.folder}'" @click=${() => this.onFolderClick?.(d.folder)}>
           📁 ${d.folder}
         </button>
@@ -740,7 +781,11 @@ export class DetailPanel extends LitElement {
             `
           : html`
               <dt>Key</dt>
-              <dd>${d.key}</dd>
+              <dd>
+                <button class="key-link" title="Search for this key" @click=${() => d.key && this.onKeyClick?.(d.key)}>
+                  ${d.key}
+                </button>
+              </dd>
 
               <dt>Key type</dt>
               <dd>${d.key_type}</dd>
@@ -766,6 +811,53 @@ export class DetailPanel extends LitElement {
     `;
   }
 
+  /**
+   * Builds a `marked` Renderer whose `link` override rewrites `attachment://<filename>` hrefs in
+   * body markdown to the real download URL served by src/web/routes.ts
+   * (`/api/entries/:table/:id/attachments/:filename` — see #renderAttachments above, which uses
+   * the same pattern for the header section). Confirmed against the installed `marked@18.0.10`
+   * renderer API (lib/marked.d.ts): `link` takes a single `Tokens.Link` object
+   * (`{ href, title, tokens }`), not the v3-era `(href, title, text)` positional signature — so the
+   * override below matches that shape and rebinds `this` when delegating to the original so the
+   * default renderer's use of `this.parser.parseInline(...)` keeps working.
+   */
+  #markedWithAttachmentLinks(table: 'skills' | 'memory_docs', docId: string) {
+    const renderer = new marked.Renderer();
+    const originalLink = renderer.link.bind(renderer);
+    renderer.link = (token) => {
+      if (typeof token.href === 'string' && token.href.startsWith('attachment://')) {
+        const filename = token.href.slice('attachment://'.length);
+        return originalLink({
+          ...token,
+          href: `/api/entries/${table}/${encodeURIComponent(docId)}/attachments/${encodeURIComponent(filename)}`,
+        });
+      }
+      return originalLink(token);
+    };
+    return renderer;
+  }
+
+  #renderAttachments(d: EntryDetail, table: 'skills' | 'memory_docs') {
+    if (!d.attachments?.length) return nothing;
+    return html`
+      <div class="attachments-section">
+        <h4>Attachments</h4>
+        <ul>
+          ${d.attachments.map(
+            (a) => html`
+              <li>
+                <a href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}" target="_blank" rel="noopener"
+                  >${a.filename}</a
+                >
+                <span class="attachment-meta">(${a.mime_type}, ${a.size} bytes)</span>
+              </li>
+            `
+          )}
+        </ul>
+      </div>
+    `;
+  }
+
   render() {
     if (!this.selected) return html`<div class="empty">Select an entry to view its details.</div>`;
     if (!this._doc) return nothing;
@@ -774,11 +866,11 @@ export class DetailPanel extends LitElement {
     const isBuiltin = isSkill && d.folder === 'builtin';
     const bare = !isSkill && d.has_frontmatter === false;
 
-    if (this._addingFrontmatter) return html`${this.#renderTitleRow(d)}${this.#renderDocTypePrompt()}`;
-    if (this._editing && this._draft) return html`${this.#renderTitleRow(d)}${this.#renderEditForm(isSkill)}`;
+    if (this._addingFrontmatter) return html`${this.#renderTitleRow(d, isSkill)}${this.#renderDocTypePrompt()}`;
+    if (this._editing && this._draft) return html`${this.#renderTitleRow(d, isSkill)}${this.#renderEditForm(isSkill)}`;
 
     return html`
-      ${this.#renderTitleRow(d)}
+      ${this.#renderTitleRow(d, isSkill)}
       ${bare ? html`<div class="bare-notice">No frontmatter — this is a plain, unmanaged file.</div>` : this.#renderInfoGrid(d, isSkill)}
       ${isBuiltin
         ? nothing
@@ -812,6 +904,7 @@ export class DetailPanel extends LitElement {
                 `
               : nothing}
           `}
+      ${this.#renderAttachments(d, this.selected.table)}
       <div class="view-toggle">
         <button
           class=${this._viewMode === 'markdown' ? 'active' : ''}
@@ -827,7 +920,12 @@ export class DetailPanel extends LitElement {
         </button>
       </div>
       ${this._viewMode === 'markdown'
-        ? html`<div class="markdown-body">${unsafeHTML(marked.parse(d.body ?? '', { async: false }) as string)}</div>`
+        ? html`<div class="markdown-body">${unsafeHTML(
+            marked.parse(d.body ?? '', {
+              async: false,
+              renderer: this.#markedWithAttachmentLinks(this.selected.table, d.id),
+            }) as string
+          )}</div>`
         : html`<pre>${d.raw_file ?? d.body}</pre>`}
       <div class="source-path" title="click to copy" @click=${() => this.#copyPath()}>${d.source_path}</div>
     `;

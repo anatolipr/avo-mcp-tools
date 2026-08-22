@@ -35,8 +35,8 @@ export interface TableSyncSpec<TFrontmatter> {
 // `paused` is deliberately absent from both lists: it's a local-only cache column (see
 // SkillRepository/MemoryRepository#setPaused) that never round-trips through frontmatter, so a
 // file add/change/rescan must never overwrite it via the INSERT/ON CONFLICT UPDATE below.
-const skillColumns = ['id', 'description', 'owner', 'status', 'tags', 'trigger_phrases', 'extends', 'deprecated', 'created_at'];
-const memoryColumns = ['id', 'key', 'key_type', 'description', 'doc_type', 'tags', 'status', 'related_to', 'deprecated', 'created_at'];
+const skillColumns = ['id', 'description', 'owner', 'status', 'tags', 'trigger_phrases', 'extends', 'deprecated', 'created_at', 'attachments'];
+const memoryColumns = ['id', 'key', 'key_type', 'description', 'doc_type', 'tags', 'status', 'related_to', 'deprecated', 'created_at', 'attachments'];
 
 export function skillSyncSpec(sources: NamedFolder[]): TableSyncSpec<SkillFrontmatter> {
   return {
@@ -55,6 +55,7 @@ export function skillSyncSpec(sources: NamedFolder[]): TableSyncSpec<SkillFrontm
       extends: fm.metadata?.extends ?? null,
       deprecated: fm.deprecated ? 1 : 0,
       created_at: fm.created_at ?? new Date(mtimeMs).toISOString(),
+      attachments: fm.attachments ? JSON.stringify(fm.attachments) : null,
     }),
   };
 }
@@ -93,6 +94,7 @@ export function memorySyncSpec(sources: NamedFolder[]): TableSyncSpec<MemoryFron
       related_to: fm.related_to ?? null,
       deprecated: fm.deprecated ? 1 : 0,
       created_at: fm.created_at ?? null,
+      attachments: fm.attachments ? JSON.stringify(fm.attachments) : null,
     }),
   };
 }
@@ -222,10 +224,11 @@ export function unregisterFolder(db: Database.Database, table: 'skills' | 'memor
   }
 }
 
-function* walkMarkdownFiles(dir: string): Generator<string> {
+export function* walkMarkdownFiles(dir: string): Generator<string> {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
+      if (entry.name === 'attachments') continue;
       yield* walkMarkdownFiles(full);
     } else if (entry.isFile() && entry.name.endsWith('.md')) {
       yield full;
@@ -236,7 +239,7 @@ function* walkMarkdownFiles(dir: string): Generator<string> {
 export function watchSources<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): FSWatcher {
   const watcher = chokidar.watch(
     spec.sources.map((f) => f.path),
-    { ignoreInitial: true, persistent: true, depth: 10 }
+    { ignoreInitial: true, persistent: true, depth: 10, ignored: /(^|[/\\])attachments([/\\]|$)/ }
   );
 
   watcher

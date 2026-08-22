@@ -13,6 +13,8 @@ import { registerMemoryTools } from './memory/tools.js';
 import { registerRelocateTool } from './shared/relocate-tool.js';
 import { registerSearchTool } from './shared/search-tool.js';
 import { registerBucketFolderTools } from './shared/bucket-folder-tool.js';
+import { registerAttachmentTools } from './attachments/tools.js';
+import { AttachmentRepository } from './attachments/repository.js';
 import { buildWebRouter } from './web/routes.js';
 import { registerUiTool } from './web/ui-tool.js';
 
@@ -50,6 +52,8 @@ const memoryRepo = new MemoryRepository(db, config.memoryFolders);
 skillRepo.setWatcher(skillWatcher);
 memoryRepo.setWatcher(memoryWatcher);
 
+const attachmentRepo = new AttachmentRepository(memoryRepo, skillRepo);
+
 if (config.skillFolders.length === 0 && config.memoryFolders.length === 0) {
   console.error(
     `[memory-bucket] no folders configured — open http://localhost:${PORT} to add one`
@@ -74,6 +78,7 @@ function buildMcpServer(): McpServer {
   registerRelocateTool(server, skillRepo, memoryRepo);
   registerSearchTool(server, db);
   registerBucketFolderTools(server, config, skillRepo, memoryRepo, db, skillSpec, memorySpec);
+  registerAttachmentTools(server, attachmentRepo);
   registerUiTool(server, PORT);
   return server;
 }

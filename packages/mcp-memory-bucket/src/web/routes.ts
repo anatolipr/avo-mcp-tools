@@ -11,6 +11,8 @@ import type { SkillRepository } from '../skills/repository.js';
 import { stripKey, type MemoryRepository } from '../memory/repository.js';
 import { initialScan, type TableSyncSpec } from '../store/sync.js';
 import { sanitizeFtsQuery } from '../store/search.js';
+import { resolveWithinBase } from '../store/safe-path.js';
+import { attachmentsDirFor } from '../attachments/storage.js';
 
 type EntryType = 'skill' | 'memory' | 'all';
 
@@ -64,8 +66,9 @@ function queryEntries(db: Database.Database, memoryRepo: MemoryRepository, req: 
   // Skills have no `key` concept, so they still go through the normal FTS path below when q is set.
   const keyMatch = q ? memoryRepo.suggestKeys(q, 1).find((m) => stripKey(m.key) === stripKey(q)) : undefined;
 
-  const matchedIds: { skills: Set<string>; memory_docs: Set<string> } | null =
-    q && !keyMatch ? matchSearch(db, q) : null;
+  // Always compute FTS matches when q is set, even on a keyMatch — skills still need this to stay
+  // filtered by q (they have no key concept, so keyMatch only bypasses filtering for memory_docs below).
+  const matchedIds: { skills: Set<string>; memory_docs: Set<string> } | null = q ? matchSearch(db, q) : null;
   if (q && !keyMatch && matchedIds && matchedIds.skills.size === 0 && matchedIds.memory_docs.size === 0) {
     return [];
   }
@@ -427,6 +430,7 @@ export function buildWebRouter(
     }
     const tags = JSON.parse(row.tags as string);
     const trigger_phrases = row.trigger_phrases ? JSON.parse(row.trigger_phrases as string) : undefined;
+    const attachments = row.attachments ? JSON.parse(row.attachments as string) : undefined;
     // A memory doc's cache row always looks fully populated even for a bare file (deriveFrontmatter's
     // fallback backfills id/key/etc — see sync.ts), so whether it actually has an authored
     // frontmatter block has to be checked on disk. This drives "Add frontmatter" (memory only —
@@ -445,7 +449,48 @@ export function buildWebRouter(
       // file unreadable/missing — treat as having frontmatter so the UI doesn't offer to "add"
       // one for a doc it can't actually reach; the existing edit/delete-doc paths will 404 instead.
     }
-    res.json({ ...row, tags, trigger_phrases, has_frontmatter, raw_file });
+    res.json({ ...row, tags, trigger_phrases, attachments, has_frontmatter, raw_file });
+  });
+
+  // Serves a single attachment file for a doc. Unauthenticated web-facing surface, so the
+  // filename from the URL is validated with resolveWithinBase (same containment check
+  // attachments/storage.ts uses when writing) to rule out path traversal before touching disk.
+  router.get('/api/entries/:table/:id/attachments/:filename', (req: Request, res: Response) => {
+    const { table, id, filename } = req.params;
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!filename) {
+      res.status(400).json({ error: 'filename is required' });
+      return;
+    }
+    const row = db.prepare(`SELECT source_path FROM ${table} WHERE id = ?`).get(id) as
+      | { source_path: string }
+      | undefined;
+    if (!row) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    const dir = attachmentsDirFor(row.source_path, table === 'skills' ? 'skill' : 'memory');
+    let filePath: string;
+    try {
+      filePath = resolveWithinBase(dir, undefined, filename);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+      return;
+    }
+    // Force a non-executable Content-Type and force-download disposition so a maliciously
+    // named attachment (e.g. "notes.html" with an embedded <script>) can never render inline
+    // in the browser and execute in this origin — Express/sendFile would otherwise infer
+    // Content-Type from the file extension.
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.sendFile(filePath, (err) => {
+      if (err && !res.headersSent) {
+        res.status(404).json({ error: 'attachment not found' });
+      }
+    });
   });
 
   router.patch('/api/entries/:table/:id/deprecated', (req: Request, res: Response) => {

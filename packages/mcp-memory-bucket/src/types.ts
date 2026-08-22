@@ -1,3 +1,5 @@
+import type { AttachmentEntry } from './attachments/types.js';
+
 // Free-form label, not a closed enum — conventional values are 'stable' | 'beta' | 'unreviewed',
 // but any lowercase-hyphenated string is accepted (see shared/status.ts).
 export type SkillStatus = string;
@@ -22,6 +24,7 @@ export interface SkillFrontmatter {
   compatibility?: string;
   tags: string[];
   trigger_phrases: string[];
+  attachments?: AttachmentEntry[];
   metadata: {
     owner: string | null;
     status: SkillStatus;
@@ -58,6 +61,7 @@ export interface MemoryFrontmatter {
   description: string;
   doc_type: MemoryDocType;
   tags: string[];
+  attachments?: AttachmentEntry[];
   status: MemoryStatus;
   related_to: string | null;
   deprecated?: boolean; // independent of status; defaults to false

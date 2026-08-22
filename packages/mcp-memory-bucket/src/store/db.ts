@@ -18,6 +18,7 @@ export function openCache(dbPath: string): Database.Database {
       deprecated INTEGER NOT NULL DEFAULT 0,
       paused INTEGER NOT NULL DEFAULT 0, -- local-only: never synced from/to SKILL.md, cache-file scoped
       created_at TEXT,
+      attachments TEXT,               -- JSON array of AttachmentEntry, mirrors frontmatter
       body TEXT NOT NULL,
       mtime_ms INTEGER NOT NULL
     );
@@ -36,6 +37,7 @@ export function openCache(dbPath: string): Database.Database {
       deprecated INTEGER NOT NULL DEFAULT 0,
       paused INTEGER NOT NULL DEFAULT 0, -- local-only: never synced from/to the doc's markdown file, cache-file scoped
       created_at TEXT,
+      attachments TEXT,               -- JSON array of AttachmentEntry, mirrors frontmatter
       body TEXT NOT NULL,
       mtime_ms INTEGER NOT NULL
     );
@@ -67,12 +69,14 @@ export function openCache(dbPath: string): Database.Database {
     ['deprecated', 'INTEGER NOT NULL DEFAULT 0'],
     ['paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['created_at', 'TEXT'],
+    ['attachments', 'TEXT'],
   ]);
   ensureColumns(db, 'memory_docs', [
     ['folder', "TEXT NOT NULL DEFAULT ''"],
     ['deprecated', 'INTEGER NOT NULL DEFAULT 0'],
     ['paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['created_at', 'TEXT'],
+    ['attachments', 'TEXT'],
   ]);
   ensureSearchIndexHasKeyColumn(db);
   backfillSearchIndex(db);

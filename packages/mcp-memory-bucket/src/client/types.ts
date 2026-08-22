@@ -1,3 +1,15 @@
+// Duplicated from src/attachments/types.ts (AttachmentEntry) — the client bundle (tsconfig.client.json)
+// only includes src/client/**/*.ts, so it can't import server-side types directly; EntryDetail/Entry
+// below follow the same established pattern of duplicating shapes locally rather than importing across
+// the client/server boundary.
+export interface ClientAttachmentEntry {
+  filename: string;
+  path: string; // relative to the doc's directory, e.g. "attachments/foo.json"
+  mime_type: string;
+  size: number;
+  added_at: string; // ISO date string
+}
+
 export interface Entry {
   _table: 'skills' | 'memory_docs';
   id: string;
@@ -38,6 +50,7 @@ export interface EntryDetail {
   /** True on-disk file content (frontmatter block + body), for the Raw view — distinct from
    * `body`, which is always frontmatter-stripped. */
   raw_file?: string;
+  attachments?: ClientAttachmentEntry[];
 }
 
 export interface Facets {

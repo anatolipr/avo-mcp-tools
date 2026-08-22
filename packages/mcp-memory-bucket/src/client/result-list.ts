@@ -48,6 +48,7 @@ export class ResultList extends LitElement {
     onSelect: { attribute: false },
     selectedIds: { attribute: false },
     onToggleSelect: { attribute: false },
+    onKeyClick: { attribute: false },
   };
 
   declare results: Entry[];
@@ -55,6 +56,7 @@ export class ResultList extends LitElement {
   declare onSelect: (entry: Entry) => void;
   declare selectedIds: Set<string>;
   declare onToggleSelect: (entry: Entry) => void;
+  declare onKeyClick: ((key: string) => void) | undefined;
 
   static styles = css`
     :host { display: block; }
@@ -79,6 +81,11 @@ export class ResultList extends LitElement {
       gap: 6px;
     }
     .key-group-count { opacity: 0.6; font-weight: 400; }
+    .key-group-link {
+      background: none; border: none; padding: 0; margin: 0; font: inherit; font-weight: 700;
+      color: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+    }
+    .key-group-link:hover { opacity: 0.8; }
     .row { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; gap: 8px; }
     .row:hover { background: var(--hover); }
     .row.deprecated { opacity: 0.55; }
@@ -116,7 +123,19 @@ export class ResultList extends LitElement {
       <div class="count-header">${this.results.length} result${this.results.length === 1 ? '' : 's'}</div>
       ${groupByKey(this.results).map(
         (group) => html`
-          ${group.key ? html`<div class="key-group-header">🔑 ${group.key} <span class="key-group-count">(${group.items.length})</span></div>` : ''}
+          ${group.key
+            ? html`<div class="key-group-header">
+                🔑
+                <button
+                  class="key-group-link"
+                  title="Search for this key"
+                  @click=${() => this.onKeyClick?.(group.key!)}
+                >
+                  ${group.key}
+                </button>
+                <span class="key-group-count">(${group.items.length})</span>
+              </div>`
+            : ''}
           ${group.items.map((r) => this.#renderRow(r))}
         `
       )}
