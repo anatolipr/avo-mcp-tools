@@ -69,10 +69,10 @@ async function waitForTool(client: Client, name: string, timeoutMs = 3000) {
   throw new Error(`tool "${name}" did not appear in tools/list within ${timeoutMs}ms`);
 }
 
-test('a fresh session only has get_embed_snippet and describe_tools until a page pushes its manifest', async () => {
+test('a fresh session only has the base tools until a page pushes its manifest', async () => {
   const a = await connectClient();
   const names = await toolNames(a.client);
-  assert.deepEqual(names.sort(), ['describe_tools', 'get_embed_snippet']);
+  assert.deepEqual(names.sort(), ['channel_find', 'describe_tools', 'get_embed_snippet', 'join_channel', 'list_channels']);
   await a.client.close();
 });
 
