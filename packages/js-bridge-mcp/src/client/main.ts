@@ -51,8 +51,9 @@ const tenant = scriptUrl.searchParams.get('tenant') ?? undefined;
 const socket = connectStateSocket<undefined, undefined>(
   {
     onConnect() {
-      console.log('[js-bridge-mcp] connected');
-      socket.send({ type: 'register_tools', tools: manifest, summary: pageSummary, appLabel: labelForFirstRegister() });
+      const label = labelForFirstRegister();
+      console.log(`[js-bridge-mcp] connected as "${label ?? '(unlabeled)'}"`);
+      socket.send({ type: 'register_tools', tools: manifest, summary: pageSummary, appLabel: label });
     },
     async onCall(id, name, args) {
       try {
