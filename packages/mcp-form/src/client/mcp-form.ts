@@ -418,6 +418,10 @@ export class McpForm extends LitElement {
   private _signals = new Map<string, Signal<string>>();
   private _fileState = new Map<string, FileState>();
   private _ws: WebSocket | undefined;
+  // Bumped on every real local edit (see _onInput/_onSubmit); sent with a
+  // resync so the server can favor whichever tab's data is actually newer
+  // when more than one tab reconnects to the same recreated tenant.
+  private _lastChangedAt = 0;
 
   constructor() {
     super();
@@ -460,7 +464,27 @@ export class McpForm extends LitElement {
     };
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data) as ServerMessage<FormDef, FieldValues>;
-      if (msg.type === 'init' || msg.type === 'reinit') {
+      if (msg.type === 'init') {
+        // A `recreated` tenant means the server lost its in-memory state
+        // (most commonly a restart) while this tab stayed open — its own
+        // signals (the actual source of truth) are still live. Push them
+        // back up instead of accepting the server's fresh default state.
+        // A genuinely first-ever connection has no fields yet, so this is
+        // a no-op there.
+        if (msg.recreated && this._fields.length > 0) {
+          this._send({
+            type: 'resync',
+            schema: { title: this._title, fields: this._fields },
+            values: this._snapshotValues(),
+            submitted: this._submitted,
+            changedAt: this._lastChangedAt,
+          });
+        } else {
+          this._applyFormDef(msg.schema, msg.state, msg.submitted);
+        }
+        this._waiting = msg.waiting;
+      }
+      if (msg.type === 'reinit') {
         this._applyFormDef(msg.schema, msg.state, msg.submitted);
         this._waiting = msg.waiting;
       }
@@ -476,6 +500,12 @@ export class McpForm extends LitElement {
 
   private _send(msg: ClientMessage) {
     this._ws?.send(JSON.stringify(msg));
+  }
+
+  private _snapshotValues(): FieldValues {
+    const values: FieldValues = {};
+    for (const [name, signal] of this._signals) values[name] = signal.get();
+    return values;
   }
 
   private _applyFormDef(formDef: FormDef, state: FieldValues, submitted: boolean) {
@@ -495,6 +525,7 @@ export class McpForm extends LitElement {
   }
 
   private _onInput(name: string, value: string, errorKey?: string) {
+    this._lastChangedAt = Date.now();
     this._signals.get(name)?.set(value);
     this._send({ type: 'set', field: name, value });
     const key = errorKey ?? name;
@@ -585,6 +616,7 @@ export class McpForm extends LitElement {
       this._errors = errors;
       return;
     }
+    this._lastChangedAt = Date.now();
     this._submitted = true;
     this._send({ type: 'submit' });
   }

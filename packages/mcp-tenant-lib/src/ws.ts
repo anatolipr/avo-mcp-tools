@@ -73,7 +73,7 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
       if (state) state.isAlive = true;
     });
 
-    ws.send(JSON.stringify({ type: 'init', schema: t.schema, state: t.store.snapshot(), waiting: t.waiting, submitted: t.submitted }));
+    ws.send(JSON.stringify({ type: 'init', schema: t.schema, state: t.store.snapshot(), waiting: t.waiting, submitted: t.submitted, recreated }));
 
     ws.on('message', (raw) => {
       t.touch();
@@ -104,6 +104,13 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
       if (msg.type === 'call_result') {
         if (msg.error) t.rejectCall(msg.id, msg.error);
         else t.resolveCall(msg.id, msg.result);
+      }
+
+      if (msg.type === 'resync') {
+        const applied = t.restoreState(msg.schema as TSchema, msg.values as TValues, msg.submitted, msg.changedAt);
+        console.error(applied
+          ? `[ws] resync from connection=${connectionId}: restoring tenant "${tenantId}" state pushed back by the browser`
+          : `[ws] resync from connection=${connectionId}: ignored — tenant "${tenantId}" already has state at least as recent`);
       }
     });
 

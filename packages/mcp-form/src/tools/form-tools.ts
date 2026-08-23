@@ -287,6 +287,11 @@ const waitForSubmit: ToolDef = {
     'define_form already blocks by default (wait defaults to true), so you normally do not need to call this ' +
     'separately — use it after define_form({wait:false}) when you needed to share formUrl or prefill fields first, ' +
     'or after an "interrupted" result to resume waiting once the form has been adjusted. ' +
+    'RESUMING AFTER A GAP (your own turn/session was interrupted, not the in-browser "Update form" button): a ' +
+    'session\'s channel binding (from join_channel) does NOT survive an MCP server restart or a fresh connection, ' +
+    'even though the channel\'s form data does — so after any gap, re-confirm you are still on the right channel ' +
+    '(list_channels/channel_find, or just recall the name from earlier in this conversation and call join_channel ' +
+    'again) before calling wait_for_submit; do not assume the session is still on "default" or wherever it last was. ' +
     '\n\n' +
     'RETURN SHAPE: a JSON object with these top-level keys: ' +
     '"status": either "submitted" (user clicked Submit — form is done) or "interrupted" (user clicked "Update form" — agent should read chat, adjust the form via define_form, then call wait_for_submit again). ' +

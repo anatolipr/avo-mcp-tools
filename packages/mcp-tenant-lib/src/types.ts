@@ -5,7 +5,8 @@ export interface SubmitPayload {
 }
 
 export type ServerMessage<TSchema = unknown, TValues = unknown> =
-  | { type: 'init' | 'reinit'; schema: TSchema; state: TValues; waiting: boolean; submitted: boolean }
+  | { type: 'init'; schema: TSchema; state: TValues; waiting: boolean; submitted: boolean; recreated: boolean }
+  | { type: 'reinit'; schema: TSchema; state: TValues; waiting: boolean; submitted: boolean }
   | { type: 'update'; field: string; value: unknown }
   | { type: 'waiting'; waiting: boolean }
   | { type: 'identify'; label?: string }
@@ -15,6 +16,32 @@ export interface SetMessage {
   type: 'set';
   field: string;
   value: unknown;
+}
+
+/**
+ * Sent by a page that reconnects to a tenant the server reports as
+ * `recreated` (see the `init` message) — i.e. the in-memory tenant was
+ * lost, most commonly an MCP server restart, while this page's own JS
+ * runtime (and therefore its last-known schema/values) survived because
+ * the tab itself never reloaded. Lets the still-live browser page push its
+ * state back up as the source of truth instead of accepting the server's
+ * freshly-recreated default state. The server applies it via the same
+ * path as define_form (Tenant.applyState) and rebroadcasts `reinit` to any
+ * other connected tabs.
+ */
+export interface ResyncMessage<TSchema = unknown, TValues = unknown> {
+  type: 'resync';
+  schema: TSchema;
+  values: TValues;
+  submitted: boolean;
+  /**
+   * The pushing page's own last-local-edit timestamp (Date.now()) — lets
+   * the server arbitrate when two tabs both resync the same recreated
+   * tenant, favoring whichever has the more recently edited data rather
+   * than whichever resync message happens to arrive first. See
+   * Tenant.restoreState in mcp-tenant-lib for the comparison.
+   */
+  changedAt: number;
 }
 
 export interface SubmitMessage {
@@ -93,4 +120,4 @@ export interface RenameConnectionMessage {
   appLabel: string;
 }
 
-export type ClientMessage = SetMessage | SubmitMessage | InterruptMessage | RegisterToolsMessage | CallResultMessage | RenameConnectionMessage;
+export type ClientMessage = SetMessage | SubmitMessage | InterruptMessage | RegisterToolsMessage | CallResultMessage | RenameConnectionMessage | ResyncMessage;

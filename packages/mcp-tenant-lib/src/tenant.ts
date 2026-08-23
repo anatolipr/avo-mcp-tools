@@ -83,6 +83,16 @@ export class Tenant<TSchema, TValues> {
    * list_fields read should be able to see that they're done.
    */
   submitted = false;
+  /**
+   * Timestamp of the most recent real edit to `store` (a field value
+   * changing) or a successfully-applied `restoreState` (see below) —
+   * distinct from `lastActivityAt`, which also counts reads/pings and
+   * drives idle-sweep instead. Used solely to arbitrate `resync` messages
+   * (ws.ts) when more than one browser tab reconnects to the same
+   * recreated tenant: whichever tab's last edit is newer wins, rather than
+   * whichever tab's resync happens to reach the server first.
+   */
+  lastStateChangeAt = 0;
   wsClients: Set<WebSocket>;
   connections = new Map<string, TenantConnection>();
   #legacyManifest?: ToolManifestEntry[];
@@ -126,7 +136,7 @@ export class Tenant<TSchema, TValues> {
   constructor(id: string, initialSchema: TSchema, initialValues: TValues) {
     this.id = id;
     this.schema = initialSchema;
-    this.store = new Store(initialValues);
+    this.store = new Store(initialValues); // placeholder; #attachStore below wires the real onChange listener
     this.submitBus = new EventEmitter();
     this.submitBus.setMaxListeners(0);
     this.submitBus.on('newListener', (event) => {
@@ -139,7 +149,7 @@ export class Tenant<TSchema, TValues> {
     });
     this.wsClients = new Set();
     this.lastActivityAt = Date.now();
-    this.store.onChange((field, value) => this.broadcastUpdate(field, value));
+    this.#attachStore(this.store);
   }
 
   /**
@@ -316,13 +326,51 @@ export class Tenant<TSchema, TValues> {
     this.lastActivityAt = Date.now();
   }
 
+  #attachStore(store: Store<TValues>) {
+    this.store = store;
+    this.store.onChange((field, value) => {
+      this.lastStateChangeAt = Date.now();
+      this.broadcastUpdate(field, value);
+    });
+  }
+
   applyState(schema: TSchema, values: TValues) {
     this.store.dispose();
     this.schema = schema;
-    this.store = new Store(values);
+    this.#attachStore(new Store(values));
     this.submitted = false;
-    this.store.onChange((field, value) => this.broadcastUpdate(field, value));
     this.broadcastReinit();
+  }
+
+  /**
+   * Restores schema/values/submitted from a browser page's own live state
+   * after this tenant was recreated empty (see the `recreated` init flag in
+   * ws.ts) — unlike applyState (used by define_form to redefine a form),
+   * this preserves `submitted` as reported by the page rather than always
+   * resetting it, since a resync is recovering prior state, not starting a
+   * new round.
+   *
+   * `changedAt` is the pushing page's own last-local-edit timestamp
+   * (Date.now() when the user or agent last changed a field in that tab —
+   * see mcp-form's client). When two tabs both reconnect to the same
+   * recreated tenant, each pushes its own resync independently; without
+   * this guard, whichever happens to reach the server first would win,
+   * which has nothing to do with which tab actually has the fresher data.
+   * Comparing against `lastStateChangeAt` (bumped by every real edit,
+   * including a previously-applied resync) means an older resync arriving
+   * after a newer one — or after the tenant was already touched some other
+   * way, e.g. an agent's set_field — is ignored rather than clobbering it.
+   * Returns whether the resync was applied.
+   */
+  restoreState(schema: TSchema, values: TValues, submitted: boolean, changedAt: number): boolean {
+    if (changedAt < this.lastStateChangeAt) return false;
+    this.store.dispose();
+    this.schema = schema;
+    this.#attachStore(new Store(values));
+    this.submitted = submitted;
+    this.lastStateChangeAt = changedAt;
+    this.broadcastReinit();
+    return true;
   }
 
   broadcastReinit() {

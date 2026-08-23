@@ -268,6 +268,91 @@ test('WebSocket connection with an unknown but validly-named tenant id recreates
   ws.close();
 });
 
+test('a "resync" pushed from the browser after a recreated tenant restores schema/values/submitted', { timeout: 5000 }, async () => {
+  // Verified purely over the WS wire against the spawned server subprocess
+  // (see `before()`) rather than via an in-process `import('../src/server.js')`
+  // — that import would construct an entirely separate `tenants` map living
+  // in this test process, not the one the WS connection below actually
+  // talks to (see the `getOrCreateTenant returns independent tenants...`
+  // test above for that in-process pattern used correctly, on its own port).
+  const channel = 'unit-test-resync-restores-state';
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${channel}`);
+  const messages: any[] = [];
+  const initMsg: any = await new Promise((resolve, reject) => {
+    ws.on('message', (raw) => {
+      const msg = JSON.parse(raw.toString());
+      messages.push(msg);
+      if (msg.type === 'init') resolve(msg);
+    });
+    ws.on('error', reject);
+  });
+
+  // First connection to a brand-new channel: still reported `recreated`
+  // (it never existed), but there's nothing to push back — this mirrors
+  // the client's own `this._fields.length > 0` guard, exercised here
+  // directly against the server's resync handling instead of the guard.
+  assert.equal(initMsg.recreated, true);
+
+  const schema = { title: 'Recovered form', fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] };
+  const reinitPromise = new Promise<any>((resolve) => {
+    const onMessage = (raw: Buffer) => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === 'reinit') { ws.off('message', onMessage); resolve(msg); }
+    };
+    ws.on('message', onMessage);
+  });
+  ws.send(JSON.stringify({ type: 'resync', schema, values: { note: 'recovered value' }, submitted: true, changedAt: Date.now() }));
+
+  // restoreState broadcasts `reinit` (including back to the sender) once
+  // the resync is applied — waiting for it confirms the server actually
+  // processed the resync rather than guessing at a fixed delay.
+  const reinit = await reinitPromise;
+  assert.equal(reinit.schema.title, 'Recovered form');
+  assert.equal(reinit.state.note, 'recovered value');
+  assert.equal(reinit.submitted, true, 'resync should restore submitted state, not reset it like define_form does');
+
+  ws.close();
+});
+
+test('an older resync (stale tab) is ignored once a newer resync (freshly-edited tab) already landed', { timeout: 5000 }, async () => {
+  // Simulates two browser tabs on the same channel both reconnecting after
+  // a server restart: tab B was edited more recently than tab A, but tab
+  // A's resync happens to reach the server first. The stale one (A) must
+  // not clobber the fresher one (B) — see Tenant.restoreState. Verified
+  // over the wire (see note in the test above re: in-process imports).
+  const channel = 'unit-test-resync-favors-freshest';
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${channel}`);
+  const reinits: any[] = [];
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.type === 'reinit') reinits.push(msg);
+  });
+  await new Promise((resolve, reject) => {
+    ws.on('open', resolve);
+    ws.on('error', reject);
+  });
+
+  const schemaA = { title: 'From tab A (stale)', fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] };
+  const schemaB = { title: 'From tab B (fresh)', fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }] };
+
+  const staleChangedAt = Date.now() - 60_000; // tab A: edited a minute ago
+  const freshChangedAt = Date.now(); // tab B: edited just now
+
+  // Fresh resync (B) arrives first...
+  ws.send(JSON.stringify({ type: 'resync', schema: schemaB, values: { note: 'from B' }, submitted: false, changedAt: freshChangedAt }));
+  await new Promise((r) => setTimeout(r, 150));
+  // ...then the stale one (A) arrives after it and must be ignored: no
+  // second `reinit` should be broadcast for it at all.
+  ws.send(JSON.stringify({ type: 'resync', schema: schemaA, values: { note: 'from A' }, submitted: false, changedAt: staleChangedAt }));
+  await new Promise((r) => setTimeout(r, 150));
+
+  assert.equal(reinits.length, 1, 'the stale resync must not trigger a second reinit broadcast');
+  assert.equal(reinits[0].schema.title, 'From tab B (fresh)', 'the stale resync must not overwrite the fresher one');
+  assert.equal(reinits[0].state.note, 'from B');
+
+  ws.close();
+});
+
 test('WebSocket connection with an invalid tenant id is rejected with 4404', { timeout: 5000 }, async () => {
   const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${encodeURIComponent('not a valid id!')}`);
   const closeCode = await new Promise((resolve, reject) => {
