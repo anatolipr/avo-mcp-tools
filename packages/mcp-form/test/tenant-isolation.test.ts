@@ -163,26 +163,22 @@ test('join_channel gives a session its own URL, distinct from the shared default
   await a.client.close();
 });
 
-test('disposing a tenant while define_form waits for submit resolves with an error', { timeout: 5000 }, async () => {
+test('closing the MCP session while define_form waits for submit does not disturb the pending wait', { timeout: 5000 }, async () => {
+  // Session close/DELETE intentionally no longer disposes the tenant (see
+  // http.ts) — the form is still live in the browser and someone could
+  // still submit it, so a pending define_form(wait:true) must keep
+  // waiting rather than being force-resolved with an error just because
+  // the MCP client that started it went away.
+  //
+  // Note: we can't await the original define_form call after closing its
+  // own session — DELETE tears down that session's whole HTTP transport
+  // (including the still-open stream that would carry the eventual
+  // result back), so the client-side promise would never resolve/reject
+  // regardless of server-side behavior. Instead, verify server-side state
+  // directly: the tenant must still be live and accept a submit.
   const a = await connectClient();
-  const waitPromise = a.client.callTool({
-    name: 'define_form',
-    arguments: {
-      fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }],
-      wait: true,
-    },
-  });
-
-  await new Promise((r) => setTimeout(r, 200));
-  await closeSession(requireSessionId(a.transport));
-
-  const result = await waitPromise;
-  assert.equal(result.isError, true);
-  assert.equal(textOf(result), 'Error: the session was closed while waiting for submit');
-});
-
-test('disposing a tenant while wait_for_submit waits resolves with an error', { timeout: 5000 }, async () => {
-  const a = await connectClient();
+  const channel = 'unit-test-session-close-survives';
+  await a.client.callTool({ name: 'join_channel', arguments: { channel } });
   await a.client.callTool({
     name: 'define_form',
     arguments: {
@@ -191,17 +187,15 @@ test('disposing a tenant while wait_for_submit waits resolves with an error', { 
     },
   });
 
-  const waitPromise = a.client.callTool({
-    name: 'wait_for_submit',
-    arguments: {},
-  });
-
-  await new Promise((r) => setTimeout(r, 200));
   await closeSession(requireSessionId(a.transport));
 
-  const result = await waitPromise;
-  assert.equal(result.isError, true);
-  assert.equal(textOf(result), 'Error: the session was closed while waiting for submit');
+  // A fresh session on the same channel can still read/drive the form —
+  // proves the tenant survived the first session's close.
+  const b = await connectClient();
+  await b.client.callTool({ name: 'join_channel', arguments: { channel } });
+  const result = await b.client.callTool({ name: 'get_form_url', arguments: {} });
+  assert.equal(textOf(result), `${BASE_URL}/t/${channel}`);
+  await b.client.close();
 });
 
 function connectWs(tenantId: string): Promise<{ ws: WebSocket; messages: any[] }> {
@@ -261,12 +255,25 @@ test('GET /t/:tenantId serves the form page', async () => {
   await a.client.close();
 });
 
-test('WebSocket connection with an unknown tenant id is rejected, not silently joined to default', { timeout: 5000 }, async () => {
-  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=this-tenant-does-not-exist`);
+test('WebSocket connection with an unknown but validly-named tenant id recreates that tenant, not silently joined to default', { timeout: 5000 }, async () => {
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=this-tenant-does-not-exist-yet`);
+  const initMsg: any = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Timed out waiting for an "init" message on the recreated tenant')), 1000);
+    ws.on('message', (raw) => { clearTimeout(timer); resolve(JSON.parse(raw.toString())); });
+    ws.on('error', reject);
+  });
+  // A real, freshly-created tenant (not a rejection, and not silently
+  // reusing 'default') responds with its own fresh init state.
+  assert.equal(initMsg.type, 'init');
+  ws.close();
+});
+
+test('WebSocket connection with an invalid tenant id is rejected with 4404', { timeout: 5000 }, async () => {
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${encodeURIComponent('not a valid id!')}`);
   const closeCode = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       ws.close();
-      reject(new Error('Timed out waiting for the unknown-tenant WebSocket to close'));
+      reject(new Error('Timed out waiting for the invalid-tenant WebSocket to close'));
     }, 1000);
 
     ws.on('close', (code) => {
@@ -296,20 +303,28 @@ test('mcp-form.ts reads the tenant id from the URL path and connects with it', a
   assert.match(src, /event\.code === 4404/, 'expected client-side code to stop reconnecting on unknown tenants');
 });
 
-test('closing an MCP session disposes its tenant and closes its WebSocket clients', { timeout: 5000 }, async () => {
+test('closing an MCP session leaves its tenant and bridged WebSocket clients alone', { timeout: 5000 }, async () => {
+  // Session close/DELETE intentionally does not dispose the tenant (see
+  // http.ts) — routine MCP session churn (e.g. observed with Copilot,
+  // which reconnects between turns) must not force-close a bridged
+  // browser tab or interrupt whoever's filling out its form. Only the
+  // idle sweep or an explicit dispose ends a tenant now.
   const a = await connectClient();
+  const channel = 'unit-test-session-close-leaves-ws-alone';
+  await a.client.callTool({ name: 'join_channel', arguments: { channel } });
   await a.client.callTool({
     name: 'define_form',
     arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
   });
-  const tenantId = requireSessionId(a.transport);
-  const wsA = await connectWs(tenantId);
+  const wsA = await connectWs(channel);
 
-  const closed = new Promise((resolve) => wsA.ws.on('close', resolve));
   await a.client.close();
+  // No server-pushed close is expected — give any (incorrect) async close
+  // a moment to happen before asserting the socket is still open.
+  await new Promise((r) => setTimeout(r, 300));
 
-  await closed;
-  assert.equal(wsA.ws.readyState, WebSocket.CLOSED);
+  assert.equal(wsA.ws.readyState, WebSocket.OPEN);
+  wsA.ws.close();
 });
 
 test('two sessions joining the same channel share form state (the "Pets" scenario)', async () => {
