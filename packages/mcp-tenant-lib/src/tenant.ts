@@ -284,6 +284,20 @@ export class Tenant<TSchema, TValues> {
     });
   }
 
+  /**
+   * Pushes an 'identify' message at one connection so its page can surface
+   * something a human watching the browser will notice (alert/sound) — lets
+   * an agent say "which tab is this" when several are bridged into one
+   * channel. Fire-and-forget like rename_connection: no ack, and silently
+   * a no-op if the connection has since closed.
+   */
+  identifyConnection(connectionId: string): boolean {
+    const conn = this.connections.get(connectionId);
+    if (!conn || conn.socket.readyState !== conn.socket.OPEN) return false;
+    conn.socket.send(JSON.stringify({ type: 'identify', label: conn.label }));
+    return true;
+  }
+
   resolveCall(id: string, result: unknown) {
     const pending = this.pendingCalls.get(id);
     if (!pending) return;

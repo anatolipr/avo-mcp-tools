@@ -40,9 +40,10 @@ test('createManifestToolRegistry registers a tool per manifest entry with correc
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
-  assert.equal(registry.handles.size, 2);
+  assert.equal(registry.handles.size, 3);
   assert.ok(registry.handles.has('insert_title'));
   assert.ok(registry.handles.has('describe_tools'));
+  assert.ok(registry.handles.has('identify_connection'));
 });
 
 test('calling a manifest tool sends a "call" WS message (by tool name) and resolves via resolveCall', async () => {
@@ -131,7 +132,7 @@ test('describe_tools returns the page summary and a compact tool index, and shad
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
 
-  assert.equal(registry.handles.size, 2, 'the colliding page tool name should not add a second handle');
+  assert.equal(registry.handles.size, 3, 'the colliding page tool name should not add a second handle');
 
   const handle = registry.handles.get('describe_tools')!;
   const result: any = await (handle as any).handler({}, {});

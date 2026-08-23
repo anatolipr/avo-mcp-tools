@@ -108,7 +108,8 @@ test('list_channels reflects named channels with no hidden filtering', async () 
     await client.callTool({ name: 'join_channel', arguments: { channel: 'listed-channel' } });
 
     const result = await client.callTool({ name: 'list_channels', arguments: {} });
-    const ids: string[] = JSON.parse(textOf(result as any));
+    const channels: Array<{ channel: string; connections: unknown[] }> = JSON.parse(textOf(result as any));
+    const ids = channels.map((c) => c.channel);
     assert.ok(ids.includes('listed-channel'));
     // This test harness uses createHttpServer's default defaultTenantMode
     // ('per-session'), which never vivifies a 'default' tenant on its own —
@@ -163,7 +164,8 @@ test('a session that never calls join_channel keeps its own isolated bootstrap t
     // today's per-session isolation (tenant-isolation.test.ts in mcp-form),
     // proving join_channel is additive and does not change default behavior.
     const listA = await a.client.callTool({ name: 'list_channels', arguments: {} });
-    const idsA: string[] = JSON.parse(textOf(listA as any));
+    const channelsA: Array<{ channel: string; connections: unknown[] }> = JSON.parse(textOf(listA as any));
+    const idsA = channelsA.map((c) => c.channel);
 
     // Each session's own bootstrap tenant is a distinct, freshly-vivified
     // id — both appear in the flat list (no hidden filtering), and there

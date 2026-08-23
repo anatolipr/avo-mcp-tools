@@ -52,11 +52,19 @@ export function registerChannelTools<TSchema, TValues>(
     'Lists every channel currently live on this server, including "default" (the shared, anonymous channel ' +
     'sessions land on before calling join_channel). Use this to discover an existing named channel before ' +
     'calling join_channel on it, e.g. when a human refers to "the pets form" without giving the exact channel ' +
-    'name.',
+    'name. Each entry includes a `connections` array — one item per live browser tab/page bridged into that ' +
+    'channel, with its display `label` and `toolCount` — so you can tell which channels actually have ' +
+    'something connected without joining each one to check.',
     {},
     async () => {
-      const ids = [...tenants.keys()];
-      return { content: [{ type: 'text', text: JSON.stringify(ids, null, 2) }] };
+      const channels = [...tenants.entries()].map(([channel, t]) => ({
+        channel,
+        connections: [...t.connections.values()].map((c) => ({
+          label: c.label ?? null,
+          toolCount: c.manifest.length,
+        })),
+      }));
+      return { content: [{ type: 'text', text: JSON.stringify(channels, null, 2) }] };
     }
   );
 

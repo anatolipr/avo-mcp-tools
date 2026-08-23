@@ -29,6 +29,14 @@ export interface ManifestToolRegistry {
 }
 
 const DESCRIBE_TOOLS_NAME = 'describe_tools';
+const IDENTIFY_CONNECTION_NAME = 'identify_connection';
+
+const IDENTIFY_CONNECTION_DESCRIPTION =
+  'Pops an alert in the browser tab behind one connection, so a human looking at several open tabs/windows ' +
+  'can tell which one this session means. Use when the user has multiple tabs bridged in and asks "which one ' +
+  'is X" or you need them to look at a specific one. Pass the connection `id` from describe_tools\' ' +
+  '`connections` array (single-connection channels can omit it). Fire-and-forget: returns immediately, does ' +
+  'not confirm the human saw it.';
 
 const DESCRIBE_TOOLS_DESCRIPTION =
   'Returns manifest-level context for the tools connected to THIS SESSION\'S CURRENT CHANNEL: a ' +
@@ -131,6 +139,29 @@ export function createManifestToolRegistry<TSchema, TValues>(
     handles.set(DESCRIBE_TOOLS_NAME, handle);
   }
 
+  function registerIdentifyConnection() {
+    const handle = mcp.registerTool(
+      IDENTIFY_CONNECTION_NAME,
+      {
+        description: IDENTIFY_CONNECTION_DESCRIPTION,
+        inputSchema: { id: z.string().optional().describe('Connection id from describe_tools\' `connections` array. Omit when only one connection is live.') },
+      },
+      async ({ id }: { id?: string }) => {
+        const t = tenant();
+        const targetId = id ?? [...t.connections.keys()][0];
+        if (!targetId) {
+          return { content: [{ type: 'text', text: 'No live connection on this channel to identify.' }], isError: true };
+        }
+        const ok = t.identifyConnection(targetId);
+        return {
+          content: [{ type: 'text', text: ok ? `Identify signal sent to connection "${targetId}".` : `Connection "${targetId}" is not currently open.` }],
+          isError: !ok,
+        };
+      }
+    );
+    handles.set(IDENTIFY_CONNECTION_NAME, handle);
+  }
+
   function sync() {
     const conns = [...tenant().connections.values()];
     const multi = conns.length >= 2;
@@ -143,21 +174,22 @@ export function createManifestToolRegistry<TSchema, TValues>(
     if (multi) {
       for (const conn of conns) {
         for (const entry of conn.manifest) {
-          if (entry.name === DESCRIBE_TOOLS_NAME) continue;
+          if (entry.name === DESCRIBE_TOOLS_NAME || entry.name === IDENTIFY_CONNECTION_NAME) continue;
           registeredNow.set(`${slugFor!.get(conn.id)}__${entry.name}`, { connectionId: conn.id, entry });
         }
       }
     } else {
       const conn = conns[0];
       for (const entry of tenant().toolManifest) {
-        if (entry.name === DESCRIBE_TOOLS_NAME) continue;
+        if (entry.name === DESCRIBE_TOOLS_NAME || entry.name === IDENTIFY_CONNECTION_NAME) continue;
         registeredNow.set(entry.name, { connectionId: conn?.id, entry });
       }
     }
 
-    // A page tool named "describe_tools" would collide with the fixed tool
-    // below - the fixed one always wins so agents can rely on the name.
-    const currentNames = new Set([DESCRIBE_TOOLS_NAME, ...registeredNow.keys()]);
+    // Page tools named "describe_tools"/"identify_connection" would collide
+    // with the fixed tools below - the fixed ones always win so agents can
+    // rely on the name.
+    const currentNames = new Set([DESCRIBE_TOOLS_NAME, IDENTIFY_CONNECTION_NAME, ...registeredNow.keys()]);
 
     for (const [name, handle] of handles) {
       if (!currentNames.has(name)) {
@@ -167,6 +199,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
     }
 
     if (!handles.has(DESCRIBE_TOOLS_NAME)) registerDescribeTools();
+    if (!handles.has(IDENTIFY_CONNECTION_NAME)) registerIdentifyConnection();
 
     for (const [registeredName, { connectionId, entry }] of registeredNow) {
       if (handles.has(registeredName)) continue;

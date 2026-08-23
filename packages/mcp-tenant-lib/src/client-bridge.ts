@@ -61,6 +61,8 @@ export interface StateSocketHandlers<TSchema, TValues> {
   onCall?(id: string, name: string, args: unknown): void;
   onConnect?(): void;
   onDisconnect?(): void;
+  /** Server-pushed "identify yourself" signal (see identify_connection tool). Defaults to a window.alert(). */
+  onIdentify?(label: string | undefined): void;
 }
 
 export interface StateSocketOptions {
@@ -78,6 +80,18 @@ export interface StateSocketOptions {
   tenant?: string;
 }
 
+/** Steady-state delay between reconnect attempts once the connection drops. */
+const RECONNECT_INTERVAL_MS = 10_000;
+/**
+ * How long to keep retrying at RECONNECT_INTERVAL_MS before giving up
+ * entirely. A dropped connection is usually the server restarting (or a
+ * laptop sleeping) rather than something permanent, and unknown named
+ * tenants are now recreated on demand server-side (see ws.ts) rather than
+ * rejected — so it's worth retrying for a long while rather than a few
+ * seconds, without retrying literally forever if the server is gone for good.
+ */
+const RECONNECT_GIVE_UP_MS = 60 * 60 * 1000;
+
 export function connectStateSocket<TSchema, TValues>(
   handlers: StateSocketHandlers<TSchema, TValues>,
   options: StateSocketOptions = {}
@@ -85,6 +99,7 @@ export function connectStateSocket<TSchema, TValues>(
   let ws: WebSocket | undefined;
   let closedByCaller = false;
   let reconnectAttempts = 0;
+  let firstDisconnectAt: number | undefined;
 
   const connect = () => {
     const tenantId = options.tenant ?? (location.pathname.startsWith('/t/')
@@ -101,6 +116,7 @@ export function connectStateSocket<TSchema, TValues>(
     ws.onopen = () => {
       console.log(`[mcp-ws] connected${reconnectAttempts > 0 ? ` after ${reconnectAttempts} reconnect attempt(s)` : ''}`);
       reconnectAttempts = 0;
+      firstDisconnectAt = undefined;
       handlers.onConnect?.();
     };
     ws.onclose = (event) => {
@@ -108,12 +124,17 @@ export function connectStateSocket<TSchema, TValues>(
       handlers.onDisconnect?.();
       if (closedByCaller) return;
       if (event.code === 4404) {
-        console.log('[mcp-ws] tenant unknown/expired (4404) — not retrying');
+        console.log('[mcp-ws] invalid tenant id (4404) — not retrying');
+        return;
+      }
+      firstDisconnectAt ??= Date.now();
+      if (Date.now() - firstDisconnectAt > RECONNECT_GIVE_UP_MS) {
+        console.log(`[mcp-ws] giving up after retrying for over ${RECONNECT_GIVE_UP_MS / 60_000} minutes`);
         return;
       }
       reconnectAttempts++;
-      console.log(`[mcp-ws] retrying in 2s (attempt ${reconnectAttempts + 1})`);
-      setTimeout(connect, 2000);
+      console.log(`[mcp-ws] retrying in ${RECONNECT_INTERVAL_MS / 1000}s (attempt ${reconnectAttempts + 1})`);
+      setTimeout(connect, RECONNECT_INTERVAL_MS);
     };
     ws.onerror = () => {
       console.log('[mcp-ws] socket error (see close event for details)');
@@ -124,6 +145,10 @@ export function connectStateSocket<TSchema, TValues>(
       if (msg.type === 'reinit') handlers.onReinit?.(msg.schema, msg.state);
       if (msg.type === 'update') handlers.onUpdate?.(msg.field, msg.value);
       if (msg.type === 'call') handlers.onCall?.(msg.id, msg.name, msg.args);
+      if (msg.type === 'identify') {
+        if (handlers.onIdentify) handlers.onIdentify(msg.label);
+        else alert(`Identify: this is the "${msg.label ?? 'unlabeled'}" connection`);
+      }
     };
   };
   connect();

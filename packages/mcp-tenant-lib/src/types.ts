@@ -8,6 +8,7 @@ export type ServerMessage<TSchema = unknown, TValues = unknown> =
   | { type: 'init' | 'reinit'; schema: TSchema; state: TValues; waiting: boolean; submitted: boolean }
   | { type: 'update'; field: string; value: unknown }
   | { type: 'waiting'; waiting: boolean }
+  | { type: 'identify'; label?: string }
   | CallMessage;
 
 export interface SetMessage {

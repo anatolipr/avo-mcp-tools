@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { ClientMessage } from './types.js';
-import { getOrCreateTenant, tenants } from './tenant.js';
+import { getOrCreateTenant, tenants, isValidChannelName } from './tenant.js';
 
 /**
  * Ping interval for the liveness check below. Half-open sockets (client
@@ -42,17 +42,26 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
     const wsUrl = new URL(req.url ?? '/', `http://localhost:${port}`);
     const requestedTenantId = wsUrl.searchParams.get('tenant');
 
-    if (requestedTenantId && !tenants.has(requestedTenantId)) {
-      // An explicit tenant was requested but no longer exists (for example
-      // because its MCP session was disposed). Reject instead of silently
-      // falling back to the shared default tenant.
-      console.error(`[ws] rejected connection: unknown/expired tenant "${requestedTenantId}"`);
-      ws.close(4404, 'Unknown or expired tenant');
+    if (requestedTenantId && !isValidChannelName(requestedTenantId)) {
+      // Never silently vivify a channel from a malformed/hostile id — same
+      // validation join_channel applies agent-side.
+      console.error(`[ws] rejected connection: invalid tenant id "${requestedTenantId}"`);
+      ws.close(4404, 'Invalid tenant id');
       return;
     }
 
     const tenantId = requestedTenantId || 'default';
+    const recreated = !!requestedTenantId && !tenants.has(requestedTenantId);
     const t = getOrCreateTenant(tenantId, initialSchema, initialValues);
+    if (recreated) {
+      // A page reconnecting (browser retry loop) to a named channel that no
+      // longer exists server-side — most commonly a server restart, which
+      // wipes the in-memory tenants map entirely. Recreate it on demand
+      // rather than rejecting, so the page keeps working and an agent can
+      // rejoin the same name later instead of the connection being stuck
+      // retrying forever against a channel the server will never revive.
+      console.error(`[ws] recreated previously unknown/expired tenant "${tenantId}" on reconnect`);
+    }
 
     const connectionId = randomUUID();
     t.registerConnection(connectionId, ws);
