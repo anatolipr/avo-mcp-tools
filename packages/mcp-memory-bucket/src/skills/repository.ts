@@ -7,6 +7,7 @@ import { assertValidSkillName } from '../store/skill-name.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, skillSyncSpec, type TableSyncSpec } from '../store/sync.js';
 import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
+import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import type { NamedFolder } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
 
@@ -309,7 +310,8 @@ export class SkillRepository {
       status?: SkillStatus;
       extends?: string | null;
     },
-    body?: string
+    body?: string,
+    bodyEdits?: BodyEdit[]
   ): SkillDoc {
     const existing = this.get(name);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
@@ -333,7 +335,7 @@ export class SkillRepository {
         extends: frontmatter?.extends !== undefined ? frontmatter.extends : existing.metadata.extends,
       },
     };
-    const newBody = body ?? existing.body;
+    const newBody = bodyEdits ? applyBodyEdits(existing.body, bodyEdits).body : (body ?? existing.body);
     writeMarkdownFile(existing.source_path, stripSourcePath(merged), newBody);
     upsertFile(this.db, this.syncSpec, existing.source_path);
     return { ...merged, body: newBody, paused: existingPaused };

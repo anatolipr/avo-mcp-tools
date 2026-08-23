@@ -3,6 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MemoryRepository } from './repository.js';
 import { stripKey } from './repository.js';
 import { statusSchema } from '../shared/status.js';
+import { bodyEditsSchema, applyBodyEdits, formatBodyEditsDiff } from '../shared/body-edits.js';
 import { normalizeKey } from '../types.js';
 
 const MEMORY_DOC_TYPES = ['plan', 'spec', 'sql', 'testing-todo', 'discovery', 'session-summary', 'other'] as const;
@@ -151,23 +152,40 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
 
   mcp.tool(
     'memory_update',
-    `Edits an existing memory doc in place — frontmatter fields and/or body. Only provided fields change. ${AUTHORING_SKILL_HINT}`,
+    `Edits an existing memory doc in place — frontmatter fields and/or body. Only provided fields change. For a body change smaller than the whole document, prefer body_edits over body: it patches via find/replace instead of requiring you to reproduce the entire body, which saves tokens and avoids accidentally dropping untouched content on a large doc. When body_edits is used, the response includes a \`diff\` field (compact -/+ per-edit summary) — show it to the user so they can see what changed, similar to a code diff view. The response never includes the full body (even on a full-body replacement) to avoid echoing back a potentially large doc — call memory_get(id) if you need the fresh full body. ${AUTHORING_SKILL_HINT}`,
     {
       id: z.string(),
       key: z.string().optional(),
       key_type: z.enum(MEMORY_KEY_TYPES).optional(),
       doc_type: z.enum(MEMORY_DOC_TYPES).optional(),
       description: z.string().optional(),
-      body: z.string().optional(),
+      body: z.string().optional().describe('full body replacement — omit in favor of body_edits when only part of the doc is changing'),
+      body_edits: bodyEditsSchema.optional(),
       tags: z.array(z.string()).optional(),
       status: statusSchema(MEMORY_STATUS_DEFAULTS).optional(),
       related_to: z.string().optional(),
       deprecated: z.boolean().optional().describe('marks the doc as deprecated (or un-deprecates when false) — independent of status'),
     },
-    async ({ id, body, ...frontmatterFields }) => {
+    async ({ id, body, body_edits, ...frontmatterFields }) => {
+      if (body !== undefined && body_edits !== undefined) {
+        return { content: [{ type: 'text', text: 'Pass either body or body_edits, not both.' }], isError: true };
+      }
       try {
+        let diff: string | undefined;
+        if (body_edits) {
+          const existing = repo.get(id);
+          if (!existing) throw new Error(`memory doc with id "${id}" not found`);
+          const { body: patchedBody, applied } = applyBodyEdits(existing.body, body_edits);
+          diff = formatBodyEditsDiff(applied);
+          body = patchedBody;
+        }
         const doc = repo.update(id, frontmatterFields, body);
-        return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
+        // Body is omitted from the response: the caller either just sent it (full replacement),
+        // already has it, or has `diff` — echoing a potentially large body back is pure waste.
+        // Fetch memory_get(id) if the fresh full body is actually needed.
+        const { body: _omitted, ...docWithoutBody } = doc;
+        const result = diff ? { ...docWithoutBody, diff } : docWithoutBody;
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
       }

@@ -8,6 +8,7 @@ import { slugify } from '../store/slug.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, memorySyncSpec, type TableSyncSpec } from '../store/sync.js';
 import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
+import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import { attachmentsDirFor } from '../attachments/storage.js';
 import type { NamedFolder } from '../config.js';
 import { normalizeKey } from '../types.js';
@@ -312,7 +313,7 @@ export class MemoryRepository {
     });
   }
 
-  update(id: string, frontmatter?: Partial<MemoryFrontmatter>, body?: string): MemoryDoc {
+  update(id: string, frontmatter?: Partial<MemoryFrontmatter>, body?: string, bodyEdits?: BodyEdit[]): MemoryDoc {
     const existing = this.get(id);
     if (!existing) throw new Error(`memory doc with id "${id}" not found`);
     // `paused` is local-cache-only and must never reach writeMarkdownFile — split it off of
@@ -325,7 +326,7 @@ export class MemoryRepository {
       id: existing.id,
       key: frontmatter?.key ? normalizeKey(frontmatter.key) : existing.key,
     };
-    const newBody = body ?? existing.body;
+    const newBody = bodyEdits ? applyBodyEdits(existing.body, bodyEdits).body : (body ?? existing.body);
     writeMarkdownFile(existing.source_path, stripSourcePath(merged), newBody);
     upsertFile(this.db, this.syncSpec, existing.source_path);
     return { ...merged, body: newBody, paused: existingPaused };

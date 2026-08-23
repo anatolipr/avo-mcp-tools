@@ -12,6 +12,7 @@ import { relocate, relocateMany, inferMemoryFrontmatter } from '../src/shared/re
 import { isValidSkillName } from '../src/store/skill-name.js';
 import { searchCombined, searchByDate, SearchQueryError } from '../src/store/search.js';
 import { toLocalDate } from '../src/store/date-extract.js';
+import { applyBodyEdits, formatBodyEditsDiff } from '../src/shared/body-edits.js';
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'memory-bucket-test-'));
@@ -1002,6 +1003,55 @@ test('memory update() can change key in place, normalized', () => {
   assert.equal(updated.key, 'NEW-KEY');
   assert.equal(repo.getByKey('old-key').length, 0);
   assert.equal(repo.getByKey('new key').length, 1);
+
+  db.close();
+  fs.rmSync(memDir, { recursive: true, force: true });
+});
+
+test('applyBodyEdits replaces a unique match, and requires uniqueness unless replace_all', () => {
+  const body = 'one\ntwo\nthree\n';
+  assert.equal(applyBodyEdits(body, [{ find: 'two', replace: 'TWO' }]).body, 'one\nTWO\nthree\n');
+
+  // ambiguous match without replace_all: rejected, body untouched
+  assert.throws(() => applyBodyEdits('a-x-a', [{ find: 'a', replace: 'b' }]), /matches 2 times/);
+
+  // ambiguous match with replace_all: every occurrence replaced
+  assert.equal(applyBodyEdits('a-x-a', [{ find: 'a', replace: 'b', replace_all: true }]).body, 'b-x-b');
+
+  // no match: rejected
+  assert.throws(() => applyBodyEdits(body, [{ find: 'missing', replace: 'x' }]), /not found/);
+
+  // multiple edits applied in order, second edit sees the first edit's result
+  const chained = applyBodyEdits('foo bar', [
+    { find: 'foo', replace: 'baz' },
+    { find: 'baz bar', replace: 'done' },
+  ]);
+  assert.equal(chained.body, 'done');
+});
+
+test('formatBodyEditsDiff renders a compact -/+ summary per applied edit', () => {
+  const { applied } = applyBodyEdits('hello world', [{ find: 'world', replace: 'there' }]);
+  const diff = formatBodyEditsDiff(applied);
+  assert.match(diff, /-world/);
+  assert.match(diff, /\+there/);
+});
+
+test('memory update() with body_edits patches in place without a full body replacement', () => {
+  const memDir = makeTmpDir();
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
+
+  const doc = repo.create({
+    key: 'patch-target',
+    key_type: 'freeform',
+    doc_type: 'other',
+    description: 'Body edit target',
+    body: 'line one\nline two\nline three\n',
+  });
+
+  const updated = repo.update(doc.id, {}, undefined, [{ find: 'line two', replace: 'LINE TWO' }]);
+  assert.equal(updated.body, 'line one\nLINE TWO\nline three');
+  assert.equal(repo.get(doc.id)?.body, 'line one\nLINE TWO\nline three');
 
   db.close();
   fs.rmSync(memDir, { recursive: true, force: true });

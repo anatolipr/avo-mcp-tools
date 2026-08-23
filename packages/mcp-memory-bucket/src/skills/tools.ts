@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { SkillRepository } from './repository.js';
 import { statusSchema } from '../shared/status.js';
+import { bodyEditsSchema, applyBodyEdits, formatBodyEditsDiff } from '../shared/body-edits.js';
 
 const SKILL_STATUS_DEFAULTS = ['stable', 'beta', 'unreviewed'] as const;
 const SKILL_NAME_DESCRIPTION =
@@ -176,11 +177,12 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_update',
-    `Edits an existing skill in place — frontmatter fields and/or body. Only provided fields change. Use skill_rename to change the name/folder. ${AUTHORING_SKILL_HINT}`,
+    `Edits an existing skill in place — frontmatter fields and/or body. Only provided fields change. Use skill_rename to change the name/folder. For a body change smaller than the whole document, prefer body_edits over body: it patches via find/replace instead of requiring you to reproduce the entire body, which saves tokens and avoids accidentally dropping untouched content on a large skill. When body_edits is used, the response includes a \`diff\` field (compact -/+ per-edit summary) — show it to the user so they can see what changed, similar to a code diff view. The response never includes the full body (even on a full-body replacement) to avoid echoing back a potentially large doc — call skill_get(name) if you need the fresh full body. ${AUTHORING_SKILL_HINT}`,
     {
       name: z.string(),
       description: z.string().max(1024).optional(),
-      body: z.string().optional(),
+      body: z.string().optional().describe('full body replacement — omit in favor of body_edits when only part of the doc is changing'),
+      body_edits: bodyEditsSchema.optional(),
       license: z.string().optional(),
       compatibility: z.string().max(500).optional(),
       owner: z.string().optional(),
@@ -190,10 +192,26 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       extends: z.string().optional(),
       deprecated: z.boolean().optional().describe('marks the skill as deprecated (or un-deprecates when false) — independent of status'),
     },
-    async ({ name, body, ...frontmatterFields }) => {
+    async ({ name, body, body_edits, ...frontmatterFields }) => {
+      if (body !== undefined && body_edits !== undefined) {
+        return { content: [{ type: 'text', text: 'Pass either body or body_edits, not both.' }], isError: true };
+      }
       try {
+        let diff: string | undefined;
+        if (body_edits) {
+          const existing = repo.get(name);
+          if (!existing) throw new Error(`skill with name "${name}" not found`);
+          const { body: patchedBody, applied } = applyBodyEdits(existing.body, body_edits);
+          diff = formatBodyEditsDiff(applied);
+          body = patchedBody;
+        }
         const doc = repo.update(name, frontmatterFields, body);
-        return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
+        // Body is omitted from the response: the caller either just sent it (full replacement),
+        // already has it, or has `diff` — echoing a potentially large body back is pure waste.
+        // Fetch skill_get(name) if the fresh full body is actually needed.
+        const { body: _omitted, ...docWithoutBody } = doc;
+        const result = diff ? { ...docWithoutBody, diff } : docWithoutBody;
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
       }
