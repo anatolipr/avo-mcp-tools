@@ -9,6 +9,13 @@ import { SkillRepository } from '../src/skills/repository.js';
 import { setCredential } from '../src/remote/credentials.js';
 import { mirrorDirFor } from '../src/config.js';
 import type { RemoteFolder } from '../src/config.js';
+import { IdentityTracker } from '../src/remote/identity.js';
+
+function loggedInIdentity(): IdentityTracker {
+  const identity = new IdentityTracker('dev');
+  identity.setUsername('testuser');
+  return identity;
+}
 
 // Regression coverage for a real bug: every remote write/read dropped the
 // RemoteFolder's own `folderPath` (its actual location on folderfoo, e.g.
@@ -40,10 +47,10 @@ test('MemoryRepository.create against a remote folder with a non-empty folderPat
   const credsDir = tmpDir('mb-remote-path-creds-');
   setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [], [], credsDir);
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
 
-  const mirrorDir = mirrorDirFor(credsDir, 'memz');
-  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
   repo.registerRemoteFolder(remote);
 
   const calls: string[] = [];
@@ -64,10 +71,10 @@ test('MemoryRepository.get against a remote folder with a non-empty folderPath r
   const credsDir = tmpDir('mb-remote-path-creds-');
   setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [], [], credsDir);
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
 
-  const mirrorDir = mirrorDirFor(credsDir, 'memz');
-  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
   repo.registerRemoteFolder(remote);
 
   const createCalls: string[] = [];
@@ -88,10 +95,10 @@ test('MemoryRepository.update against a remote folder with a non-empty folderPat
   const credsDir = tmpDir('mb-remote-path-creds-');
   setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [], [], credsDir);
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
 
-  const mirrorDir = mirrorDirFor(credsDir, 'memz');
-  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
   repo.registerRemoteFolder(remote);
 
   t.mock.method(globalThis, 'fetch', mockFolderfoo([]));
@@ -110,10 +117,10 @@ test('SkillRepository.create against a remote folder with a non-empty folderPath
   const credsDir = tmpDir('mb-remote-path-creds-');
   setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
   const db = openCache(':memory:');
-  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }], [], credsDir);
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }], [], credsDir, loggedInIdentity());
 
-  const mirrorDir = mirrorDirFor(credsDir, 'team-qa');
-  const remote: RemoteFolder = { name: 'team-qa', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'team-qa');
+  const remote: RemoteFolder = { name: 'team-qa', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa', mirrorDir, mode: 'dev', username: 'testuser' };
   repo.registerRemoteFolder(remote);
 
   const calls: string[] = [];
@@ -147,10 +154,10 @@ test('MemoryRepository.create for a REMOTE folder generates a hyphen-free id, so
   const credsDir = tmpDir('mb-remote-path-creds-');
   setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [], [], credsDir);
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
 
-  const mirrorDir = mirrorDirFor(credsDir, 'memz');
-  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
   repo.registerRemoteFolder(remote);
 
   const calls: string[] = [];
@@ -228,10 +235,10 @@ test('MemoryRepository.get strips the frontmatter block from a live-fetched remo
   const credsDir = tmpDir('mb-remote-path-creds-');
   setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [], [], credsDir);
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
 
-  const mirrorDir = mirrorDirFor(credsDir, 'memz');
-  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
   repo.registerRemoteFolder(remote);
 
   const fileContent = { current: '' };
@@ -255,10 +262,10 @@ test('MemoryRepository.update after get() does not nest a second frontmatter blo
   const credsDir = tmpDir('mb-remote-path-creds-');
   setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
   const db = openCache(':memory:');
-  const repo = new MemoryRepository(db, [], [], credsDir);
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
 
-  const mirrorDir = mirrorDirFor(credsDir, 'memz');
-  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
   repo.registerRemoteFolder(remote);
 
   const fileContent = { current: '' };

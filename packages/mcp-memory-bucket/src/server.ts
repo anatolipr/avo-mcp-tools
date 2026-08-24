@@ -20,6 +20,7 @@ import { registerUiTool } from './web/ui-tool.js';
 import { registerMemoryChannelTools } from './channels/tools.js';
 import { startChannelSweep } from './channels/store.js';
 import { startRemotePolling, type RemotePollerHandle } from './remote/remote-sync.js';
+import { IdentityTracker } from './remote/identity.js';
 
 // server.ts is rebuilt from `buildMcpServer()` on every /mcp request (see below),
 // so tool schemas (which conditionally include `folder` based on folder count) always
@@ -41,6 +42,7 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 8767;
 
 const config = loadConfig();
 const db = openCache(config.cacheDbPath);
+const identity = new IdentityTracker(config.folderfooMode);
 
 const skillSpec = skillSyncSpec([{ name: 'builtin', path: builtinSkillsDir }, ...config.skillFolders]);
 const memorySpec = memorySyncSpec(config.memoryFolders);
@@ -54,9 +56,10 @@ const skillRepo = new SkillRepository(
   db,
   [{ name: 'builtin', path: builtinSkillsDir }, ...config.skillFolders],
   config.remoteSkillFolders,
-  config.baseDir
+  config.baseDir,
+  identity
 );
-const memoryRepo = new MemoryRepository(db, config.memoryFolders, config.remoteMemoryFolders, config.baseDir);
+const memoryRepo = new MemoryRepository(db, config.memoryFolders, config.remoteMemoryFolders, config.baseDir, identity);
 skillRepo.setWatcher(skillWatcher);
 memoryRepo.setWatcher(memoryWatcher);
 
@@ -105,7 +108,7 @@ startChannelSweep((name) => console.error(`[memory-bucket] sweeping idle memory 
 
 const app = express();
 app.use(express.json());
-app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, { skill: remoteSkillPoller, memory: remoteMemoryPoller }));
+app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, identity, { skill: remoteSkillPoller, memory: remoteMemoryPoller }));
 app.use(express.static(path.join(packageRoot, 'dist', 'client')));
 
 app.post('/mcp', async (req, res) => {

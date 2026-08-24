@@ -21,6 +21,9 @@ export interface RemoteFolder {
   tenantId: string;
   folderPath: string;
   mirrorDir: string; // resolved local mirror directory - same value as the paired NamedFolder.path
+  /** The --folderfoo-mode and logged-in username active when this folder was connected — see identity.ts. */
+  mode: FolderfooMode;
+  username: string;
 }
 
 /**
@@ -57,7 +60,7 @@ export interface BucketConfig {
 type SourceEntry =
   | string
   | { name: string; path: string }
-  | { name: string; remote: { server: string; tenantId: string; folderPath: string } };
+  | { name: string; remote: { server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string } };
 
 interface ConfigFile {
   skill_sources?: SourceEntry[];
@@ -66,13 +69,22 @@ interface ConfigFile {
 
 function isRemoteEntry(
   entry: SourceEntry
-): entry is { name: string; remote: { server: string; tenantId: string; folderPath: string } } {
+): entry is { name: string; remote: { server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string } } {
   return typeof entry === 'object' && 'remote' in entry;
 }
 
-/** Local mirror directory a remote source's content is synced into - see the RemoteFolder doc comment above. */
-export function mirrorDirFor(baseDir: string, name: string): string {
-  return path.join(baseDir, '.memory-bucket-remote-cache', sanitizeFolderName(name));
+/**
+ * Local mirror directory a remote source's content is synced into - see the
+ * RemoteFolder doc comment above. Nested under a {mode}_{username} segment
+ * so mirrors from different folderfoo deployments/logins never collide or
+ * get mistaken for one another (see identity.ts) - a mirror connected while
+ * logged into "dev" as "anatoli" lands at
+ * .memory-bucket-remote-cache/dev_anatoli/<name>/, distinct from the same
+ * folder name connected under "cloud" or a different username.
+ */
+export function mirrorDirFor(baseDir: string, mode: FolderfooMode, username: string, name: string): string {
+  const identitySegment = sanitizeFolderName(`${mode}_${username}`);
+  return path.join(baseDir, '.memory-bucket-remote-cache', identitySegment, sanitizeFolderName(name));
 }
 
 function memoryDirFlag(argv: string[]): string | undefined {
@@ -123,7 +135,7 @@ function resolveFolders(entries: SourceEntry[], baseDir: string): { folders: Nam
       return { name: nameFromPath(entry), path: path.resolve(baseDir, entry) };
     }
     if (isRemoteEntry(entry)) {
-      const mirrorDir = mirrorDirFor(baseDir, entry.name);
+      const mirrorDir = mirrorDirFor(baseDir, entry.remote.mode, entry.remote.username, entry.name);
       remoteFolders.push({ name: entry.name, ...entry.remote, mirrorDir });
       return { name: entry.name, path: mirrorDir };
     }
@@ -201,7 +213,7 @@ export function saveFolder(config: BucketConfig, kind: 'skill' | 'memory', folde
 export function saveRemoteFolder(
   config: BucketConfig,
   kind: 'skill' | 'memory',
-  entry: { name: string; server: string; tenantId: string; folderPath: string }
+  entry: { name: string; server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string }
 ): void {
   const current = readConfigFile(config.configPath);
   const key = kind === 'skill' ? 'skill_sources' : 'memory_sources';
@@ -210,7 +222,16 @@ export function saveRemoteFolder(
     ...current,
     [key]: [
       ...existing,
-      { name: entry.name, remote: { server: entry.server, tenantId: entry.tenantId, folderPath: entry.folderPath } },
+      {
+        name: entry.name,
+        remote: {
+          server: entry.server,
+          tenantId: entry.tenantId,
+          folderPath: entry.folderPath,
+          mode: entry.mode,
+          username: entry.username,
+        },
+      },
     ],
   };
   fs.writeFileSync(config.configPath, JSON.stringify(next, null, 2) + '\n');

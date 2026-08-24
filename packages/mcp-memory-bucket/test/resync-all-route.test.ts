@@ -14,6 +14,7 @@ import { setCredential } from '../src/remote/credentials.js';
 import { startRemotePolling, type RemotePollerHandle } from '../src/remote/remote-sync.js';
 import { mirrorDirFor, type BucketConfig, type RemoteFolder } from '../src/config.js';
 import type { TableSyncSpec } from '../src/store/sync.js';
+import { IdentityTracker } from '../src/remote/identity.js';
 
 function tmpDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -44,7 +45,7 @@ async function startTestServer(
 ) {
   const app = express();
   app.use(express.json());
-  app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, remotePollers));
+  app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, new IdentityTracker('dev'), remotePollers));
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const address = server.address();
@@ -59,8 +60,8 @@ test('POST /api/remote-folders/resync-all: force-resyncs a memory remote source 
   const memoryRepo = new MemoryRepository(db, [], [], credsDir);
   const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }], [], credsDir);
 
-  const mirrorDir = mirrorDirFor(credsDir, 'memz');
-  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 'membkt', folderPath: 'memz', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 'membkt', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
   memoryRepo.registerRemoteFolder(remote);
 
   // Seed the mirror with a file already indexed, as if a prior poll had pulled it.

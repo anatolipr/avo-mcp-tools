@@ -9,6 +9,7 @@ import './channel-view.js';
 import type { Entry, Facets, Selection, TypeFilter, FoldersResponse, Folder, ChannelSummary, ChannelDetail } from './types.js';
 import { TENANT_ID, getFolderfooConfig } from './server-config.js';
 import { parseFolderfooAddress } from './folderfoo-address.js';
+import { currentIdentity, startIdentityStream } from './identity-stream.js';
 
 const TYPE_OPTIONS: Array<{ value: TypeFilter; label: string }> = [
   { value: 'all', label: 'All' },
@@ -269,11 +270,13 @@ export class MemBucketApp extends LitElement {
       border: 1px solid var(--border-strong); border-radius: 999px; padding: 3px 8px 3px 10px; font-size: 12px;
       cursor: pointer; background: none; color: inherit; display: inline-flex; align-items: center; gap: 6px;
     }
-    .folder-chip.active { background: var(--purple-tint); border-color: var(--purple); color: var(--purple-fg); }
+    /* Active chips invert to a solid white fill with dark text in both themes, so they read
+       clearly against remote chips' accent outline instead of blending into a similar tint. */
+    .folder-chip.active { background: #ffffff; border-color: var(--purple); color: #111111; }
     /* Remote (folderfoo) folders get the accent color instead of the default border, so they're
        visually distinct from local folders at a glance — active-state purple still wins when both apply. */
     .folder-chip.remote { border-color: var(--accent); color: var(--accent); }
-    .folder-chip.remote.active { background: var(--purple-tint); border-color: var(--purple); color: var(--purple-fg); }
+    .folder-chip.remote.active { background: #ffffff; border-color: var(--purple); color: #111111; }
     .folder-chip .remote-dot {
       width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0;
     }
@@ -435,6 +438,8 @@ export class MemBucketApp extends LitElement {
 
   #boundOnFocus = () => this.#onFocus();
   #boundOnFolderfooFileOpen = (e: Event) => this.#onFolderfooFileOpen(e as CustomEvent<{ name: string }>);
+  #boundOnFolderfooAuthChange = () => this.#onFolderfooAuthChange();
+  #unsubscribeIdentity?: () => void;
 
   connectedCallback() {
     super.connectedCallback();
@@ -444,7 +449,20 @@ export class MemBucketApp extends LitElement {
     window.addEventListener('focus', this.#boundOnFocus);
     document.addEventListener('visibilitychange', this.#boundOnFocus);
     document.addEventListener('folderfoo-file-open', this.#boundOnFolderfooFileOpen);
+    window.addEventListener('folderfoo-auth-change', this.#boundOnFolderfooAuthChange);
     this.#mountFolderfooProfileCircle();
+    // Covers the case where the browser already holds a valid folderfoo
+    // session when this page loads (e.g. the server was restarted, or this
+    // is a fresh tab) - no folderfoo-auth-change event fires for "already
+    // logged in," so without this check the server's process-wide identity
+    // would stay unset (hiding every remote folder) until the user manually
+    // logged out and back in.
+    this.#onFolderfooAuthChange();
+    startIdentityStream();
+    // The server pushes identity changes (from ANY tab's login/logout) over
+    // SSE - re-fetch folders whenever that arrives so this tab's visible
+    // list reflects the current identity live, without a page reload.
+    this.#unsubscribeIdentity = currentIdentity.subscribe(() => this.#refetchFolders());
   }
 
   // Opens a file picked via folderfoo's own File Open dialog directly in
@@ -536,6 +554,47 @@ export class MemBucketApp extends LitElement {
     window.removeEventListener('focus', this.#boundOnFocus);
     document.removeEventListener('visibilitychange', this.#boundOnFocus);
     document.removeEventListener('folderfoo-file-open', this.#boundOnFolderfooFileOpen);
+    window.removeEventListener('folderfoo-auth-change', this.#boundOnFolderfooAuthChange);
+    this.#unsubscribeIdentity?.();
+  }
+
+  // folderfoo's own widget fires this window event on login, register,
+  // logout, AND a failed token refresh (see auth-guard.js's
+  // broadcastAuthChange) - it carries no payload, so the only way to tell
+  // "logged in" from "logged out" is to check whether a token is still in
+  // localStorage right after it fires. Real bug fixed here: a re-login via
+  // the PAGE-LEVEL circle (#mountFolderfooProfileCircle) never opens
+  // add-folder-modal.ts, so its #ffPersistToken flow (the only other place
+  // that POSTs /api/folderfoo/login) never runs - the server's process-wide
+  // identity stayed cleared even though the browser was logged back in,
+  // permanently hiding already-connected remote folders after any logout/
+  // login cycle that didn't happen to go through the modal. This handler
+  // now POSTs /api/folderfoo/login itself whenever a token IS present,
+  // covering the page-level circle's login the same way it already covers
+  // its logout.
+  async #onFolderfooAuthChange() {
+    let token: string | null = null;
+    try {
+      token = localStorage.getItem('folderfoo_token');
+    } catch {
+      // localStorage unavailable - nothing to detect either way
+      return;
+    }
+    if (!token) {
+      fetch('/api/folderfoo/logout', { method: 'POST' }).catch(() => {
+        // best-effort - the SSE stream will simply keep showing the last-known identity until a future call succeeds
+      });
+      return;
+    }
+    const { folderfooMode, folderfooHost } = await getFolderfooConfig();
+    if (folderfooMode === 'off' || !folderfooHost) return; // no page-level widget was ever mounted - nothing to attribute this login to
+    fetch('/api/folderfoo/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server: folderfooHost, token }),
+    }).catch(() => {
+      // best-effort - the SSE stream will simply keep showing the last-known identity until a future call succeeds
+    });
   }
 
   #resyncingOnFocus = false; // guards against overlapping resync-all calls when focus fires repeatedly (fast tab-switching)
@@ -583,8 +642,20 @@ export class MemBucketApp extends LitElement {
 
   async #refetchFolders() {
     const res = await fetch('/api/folders');
-    this.#folders.set((await res.json()) as FoldersResponse);
+    const folders = (await res.json()) as FoldersResponse;
+    this.#folders.set(folders);
     this.#foldersLoaded.set(true);
+    // A folder can drop out of this list between refetches (identity change
+    // hiding a remote folder on logout/login, or a local folder removed) -
+    // an active selection referencing a name that's no longer here would
+    // otherwise keep filtering the results list by a folder the user can no
+    // longer see or control, silently showing an empty/stale result set.
+    const names = new Set([...folders.skill, ...folders.memory].map((f) => f.name));
+    const pruned = this.#activeFolders.value.filter((f) => names.has(f));
+    if (pruned.length !== this.#activeFolders.value.length) {
+      this.#activeFolders.set(pruned);
+      this.#refetch();
+    }
   }
 
   #setView(view: 'entries' | 'channels') {
@@ -637,8 +708,14 @@ export class MemBucketApp extends LitElement {
     this.#refetch();
   }
 
+  // Remote (folderfoo) folders sort after every local folder - they're the
+  // ones whose membership can change out from under the user (identity
+  // switches), so keeping them visually grouped at the end makes that
+  // churn easier to track at a glance than if they were interleaved.
   #allFolders(): Folder[] {
-    return [...this.#folders.value.skill, ...this.#folders.value.memory];
+    return [...this.#folders.value.skill, ...this.#folders.value.memory].sort(
+      (a, b) => Number(a.remote) - Number(b.remote)
+    );
   }
 
   #setType(type: TypeFilter) {

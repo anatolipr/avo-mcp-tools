@@ -44,7 +44,7 @@ function mockFolderfoo(state: {
 }
 
 function makeFolder(mirrorDir: string): RemoteFolder {
-  return { name: 'team-qa', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'plans', mirrorDir };
+  return { name: 'team-qa', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'plans', mirrorDir, mode: 'dev', username: 'testuser' };
 }
 
 test('pollOne: skips the listing call entirely when last-changed has not moved past the local watermark', async (t) => {
@@ -222,8 +222,8 @@ test('startRemotePolling: resyncAll force-resyncs every remote source, not just 
   const mirrorDirB = tmpDir('mb-remote-sync-mirror-b-');
   setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
   const db = openCache(':memory:');
-  const folderA: RemoteFolder = { name: 'source-a', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'a', mirrorDir: mirrorDirA };
-  const folderB: RemoteFolder = { name: 'source-b', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'b', mirrorDir: mirrorDirB };
+  const folderA: RemoteFolder = { name: 'source-a', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'a', mirrorDir: mirrorDirA, mode: 'dev', username: 'testuser' };
+  const folderB: RemoteFolder = { name: 'source-b', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'b', mirrorDir: mirrorDirB, mode: 'dev', username: 'testuser' };
   const spec = memorySyncSpec([
     { name: 'source-a', path: mirrorDirA },
     { name: 'source-b', path: mirrorDirB },

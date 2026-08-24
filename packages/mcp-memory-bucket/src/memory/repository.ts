@@ -14,6 +14,7 @@ import { attachmentsDirFor } from '../attachments/storage.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
 import { normalizeKey } from '../types.js';
 import { readFile as readRemoteFile, writeFile as writeRemoteFile, joinRemoteFolderPath } from '../remote/folderfoo-client.js';
+import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 import type { MemoryDoc, MemoryDocType, MemoryFrontmatter, MemoryKeyType, MemoryStatus } from '../types.js';
 
 /** Uppercases and strips everything but letters/digits — used to compare keys that differ only in
@@ -68,7 +69,8 @@ export class MemoryRepository {
     private db: Database.Database,
     private folders: NamedFolder[],
     private remoteFolders: RemoteFolder[] = [],
-    private credentialsBaseDir?: string
+    private credentialsBaseDir?: string,
+    private identity?: IdentityTracker
   ) {
     this.syncSpec = memorySyncSpec(folders);
   }
@@ -76,6 +78,21 @@ export class MemoryRepository {
   /** The RemoteFolder a NamedFolder name resolves to, or undefined for a local (non-remote) folder. */
   private remoteFor(folderName: string): RemoteFolder | undefined {
     return this.remoteFolders.find((f) => f.name === folderName);
+  }
+
+  /** Whether `folderName` should be visible right now — always true for local folders; for a remote folder, only when it matches the current login (see identity.ts). No identity tracker configured means folderfoo integration is off entirely, so nothing remote is ever visible. */
+  private isFolderNameVisible(folderName: string): boolean {
+    const remote = this.remoteFor(folderName);
+    if (!remote) return true;
+    if (!this.identity) return false;
+    return isFolderVisible(remote, this.identity.current());
+  }
+
+  /** Names of every remote folder NOT matching the current identity — used to exclude their rows from list/search SQL. */
+  private hiddenFolderNames(): string[] {
+    if (!this.identity) return this.remoteFolders.map((f) => f.name);
+    const identity = this.identity.current();
+    return this.remoteFolders.filter((f) => !isFolderVisible(f, identity)).map((f) => f.name);
   }
 
   /** Attaches the live chokidar watcher so addFolder/removeFolder can mutate it without a restart. */
@@ -92,9 +109,9 @@ export class MemoryRepository {
     return [...this.remoteFolders];
   }
 
-  /** Same as listFolders(), but tags each entry with whether it's a remote (folderfoo) source — for the web UI's folder list, e.g. to render remote folders in a distinct color. */
+  /** Same as listFolders(), but tags each entry with whether it's a remote (folderfoo) source — for the web UI's folder list, e.g. to render remote folders in a distinct color. Excludes remote folders that don't match the current login (see identity.ts). */
   listFoldersWithRemoteInfo(): Array<NamedFolder & { remote: boolean }> {
-    return this.folders.map((f) => ({ ...f, remote: !!this.remoteFor(f.name) }));
+    return this.folders.filter((f) => this.isFolderNameVisible(f.name)).map((f) => ({ ...f, remote: !!this.remoteFor(f.name) }));
   }
 
   private resolveFolder(folderName: string | undefined): NamedFolder {
@@ -165,6 +182,11 @@ export class MemoryRepository {
     if (!opts.includePaused) {
       conditions.push('paused = 0');
     }
+    const hidden = this.hiddenFolderNames();
+    if (hidden.length > 0) {
+      conditions.push(`folder NOT IN (${hidden.map(() => '?').join(', ')})`);
+      params.push(...hidden);
+    }
     const rows = this.db
       .prepare(`SELECT * FROM memory_docs WHERE ${conditions.join(' AND ')}`)
       .all(...params) as MemoryRow[];
@@ -212,6 +234,11 @@ export class MemoryRepository {
     if (!includePaused) {
       conditions.push('m.paused = 0');
     }
+    const hidden = this.hiddenFolderNames();
+    if (hidden.length > 0) {
+      conditions.push(`m.folder NOT IN (${hidden.map(() => '?').join(', ')})`);
+      params.push(...hidden);
+    }
     params.push(limit, offset);
 
     try {
@@ -252,6 +279,7 @@ export class MemoryRepository {
     const row = this.db.prepare(`SELECT * FROM memory_docs WHERE id = ?`).get(id) as MemoryRow | undefined;
     if (!row) return null;
     const doc = rowToDoc(row);
+    if (!this.isFolderNameVisible(doc.folder)) return null;
     const remote = this.remoteFor(doc.folder);
     if (!remote || !this.credentialsBaseDir) return doc;
     const relPath = path.relative(remote.mirrorDir, doc.source_path).replace(/\.md$/, '');

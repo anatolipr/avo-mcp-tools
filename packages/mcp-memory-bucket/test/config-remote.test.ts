@@ -16,7 +16,7 @@ function writeConfig(baseDir: string, contents: unknown): void {
 test('a remote skill_sources entry resolves to a NamedFolder whose path is a local mirror dir, not the raw config value', () => {
   const baseDir = tmpBaseDir();
   writeConfig(baseDir, {
-    skill_sources: [{ name: 'team-qa', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa' } }],
+    skill_sources: [{ name: 'team-qa', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa', mode: 'dev', username: 'testuser' } }],
   });
 
   const config = loadConfig(baseDir, []);
@@ -32,8 +32,8 @@ test('a remote skill_sources entry resolves to a NamedFolder whose path is a loc
 test('a remote entry populates remoteSkillFolders/remoteMemoryFolders with its folderfoo coordinates', () => {
   const baseDir = tmpBaseDir();
   writeConfig(baseDir, {
-    skill_sources: [{ name: 'team-qa', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa' } }],
-    memory_sources: [{ name: 'team-plans', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'plans' } }],
+    skill_sources: [{ name: 'team-qa', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa', mode: 'dev', username: 'testuser' } }],
+    memory_sources: [{ name: 'team-plans', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'plans', mode: 'dev', username: 'testuser' } }],
   });
 
   const config = loadConfig(baseDir, []);
@@ -44,6 +44,8 @@ test('a remote entry populates remoteSkillFolders/remoteMemoryFolders with its f
     tenantId: 't1',
     folderPath: 'work/qa',
     mirrorDir: config.skillFolders[0].path,
+    mode: 'dev',
+    username: 'testuser',
   });
   assert.equal(config.remoteMemoryFolders.length, 1);
   assert.equal(config.remoteMemoryFolders[0].name, 'team-plans');
@@ -63,7 +65,7 @@ test('local and remote sources coexist in the same skill_sources list', () => {
   const baseDir = tmpBaseDir();
   fs.mkdirSync(path.join(baseDir, 'skills'));
   writeConfig(baseDir, {
-    skill_sources: ['./skills', { name: 'team-qa', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa' } }],
+    skill_sources: ['./skills', { name: 'team-qa', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa', mode: 'dev', username: 'testuser' } }],
   });
 
   const config = loadConfig(baseDir, []);
@@ -76,8 +78,8 @@ test('two remote entries for the same name produce distinct mirror dirs from dis
   const baseDir = tmpBaseDir();
   writeConfig(baseDir, {
     skill_sources: [
-      { name: 'Team QA!', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'a' } },
-      { name: 'team-backend', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'b' } },
+      { name: 'Team QA!', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'a', mode: 'dev', username: 'testuser' } },
+      { name: 'team-backend', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'b', mode: 'dev', username: 'testuser' } },
     ],
   });
 

@@ -12,6 +12,7 @@ import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
 import { readFile as readRemoteFile, writeFile as writeRemoteFile, joinRemoteFolderPath } from '../remote/folderfoo-client.js';
+import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 
 interface SkillRow {
   id: string;
@@ -66,7 +67,8 @@ export class SkillRepository {
     private db: Database.Database,
     private folders: NamedFolder[],
     private remoteFolders: RemoteFolder[] = [],
-    private credentialsBaseDir?: string
+    private credentialsBaseDir?: string,
+    private identity?: IdentityTracker
   ) {
     this.syncSpec = skillSyncSpec(folders);
   }
@@ -74,6 +76,21 @@ export class SkillRepository {
   /** The RemoteFolder a NamedFolder name resolves to, or undefined for a local (non-remote) folder. */
   private remoteFor(folderName: string): RemoteFolder | undefined {
     return this.remoteFolders.find((f) => f.name === folderName);
+  }
+
+  /** Whether `folderName` should be visible right now — always true for local folders; for a remote folder, only when it matches the current login (see identity.ts). No identity tracker configured means folderfoo integration is off entirely, so nothing remote is ever visible. */
+  private isFolderNameVisible(folderName: string): boolean {
+    const remote = this.remoteFor(folderName);
+    if (!remote) return true;
+    if (!this.identity) return false;
+    return isFolderVisible(remote, this.identity.current());
+  }
+
+  /** Names of every remote folder NOT matching the current identity — used to exclude their rows from list/search SQL. */
+  private hiddenFolderNames(): string[] {
+    if (!this.identity) return this.remoteFolders.map((f) => f.name);
+    const identity = this.identity.current();
+    return this.remoteFolders.filter((f) => !isFolderVisible(f, identity)).map((f) => f.name);
   }
 
   /** Pushes the just-written SKILL.md at filePath to folderfoo, if targetFolderName resolves to a remote source. No-op for a local folder. See get()'s comment on the folderPath/name split for a skill's directory-per-skill layout. */
@@ -100,9 +117,11 @@ export class SkillRepository {
     return [...this.remoteFolders];
   }
 
-  /** Same as listFolders(), but tags each entry with whether it's a remote (folderfoo) source — for the web UI's folder list, e.g. to render remote folders in a distinct color. */
+  /** Same as listFolders(), but tags each entry with whether it's a remote (folderfoo) source — for the web UI's folder list, e.g. to render remote folders in a distinct color. Excludes remote folders that don't match the current login (see identity.ts). */
   listFoldersWithRemoteInfo(): Array<NamedFolder & { remote: boolean }> {
-    return this.listFolders().map((f) => ({ ...f, remote: !!this.remoteFor(f.name) }));
+    return this.listFolders()
+      .filter((f) => this.isFolderNameVisible(f.name))
+      .map((f) => ({ ...f, remote: !!this.remoteFor(f.name) }));
   }
 
   private resolveFolder(folderName: string | undefined): NamedFolder {
@@ -169,6 +188,11 @@ export class SkillRepository {
     }
     if (!opts.includePaused) {
       conditions.push('paused = 0');
+    }
+    const hidden = this.hiddenFolderNames();
+    if (hidden.length > 0) {
+      conditions.push(`folder NOT IN (${hidden.map(() => '?').join(', ')})`);
+      params.push(...hidden);
     }
     const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
     const rows = this.db
@@ -240,6 +264,11 @@ export class SkillRepository {
     if (!includePaused) {
       conditions.push('s.paused = 0');
     }
+    const hidden = this.hiddenFolderNames();
+    if (hidden.length > 0) {
+      conditions.push(`s.folder NOT IN (${hidden.map(() => '?').join(', ')})`);
+      params.push(...hidden);
+    }
     params.push(limit, offset);
 
     try {
@@ -271,6 +300,7 @@ export class SkillRepository {
     const row = this.db.prepare(`SELECT * FROM skills WHERE id = ?`).get(name) as SkillRow | undefined;
     if (!row) return null;
     const doc = rowToDoc(row);
+    if (!this.isFolderNameVisible(doc.folder)) return null;
     const remote = this.remoteFor(doc.folder);
     if (!remote || !this.credentialsBaseDir) return doc;
     // A skill's SKILL.md sits INSIDE a directory named after the skill

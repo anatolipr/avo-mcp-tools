@@ -12,6 +12,7 @@ import { SkillRepository } from '../src/skills/repository.js';
 import { buildWebRouter } from '../src/web/routes.js';
 import { mirrorDirFor, type BucketConfig, type RemoteFolder } from '../src/config.js';
 import type { TableSyncSpec } from '../src/store/sync.js';
+import { IdentityTracker } from '../src/remote/identity.js';
 
 function tmpDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -20,7 +21,7 @@ function tmpDir(prefix: string): string {
 async function startTestServer(memoryRepo: MemoryRepository, skillRepo: SkillRepository, db: ReturnType<typeof openCache>, config: BucketConfig, memorySpec: TableSyncSpec<any>, skillSpec: TableSyncSpec<any>) {
   const app = express();
   app.use(express.json());
-  app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec));
+  app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, new IdentityTracker('dev')));
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const address = server.address();
@@ -48,8 +49,8 @@ test('POST /api/folderfoo/resolve-open: finds a memory doc opened from the root 
   const memoryRepo = new MemoryRepository(db, [], [], credsDir);
   const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }], [], credsDir);
 
-  const mirrorDir = mirrorDirFor(credsDir, 'memz');
-  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 'membkt', folderPath: 'memz', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 'membkt', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
   memoryRepo.registerRemoteFolder(remote);
 
   // Write the mirror file directly + index it (no live network call needed for this test).
@@ -84,8 +85,8 @@ test('POST /api/folderfoo/resolve-open: finds a doc opened from a subfolder nest
   const memoryRepo = new MemoryRepository(db, [], [], credsDir);
   const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }], [], credsDir);
 
-  const mirrorDir = mirrorDirFor(credsDir, 'memz');
-  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 'membkt', folderPath: 'memz', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 'membkt', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
   memoryRepo.registerRemoteFolder(remote);
 
   fs.mkdirSync(path.join(mirrorDir, 'sub'), { recursive: true });
@@ -143,8 +144,8 @@ test('POST /api/folderfoo/resolve-open: matches the connected source but no cach
   const memoryRepo = new MemoryRepository(db, [], [], credsDir);
   const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }], [], credsDir);
 
-  const mirrorDir = mirrorDirFor(credsDir, 'memz');
-  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 'membkt', folderPath: 'memz', mirrorDir };
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 'membkt', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
   memoryRepo.registerRemoteFolder(remote);
   // No file written/indexed - simulates the poller not having caught up yet.
 

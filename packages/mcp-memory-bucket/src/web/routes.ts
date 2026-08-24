@@ -16,6 +16,7 @@ import { attachmentsDirFor, guessMimeType } from '../attachments/storage.js';
 import { listFolders as listFolderfooFolders } from '../remote/folderfoo-client.js';
 import { setCredential } from '../remote/credentials.js';
 import { pollOne, type RemotePollerHandle } from '../remote/remote-sync.js';
+import { decodeUsername, type IdentityTracker } from '../remote/identity.js';
 import { getChannel, listChannels } from '../channels/store.js';
 
 type EntryType = 'skill' | 'memory' | 'all';
@@ -401,6 +402,7 @@ export function buildWebRouter(
   memoryRepo: MemoryRepository,
   skillSpec: TableSyncSpec<any>,
   memorySpec: TableSyncSpec<any>,
+  identity: IdentityTracker,
   remotePollers?: { skill?: RemotePollerHandle; memory?: RemotePollerHandle }
 ): Router {
   const router = express.Router();
@@ -891,7 +893,41 @@ export function buildWebRouter(
       return;
     }
     setCredential(config.baseDir, server, token);
+    // Updates the process-wide current identity (see identity.ts) - the most
+    // recent login from ANY browser tab becomes "current" for the whole
+    // process, including MCP tool calls. Logging in doesn't itself change
+    // which entries are stamped with this identity (that only happens at
+    // connect-time, see /api/remote-folders below) - it just changes which
+    // already-stamped entries become visible.
+    identity.setUsername(decodeUsername(token));
     res.json({ connected: true, server });
+  });
+
+  // Signals that the browser's folderfoo login session just ended (the page
+  // detects folderfoo's own auth-change event going to logged-out) - clears
+  // the process-wide current identity, which hides every remote folder
+  // (everywhere: web UI and MCP tool results alike) until a new login
+  // stamps a fresh identity via the route above. No server/token body: this
+  // is "the browser lost its session," not scoped to one server.
+  router.post('/api/folderfoo/logout', (_req: Request, res: Response) => {
+    identity.clearUsername();
+    res.json({ connected: false });
+  });
+
+  // Server-sent-events stream of the current identity, so an open browser
+  // tab's folder list updates the instant a login/logout happens anywhere
+  // (this tab or another one) - no polling, no page reload. Sends the
+  // current value immediately on connect, then again on every change.
+  router.get('/api/folderfoo/identity-stream', (req: Request, res: Response) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+    const send = (current: ReturnType<IdentityTracker['current']>) => res.write(`data: ${JSON.stringify(current)}\n\n`);
+    send(identity.current());
+    const unsubscribe = identity.onIdentityChange(send);
+    req.on('close', unsubscribe);
   });
 
   // Lists the caller's own folderfoo folders for the "connect a folder"
@@ -938,14 +974,22 @@ export function buildWebRouter(
       res.status(400).json({ error: 'could not derive a valid folder name — provide one explicitly' });
       return;
     }
+    // A folder can only be connected while logged in — the identity it's
+    // stamped with (see identity.ts) is exactly the one that just made the
+    // "connect a folder" picker possible in the first place.
+    const current = identity.current();
+    if (!current.username) {
+      res.status(401).json({ error: 'not logged in to folderfoo' });
+      return;
+    }
 
     const repo = kind === 'skill' ? skillRepo : memoryRepo;
     const spec = kind === 'skill' ? skillSpec : memorySpec;
-    const mirrorDir = mirrorDirFor(config.baseDir, folderName);
-    const remote = { name: folderName, server, tenantId, folderPath, mirrorDir };
+    const mirrorDir = mirrorDirFor(config.baseDir, current.mode, current.username, folderName);
+    const remote = { name: folderName, server, tenantId, folderPath, mirrorDir, mode: current.mode, username: current.username };
     try {
       repo.registerRemoteFolder(remote);
-      saveRemoteFolder(config, kind, { name: folderName, server, tenantId, folderPath });
+      saveRemoteFolder(config, kind, { name: folderName, server, tenantId, folderPath, mode: current.mode, username: current.username });
       await pollOne(db, spec, remote, config.baseDir);
       res.json({ name: folderName, server, tenantId, folderPath, kind });
     } catch (err) {
