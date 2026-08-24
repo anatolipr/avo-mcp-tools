@@ -7,7 +7,8 @@
     "packages/*"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p packages/mcp-tenant-lib/tsconfig.server.json && tsc --noEmit -p packages/mcp-tenant-lib/tsconfig.client.json && npm run typecheck -w mcp-form && npm run typecheck -w js-bridge-mcp && npm run typecheck -w @avo-mcp-tools/mcp-memory-bucket"
+    "typecheck": "tsc --noEmit -p packages/mcp-tenant-lib/tsconfig.server.json && tsc --noEmit -p packages/mcp-tenant-lib/tsconfig.client.json && npm run typecheck -w mcp-form && npm run typecheck -w js-bridge-mcp && npm run typecheck -w @avo-mcp-tools/mcp-memory-bucket",
+    "check-unpublished": "node scripts/check-unpublished.mjs"
   },
   "devDependencies": {
     "typescript": "^5.7.0"
