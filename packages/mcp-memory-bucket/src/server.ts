@@ -44,7 +44,16 @@ const config = loadConfig();
 const db = openCache(config.cacheDbPath);
 const identity = new IdentityTracker(config.folderfooMode);
 
-const skillSpec = skillSyncSpec([{ name: 'builtin', path: builtinSkillsDir }, ...config.skillFolders]);
+// Built ONCE and shared by reference with SkillRepository below — registerRemoteFolder/addFolder
+// push into this same array in place, so skillSpec.sources (used by initialScan/watchSources/
+// startRemotePolling/pollOne's upsertFile) sees a folder added live, without a restart. Evaluating
+// this array literal separately for skillSpec and for `new SkillRepository(...)` (as before) creates
+// two distinct arrays that fall out of sync the moment a folder is added live: upsertFile's
+// folderForFile lookup against the stale skillSpec.sources then finds no match and stamps folder=""
+// on every doc from that folder — permanently, since upsertFile's mtime-based skip check means the
+// row is never reprocessed to pick up the correct value once the array is finally in sync.
+const skillFolders = [{ name: 'builtin', path: builtinSkillsDir }, ...config.skillFolders];
+const skillSpec = skillSyncSpec(skillFolders);
 const memorySpec = memorySyncSpec(config.memoryFolders);
 
 initialScan(db, skillSpec);
@@ -54,7 +63,7 @@ const memoryWatcher = watchSources(db, memorySpec);
 
 const skillRepo = new SkillRepository(
   db,
-  [{ name: 'builtin', path: builtinSkillsDir }, ...config.skillFolders],
+  skillFolders,
   config.remoteSkillFolders,
   config.baseDir,
   identity
