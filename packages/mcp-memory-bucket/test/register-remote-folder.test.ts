@@ -198,6 +198,29 @@ test('registerRemoteFolder followed by pollOne pulls remote content into the new
   assert.equal(row?.description, 'The roadmap');
 });
 
+test('MemoryRepository.removeFolder: on a remote folder, also drops the RemoteFolder entry and deletes its mirror dir - a same-named local folder added afterwards must not be mistaken for the old remote connection', () => {
+  const credsDir = tmpDir('mb-register-creds-');
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [], [], credsDir);
+
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'team-qa');
+  const remote: RemoteFolder = { name: 'team-qa', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'plans', mirrorDir, mode: 'dev', username: 'testuser' };
+  repo.registerRemoteFolder(remote);
+  assert.ok(fs.existsSync(mirrorDir));
+  assert.equal(repo.listRemoteFolders().length, 1);
+
+  repo.removeFolder('team-qa');
+
+  assert.equal(repo.listRemoteFolders().length, 0, 'stale RemoteFolder entry must not survive removal');
+  assert.ok(!fs.existsSync(mirrorDir), 'mirror cache dir must be deleted on removal');
+
+  // Re-adding "team-qa" as a plain LOCAL folder must behave as local, not
+  // silently inherit the removed remote's folderfoo coordinates.
+  const localDir = tmpDir('mb-local-');
+  repo.addFolder({ name: 'team-qa', path: localDir });
+  assert.deepEqual(repo.listFoldersWithRemoteInfo().map((f) => ({ name: f.name, remote: f.remote })), [{ name: 'team-qa', remote: false }]);
+});
+
 test('SkillRepository.registerRemoteFolder: creates the mirror dir under builtin+remote folders', () => {
   const credsDir = tmpDir('mb-register-creds-');
   const db = openCache(':memory:');

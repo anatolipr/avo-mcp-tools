@@ -169,13 +169,24 @@ export class SkillRepository {
     this.watcher?.add(folder.path);
   }
 
-  /** Unregisters a folder: stops watching it and drops its cached rows. Never touches files on disk. */
+  /**
+   * Unregisters a folder: stops watching it and drops its cached rows. Never touches the user's
+   * own files on disk. If `name` was a remote (folderfoo) source, also drops its RemoteFolder
+   * entry (so a same-named folder added afterwards, local or remote, isn't mistaken for the old
+   * connection by remoteFor()) and deletes its local mirror cache directory — that mirror is
+   * bucket-owned derived state, not user content, and gets recreated fresh on reconnect.
+   */
   removeFolder(name: string): void {
     const idx = this.folders.findIndex((f) => f.name === name);
     if (idx <= 0) throw new Error(`skill folder "${name}" not found or is not removable`); // index 0 is builtin
     const [removed] = this.folders.splice(idx, 1);
     this.watcher?.unwatch(removed!.path);
     unregisterFolder(this.db, 'skills', name);
+    const remoteIdx = this.remoteFolders.findIndex((f) => f.name === name);
+    if (remoteIdx !== -1) {
+      const [removedRemote] = this.remoteFolders.splice(remoteIdx, 1);
+      fs.rmSync(removedRemote!.mirrorDir, { recursive: true, force: true });
+    }
   }
 
   /** `includePaused` defaults to false: paused skills are hidden from discovery (see setPaused). */

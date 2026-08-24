@@ -24,7 +24,12 @@ const overridesSchema = z
     tags: z.array(z.string()).optional(),
     status: statusSchema(['stable', 'beta', 'unreviewed', 'active', 'shipped', 'abandoned']).optional(),
     subfolder: z.string().optional().describe('optional subdirectory under the target folder'),
-    folder: z.string().optional().describe('which configured folder to write into; required if multiple folders exist for the target type'),
+    folder: z
+      .string()
+      .optional()
+      .describe(
+        'which configured folder to write into (a remote/folderfoo-connected folder works too — the file is pushed to folderfoo automatically); required if multiple folders exist for the target type'
+      ),
   })
   .optional();
 

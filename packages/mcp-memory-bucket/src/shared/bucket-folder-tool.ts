@@ -3,10 +3,22 @@ import path from 'node:path';
 import { z } from 'zod';
 import type Database from 'better-sqlite3';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { saveFolder, removeFolder as removeFolderFromConfig, sanitizeFolderName, type BucketConfig } from '../config.js';
+import {
+  saveFolder,
+  saveRemoteFolder,
+  removeFolder as removeFolderFromConfig,
+  sanitizeFolderName,
+  mirrorDirFor,
+  type BucketConfig,
+  type RemoteFolder,
+} from '../config.js';
 import { initialScan, type TableSyncSpec } from '../store/sync.js';
 import type { SkillRepository } from '../skills/repository.js';
 import type { MemoryRepository } from '../memory/repository.js';
+import { listFolders as listFolderfooFolders } from '../remote/folderfoo-client.js';
+import { pollOne } from '../remote/remote-sync.js';
+import type { IdentityTracker } from '../remote/identity.js';
+import { TENANT_ID } from './folderfoo-tenant.js';
 
 const KIND = z.enum(['skill', 'memory']);
 
@@ -17,15 +29,19 @@ export function registerBucketFolderTools(
   memoryRepo: MemoryRepository,
   db: Database.Database,
   skillSpec: TableSyncSpec<any>,
-  memorySpec: TableSyncSpec<any>
+  memorySpec: TableSyncSpec<any>,
+  identity: IdentityTracker
 ): void {
+  const repoFor = (kind: 'skill' | 'memory') => (kind === 'skill' ? skillRepo : memoryRepo);
+  const specFor = (kind: 'skill' | 'memory') => (kind === 'skill' ? skillSpec : memorySpec);
+
   mcp.tool(
     'bucket_list_folders',
-    'Lists the configured skill and memory folders (the named source directories skills/memory docs live under, e.g. "super-skills", "demo-skills", "builtin") — use this to see what folders exist before passing a `folder` argument to a create/list/search tool, or before adding/removing one.',
+    'Lists the configured skill and memory folders (the named source directories skills/memory docs live under, e.g. "super-skills", "demo-skills", "builtin"), each tagged `remote: true/false` for whether it syncs with folderfoo — use this to see what folders exist before passing a `folder` argument to a create/list/search tool, or before adding/removing one. To see UNconnected folderfoo folders available to connect, use bucket_list_remote_folders instead.',
     {},
     async () => {
-      const skill = skillRepo.listFolders().map((f) => ({ ...f, kind: 'skill' as const }));
-      const memory = memoryRepo.listFolders().map((f) => ({ ...f, kind: 'memory' as const }));
+      const skill = skillRepo.listFoldersWithRemoteInfo().map((f) => ({ ...f, kind: 'skill' as const }));
+      const memory = memoryRepo.listFoldersWithRemoteInfo().map((f) => ({ ...f, kind: 'memory' as const }));
       return { content: [{ type: 'text', text: JSON.stringify({ skill, memory }, null, 2) }] };
     }
   );
@@ -61,8 +77,92 @@ export function registerBucketFolderTools(
   );
 
   mcp.tool(
+    'bucket_list_remote_folders',
+    "Lists the current user's own folders on the connected folderfoo deployment, including ones not yet connected to this bucket — use this to pick a `folderPath` for bucket_connect_remote_folder. Each entry is tagged `connected` (the name it's already registered under, per kind, or null) so you don't connect the same remote folder twice. Errors with a clear message if folderfoo integration is off (needs --folderfoo-mode/FOLDERFOO_MODE) or nobody is logged in yet (log in via the web UI, bucket_open_ui, first — this tool cannot itself perform a folderfoo login).",
+    {},
+    async () => {
+      if (config.folderfooMode === 'off' || !config.folderfooHost) {
+        return {
+          content: [{ type: 'text', text: 'folderfoo integration is off — restart with --folderfoo-mode dev|cloud (or set FOLDERFOO_MODE) to enable it' }],
+          isError: true,
+        };
+      }
+      const current = identity.current();
+      if (!current.username) {
+        return { content: [{ type: 'text', text: 'not logged in to folderfoo — open the web UI (bucket_open_ui) and log in first' }], isError: true };
+      }
+      try {
+        const server = config.folderfooHost;
+        const folders = await listFolderfooFolders(server, config.baseDir, TENANT_ID);
+        const connectedFor = (kind: 'skill' | 'memory') =>
+          new Map(
+            repoFor(kind)
+              .listRemoteFolders()
+              .filter((f) => f.server === server && f.tenantId === TENANT_ID)
+              .map((f) => [f.folderPath, f.name])
+          );
+        const skillConnected = connectedFor('skill');
+        const memoryConnected = connectedFor('memory');
+        const annotated = folders.map((f) => ({
+          ...f,
+          connected: { skill: skillConnected.get(f.path) ?? null, memory: memoryConnected.get(f.path) ?? null },
+        }));
+        return { content: [{ type: 'text', text: JSON.stringify(annotated, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
+      }
+    }
+  );
+
+  mcp.tool(
+    'bucket_connect_remote_folder',
+    "Connects one of the user's own folderfoo folders (see bucket_list_remote_folders for `folderPath` values) as a new skill or memory source — syncs like a folder added via bucket_create_folder, so skill_create/memory_create can target it via `folder` and edits push back to folderfoo automatically. Idempotent: if this exact folderPath is already connected under this kind, returns that existing folder instead of creating a duplicate. Same login requirement as bucket_list_remote_folders.",
+    {
+      kind: KIND,
+      folderPath: z.string().describe("a `path` value from bucket_list_remote_folders ('' for the folderfoo root)"),
+      name: z.string().optional().describe("name for the folder; defaults to a sanitized version of folderPath's last segment"),
+    },
+    async ({ kind, folderPath, name }) => {
+      if (config.folderfooMode === 'off' || !config.folderfooHost) {
+        return {
+          content: [{ type: 'text', text: 'folderfoo integration is off — restart with --folderfoo-mode dev|cloud (or set FOLDERFOO_MODE) to enable it' }],
+          isError: true,
+        };
+      }
+      const current = identity.current();
+      if (!current.username) {
+        return { content: [{ type: 'text', text: 'not logged in to folderfoo — open the web UI (bucket_open_ui) and log in first' }], isError: true };
+      }
+      const server = config.folderfooHost;
+      const repo = repoFor(kind);
+      const already = repo.listRemoteFolders().find((f) => f.server === server && f.tenantId === TENANT_ID && f.folderPath === folderPath);
+      if (already) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ name: already.name, server, tenantId: TENANT_ID, folderPath, kind, alreadyConnected: true }, null, 2) },
+          ],
+        };
+      }
+      const folderName = sanitizeFolderName(name || folderPath.split('/').filter(Boolean).pop() || TENANT_ID);
+      if (!folderName) {
+        return { content: [{ type: 'text', text: 'could not derive a valid folder name — provide one explicitly' }], isError: true };
+      }
+      const mirrorDir = mirrorDirFor(config.baseDir, current.mode, current.username, folderName);
+      const remote: RemoteFolder = { name: folderName, server, tenantId: TENANT_ID, folderPath, mirrorDir, mode: current.mode, username: current.username };
+      try {
+        repo.registerRemoteFolder(remote);
+        saveRemoteFolder(config, kind, { name: folderName, server, tenantId: TENANT_ID, folderPath, mode: current.mode, username: current.username });
+        await pollOne(db, specFor(kind), remote, config.baseDir);
+        return { content: [{ type: 'text', text: JSON.stringify({ name: folderName, server, tenantId: TENANT_ID, folderPath, kind }, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
+      }
+    }
+  );
+
+  mcp.tool(
     'bucket_delete_folder',
-    'Unregisters a skill or memory folder by name: stops watching it and drops its cached entries from the index. Never touches files on disk — the directory and its contents are left in place.',
+    'Unregisters a skill or memory folder by name — works for both local and folderfoo-connected (remote) folders. Stops watching it and drops its cached entries from the index; never touches the user\'s own files, on disk or on folderfoo — for a remote folder, only its local mirror cache is deleted, which is rebuilt fresh if reconnected.',
     { kind: KIND, name: z.string() },
     async ({ kind, name }) => {
       try {

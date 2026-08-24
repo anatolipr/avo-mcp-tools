@@ -1,11 +1,4 @@
-// Identifies mcp-memory-bucket's own web UI to folderfoo (X-Tenant-Id) —
-// this is memory-bucket's identity as a folderfoo-consuming app, distinct
-// from the per-remote-source `tenantId` a user types into the connect-a-
-// folder flow (add-folder-modal.ts), which addresses which folderfoo
-// TENANT'S DATA a given remote skill/memory folder pulls from — could be
-// this same tenant, or a different app's (mindfoo, bulletino), since
-// memory-bucket mounts folders from other apps' storage, not just its own.
-export const TENANT_ID = 'membkt';
+export { TENANT_ID } from '../shared/folderfoo-tenant.js';
 
 export type FolderfooMode = 'off' | 'dev' | 'cloud';
 
