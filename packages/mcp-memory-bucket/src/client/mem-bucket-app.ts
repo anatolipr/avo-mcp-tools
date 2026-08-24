@@ -5,7 +5,8 @@ import './result-list.js';
 import './detail-panel.js';
 import './add-folder-modal.js';
 import './tag-multiselect.js';
-import type { Entry, Facets, Selection, TypeFilter, FoldersResponse, Folder } from './types.js';
+import './channel-view.js';
+import type { Entry, Facets, Selection, TypeFilter, FoldersResponse, Folder, ChannelSummary, ChannelDetail } from './types.js';
 import { TENANT_ID, getFolderfooConfig } from './server-config.js';
 import { parseFolderfooAddress } from './folderfoo-address.js';
 
@@ -94,11 +95,14 @@ function loadFilterState(): Partial<FilterState> {
 export class MemBucketApp extends LitElement {
   static styles = css`
     :host { display: flex; flex-direction: column; height: 100vh; }
-    .theme-toggle {
-      position: fixed;
-      top: 10px;
-      right: 12px;
-      z-index: 10;
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+    .theme-toggle, .reindex-toggle {
       width: 28px;
       height: 28px;
       border: 1px solid var(--border-strong);
@@ -113,30 +117,28 @@ export class MemBucketApp extends LitElement {
       justify-content: center;
       opacity: 0.75;
     }
-    .theme-toggle:hover { opacity: 1; background: var(--hover); }
-    .reindex-toggle {
-      position: fixed;
-      top: 10px;
-      right: 46px;
-      z-index: 10;
-      width: 28px;
-      height: 28px;
-      border: 1px solid var(--border-strong);
-      border-radius: 50%;
-      background: var(--bg);
-      color: inherit;
-      cursor: pointer;
-      font-size: 14px;
-      line-height: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      opacity: 0.75;
-    }
-    .reindex-toggle:hover { opacity: 1; background: var(--hover); }
+    .theme-toggle:hover, .reindex-toggle:hover { opacity: 1; background: var(--hover); }
+    .folderfoo-slot { display: contents; }
     .reindex-toggle:disabled { cursor: default; opacity: 0.4; }
     .reindex-toggle.spinning { animation: reindex-spin 0.8s linear infinite; }
     @keyframes reindex-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    .channels-toggle {
+      height: 28px;
+      padding: 0 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: 14px;
+      background: var(--bg);
+      color: inherit;
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      opacity: 0.75;
+    }
+    .channels-toggle:hover { opacity: 1; background: var(--hover); }
+    .channels-toggle.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); opacity: 1; }
     .filters {
       padding: 12px 16px;
       border-bottom: 1px solid var(--border);
@@ -248,6 +250,21 @@ export class MemBucketApp extends LitElement {
       border-bottom: 1px solid var(--border);
       background: var(--bg-subtle);
     }
+    .folders-bar .folder-chips {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .toolbar-bar {
+      display: flex;
+      align-items: center;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-subtle);
+    }
     .folder-chip {
       border: 1px solid var(--border-strong); border-radius: 999px; padding: 3px 8px 3px 10px; font-size: 12px;
       cursor: pointer; background: none; color: inherit; display: inline-flex; align-items: center; gap: 6px;
@@ -341,6 +358,11 @@ export class MemBucketApp extends LitElement {
   #selectedIds = new Signal<Set<string>>(new Set());
   #theme = new Signal<ThemeMode>(loadTheme());
   #reindexing = new Signal<boolean>(false);
+  #view = new Signal<'entries' | 'channels'>('entries');
+  #channels = new Signal<ChannelSummary[]>([]);
+  #selectedChannel = new Signal<string | null>(null);
+  #channelDetail = new Signal<ChannelDetail | null>(null);
+  #channelLoading = new Signal<boolean>(false);
 
   #boundOnDragMove = (e: PointerEvent) => this.#onDragMove(e);
   #boundOnDragEnd = () => this.#onDragEnd();
@@ -481,15 +503,25 @@ export class MemBucketApp extends LitElement {
   // and shouldn't see a login prompt or pay for the network calls a
   // logged-out widget still makes (GET /me, refresh scheduling).
   async #mountFolderfooProfileCircle() {
-    if (document.querySelector('folderfoo-profile-circle')) return; // already mounted (e.g. hot reload)
+    if (this.shadowRoot?.querySelector('folderfoo-profile-circle')) return; // already mounted (e.g. hot reload)
     const { folderfooMode, folderfooHost } = await getFolderfooConfig();
     if (folderfooMode === 'off' || !folderfooHost) return;
     import(/* @vite-ignore */ `${folderfooHost}/elements/folderfoo-profile-circle.js`)
-      .then(() => {
+      .then(async () => {
+        await this.updateComplete; // ensure the .toolbar div exists in shadowRoot
         const el = document.createElement('folderfoo-profile-circle');
         el.setAttribute('app-name', 'Memory Bucket');
         el.setAttribute('tenant-id', TENANT_ID);
-        document.body.appendChild(el);
+        // :host in folderfoo's shadow DOM is `all: initial`, and its .avatar
+        // is a fixed 32px sized independently of :host, so shrinking it to
+        // match the 28px theme/reindex toggles needs a scale applied as an
+        // inline style on the host element. Using `zoom` (not `transform`)
+        // here specifically: `transform` makes the host a new containing
+        // block for its `position: fixed` descendants, which breaks
+        // folderfoo's login/file-open modals (they render relative to this
+        // tiny circle instead of the real viewport).
+        (el.style as CSSStyleDeclaration & { zoom?: string }).zoom = '0.875';
+        this.shadowRoot?.querySelector('.folderfoo-slot')?.appendChild(el);
       })
       .catch((err) => {
         // Best-effort, matching every other consuming app's posture: the
@@ -553,6 +585,29 @@ export class MemBucketApp extends LitElement {
     const res = await fetch('/api/folders');
     this.#folders.set((await res.json()) as FoldersResponse);
     this.#foldersLoaded.set(true);
+  }
+
+  #setView(view: 'entries' | 'channels') {
+    this.#view.set(view);
+    if (view === 'channels') this.#refetchChannels();
+  }
+
+  async #refetchChannels() {
+    const res = await fetch('/api/channels');
+    this.#channels.set((await res.json()) as ChannelSummary[]);
+    // Keep an already-open channel's content in sync (e.g. after a manual refresh click).
+    if (this.#selectedChannel.value) this.#selectChannel(this.#selectedChannel.value);
+  }
+
+  async #selectChannel(name: string) {
+    this.#selectedChannel.set(name);
+    this.#channelLoading.set(true);
+    try {
+      const res = await fetch(`/api/channels/${encodeURIComponent(name)}`);
+      this.#channelDetail.set(res.ok ? ((await res.json()) as ChannelDetail) : null);
+    } finally {
+      this.#channelLoading.set(false);
+    }
   }
 
   #toggleFolder(name: string) {
@@ -752,6 +807,19 @@ export class MemBucketApp extends LitElement {
     `;
   }
 
+  #renderChannelsToggle() {
+    const active = this.#view.value === 'channels';
+    return html`
+      <button
+        class="channels-toggle ${active ? 'active' : ''}"
+        title="Live memory channels"
+        @click=${() => this.#setView(active ? 'entries' : 'channels')}
+      >
+        ⛓ Channels
+      </button>
+    `;
+  }
+
   #renderReindexToggle() {
     const reindexing = this.#reindexing.value;
     return html`
@@ -767,13 +835,38 @@ export class MemBucketApp extends LitElement {
     `;
   }
 
+  #renderToolbar(showReindex: boolean) {
+    return html`
+      <div class="toolbar">
+        ${showReindex ? this.#renderReindexToggle() : ''}
+        ${this.#renderChannelsToggle()}
+        ${this.#renderThemeToggle()}
+        <div class="folderfoo-slot"></div>
+      </div>
+    `;
+  }
+
   render() {
     const facets = this.#facets.value;
     const allFolders = this.#allFolders();
 
+    if (this.#view.value === 'channels') {
+      return html`
+        <div class="toolbar-bar">${this.#renderToolbar(false)}</div>
+        <channel-view
+          .channels=${this.#channels.value}
+          .selected=${this.#selectedChannel.value}
+          .detail=${this.#channelDetail.value}
+          .loading=${this.#channelLoading.value}
+          .onSelect=${(name: string) => this.#selectChannel(name)}
+          .onRefresh=${() => this.#refetchChannels()}
+        ></channel-view>
+      `;
+    }
+
     if (this.#foldersLoaded.value && allFolders.length === 0 && !this.#showAddFolder.value) {
       return html`
-        ${this.#renderThemeToggle()}
+        <div class="toolbar-bar">${this.#renderToolbar(false)}</div>
         <div class="first-run">
           <h1>No folders configured yet</h1>
           <p>
@@ -794,29 +887,30 @@ export class MemBucketApp extends LitElement {
     }
 
     return html`
-      ${this.#renderReindexToggle()}
-      ${this.#renderThemeToggle()}
       <div class="folders-bar">
         <span class="filter-label">Folders:</span>
-        ${allFolders.map(
-          (folder) => html`
-            <button
-              class="folder-chip ${folder.remote ? 'remote' : ''} ${this.#activeFolders.value.includes(folder.name) ? 'active' : ''}"
-              title=${folder.remote ? `${folder.path} (remote — folderfoo)` : folder.path}
-              @click=${() => this.#toggleFolder(folder.name)}
-            >
-              ${folder.remote ? html`<span class="remote-dot"></span>` : '📁'} ${folder.name}
-              <span class="kind">(${folder.kind === 'skill' ? 's' : 'm'})</span>
-              <span
-                class="remove"
-                title="Remove folder"
-                @click=${(e: Event) => this.#removeFolder(folder, e)}
-              >${this.#removingFolder.value === folder.name ? '…' : '✕'}</span
+        <div class="folder-chips">
+          ${allFolders.map(
+            (folder) => html`
+              <button
+                class="folder-chip ${folder.remote ? 'remote' : ''} ${this.#activeFolders.value.includes(folder.name) ? 'active' : ''}"
+                title=${folder.remote ? `${folder.path} (remote — folderfoo)` : folder.path}
+                @click=${() => this.#toggleFolder(folder.name)}
               >
-            </button>
-          `
-        )}
-        <button class="add-folder-btn" @click=${() => this.#showAddFolder.set(true)}>+ Add folder</button>
+                ${folder.remote ? html`<span class="remote-dot"></span>` : '📁'} ${folder.name}
+                <span class="kind">(${folder.kind === 'skill' ? 's' : 'm'})</span>
+                <span
+                  class="remove"
+                  title="Remove folder"
+                  @click=${(e: Event) => this.#removeFolder(folder, e)}
+                >${this.#removingFolder.value === folder.name ? '…' : '✕'}</span
+                >
+              </button>
+            `
+          )}
+          <button class="add-folder-btn" @click=${() => this.#showAddFolder.set(true)}>+ Add folder</button>
+        </div>
+        ${this.#renderToolbar(true)}
       </div>
       ${this.#folderfooOpenStatus.value
         ? html`

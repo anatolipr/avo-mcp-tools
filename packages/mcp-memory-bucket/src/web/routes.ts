@@ -16,6 +16,7 @@ import { attachmentsDirFor, guessMimeType } from '../attachments/storage.js';
 import { listFolders as listFolderfooFolders } from '../remote/folderfoo-client.js';
 import { setCredential } from '../remote/credentials.js';
 import { pollOne, type RemotePollerHandle } from '../remote/remote-sync.js';
+import { getChannel, listChannels } from '../channels/store.js';
 
 type EntryType = 'skill' | 'memory' | 'all';
 
@@ -741,6 +742,22 @@ export function buildWebRouter(
 
   router.get('/api/health', (_req: Request, res: Response) => {
     res.json(buildHealth(db));
+  });
+
+  // Read-only view of the ephemeral in-memory channel layer (see channels/store.ts) — backs the
+  // web UI's Channels view. Never touches disk; a channel that's swept for idling or never posted
+  // to simply won't appear here.
+  router.get('/api/channels', (_req: Request, res: Response) => {
+    res.json(listChannels().map((c) => ({ name: c.name, lastActivityAt: c.lastActivityAt })));
+  });
+
+  router.get('/api/channels/:name', (req: Request, res: Response) => {
+    const channel = req.params.name ? getChannel(req.params.name) : undefined;
+    if (!channel) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    res.json({ name: channel.name, content: channel.content, lastActivityAt: channel.lastActivityAt });
   });
 
   // Tells the client which folderfoo deployment (if any) to point the

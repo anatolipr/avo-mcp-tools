@@ -80,3 +80,14 @@ export interface Selection {
 }
 
 export type TypeFilter = 'all' | 'skill' | 'memory';
+
+export interface ChannelSummary {
+  name: string;
+  lastActivityAt: number;
+}
+
+export interface ChannelDetail {
+  name: string;
+  content: string;
+  lastActivityAt: number;
+}
