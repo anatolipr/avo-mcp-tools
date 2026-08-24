@@ -9,36 +9,36 @@ import { resolveWithinBase } from '../store/safe-path.js';
 export class AttachmentRepository {
   constructor(private memoryRepo: MemoryRepository, private skillRepo: SkillRepository) {}
 
-  private getDoc(kind: DocKind, docIdOrName: string) {
-    const doc = kind === 'memory' ? this.memoryRepo.get(docIdOrName) : this.skillRepo.get(docIdOrName);
+  private async getDoc(kind: DocKind, docIdOrName: string) {
+    const doc = kind === 'memory' ? await this.memoryRepo.get(docIdOrName) : await this.skillRepo.get(docIdOrName);
     if (!doc) throw new Error(`${kind} doc "${docIdOrName}" not found`);
     return doc;
   }
 
-  private saveAttachmentsList(kind: DocKind, docIdOrName: string, attachments: AttachmentEntry[]): void {
+  private async saveAttachmentsList(kind: DocKind, docIdOrName: string, attachments: AttachmentEntry[]): Promise<void> {
     if (kind === 'memory') {
-      this.memoryRepo.update(docIdOrName, { attachments });
+      await this.memoryRepo.update(docIdOrName, { attachments });
     } else {
-      this.skillRepo.update(docIdOrName, { attachments });
+      await this.skillRepo.update(docIdOrName, { attachments });
     }
   }
 
-  add(kind: DocKind, docIdOrName: string, filename: string, data: Buffer): AttachmentEntry {
-    const doc = this.getDoc(kind, docIdOrName);
+  async add(kind: DocKind, docIdOrName: string, filename: string, data: Buffer): Promise<AttachmentEntry> {
+    const doc = await this.getDoc(kind, docIdOrName);
     const dir = attachmentsDirFor(doc.source_path, kind);
     const entry = writeAttachmentFile(dir, filename, data);
     const existing = doc.attachments ?? [];
-    this.saveAttachmentsList(kind, docIdOrName, [...existing, entry]);
+    await this.saveAttachmentsList(kind, docIdOrName, [...existing, entry]);
     return entry;
   }
 
-  get(kind: DocKind, docIdOrName: string, filename: string): AttachmentEntry | undefined {
-    const doc = this.getDoc(kind, docIdOrName);
+  async get(kind: DocKind, docIdOrName: string, filename: string): Promise<AttachmentEntry | undefined> {
+    const doc = await this.getDoc(kind, docIdOrName);
     return (doc.attachments ?? []).find((a) => a.filename === filename);
   }
 
-  update(kind: DocKind, docIdOrName: string, filename: string, data: Buffer): AttachmentEntry {
-    const doc = this.getDoc(kind, docIdOrName);
+  async update(kind: DocKind, docIdOrName: string, filename: string, data: Buffer): Promise<AttachmentEntry> {
+    const doc = await this.getDoc(kind, docIdOrName);
     const dir = attachmentsDirFor(doc.source_path, kind);
     const existingEntry = (doc.attachments ?? []).find((a) => a.filename === filename);
     if (!existingEntry) throw new Error(`attachment "${filename}" not found on ${kind} doc "${docIdOrName}"`);
@@ -47,17 +47,17 @@ export class AttachmentRepository {
     const written = writeAttachmentFile(dir, filename, data);
     // Full replace: preserve position, overwrite metadata for this filename entry.
     const next = (doc.attachments ?? []).map((a) => (a.filename === filename ? written : a));
-    this.saveAttachmentsList(kind, docIdOrName, next);
+    await this.saveAttachmentsList(kind, docIdOrName, next);
     return written;
   }
 
-  remove(kind: DocKind, docIdOrName: string, filename: string): void {
-    const doc = this.getDoc(kind, docIdOrName);
+  async remove(kind: DocKind, docIdOrName: string, filename: string): Promise<void> {
+    const doc = await this.getDoc(kind, docIdOrName);
     const dir = attachmentsDirFor(doc.source_path, kind);
     const safePath = resolveWithinBase(dir, undefined, filename);
     fs.rmSync(safePath, { force: true });
     const next = (doc.attachments ?? []).filter((a) => a.filename !== filename);
-    this.saveAttachmentsList(kind, docIdOrName, next);
+    await this.saveAttachmentsList(kind, docIdOrName, next);
     if (listAttachmentFiles(dir).length === 0) {
       fs.rmSync(dir, { recursive: true, force: true });
       if (kind === 'memory') {
@@ -71,18 +71,18 @@ export class AttachmentRepository {
     }
   }
 
-  list(kind: DocKind, docIdOrName: string): AttachmentEntry[] {
-    return this.getDoc(kind, docIdOrName).attachments ?? [];
+  async list(kind: DocKind, docIdOrName: string): Promise<AttachmentEntry[]> {
+    return (await this.getDoc(kind, docIdOrName)).attachments ?? [];
   }
 
   /** Absolute filesystem path for an attachment's file, for callers (e.g. MCP tools) that need to Read it. */
-  absolutePathFor(kind: DocKind, docIdOrName: string, filename: string): string {
-    const doc = this.getDoc(kind, docIdOrName);
+  async absolutePathFor(kind: DocKind, docIdOrName: string, filename: string): Promise<string> {
+    const doc = await this.getDoc(kind, docIdOrName);
     return path.join(attachmentsDirFor(doc.source_path, kind), filename);
   }
 
-  reconcile(kind: DocKind, docIdOrName: string): { orphans: string[]; unlisted: string[] } {
-    const doc = this.getDoc(kind, docIdOrName);
+  async reconcile(kind: DocKind, docIdOrName: string): Promise<{ orphans: string[]; unlisted: string[] }> {
+    const doc = await this.getDoc(kind, docIdOrName);
     const dir = attachmentsDirFor(doc.source_path, kind);
     const declared = new Set((doc.attachments ?? []).map((a) => a.filename));
     const onDisk = new Set(listAttachmentFiles(dir));

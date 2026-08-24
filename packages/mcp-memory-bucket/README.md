@@ -168,6 +168,26 @@ memory/skill sources. Override that with one of:
   Note the `--` before `--memory-dir` — without it, npm swallows the flag
   itself instead of passing it through to the script.
 
+- the `FOLDERFOO_MODE` environment variable, or the `--folderfoo-mode
+  <off|dev|cloud>` CLI flag — controls whether the web UI integrates with
+  folderfoo (remote skill/memory folders backed by a folderfoo server, plus
+  the `folderfoo-profile-circle` login widget). Defaults to `off`: no folderfoo
+  code loads, no login widget appears, no network calls to any folderfoo
+  server are made. Set to `dev` to point at a local folderfoo dev server
+  (`http://localhost:3000`, e.g. via `folderfoo/start-dev.sh`), or `cloud`
+  for the real hosted deployment (`https://files.cuul.cc`).
+
+  ```sh
+  npm start -- --folderfoo-mode dev
+  # or: FOLDERFOO_MODE=dev npm start
+  ```
+
+  Unlike browser-only folderfoo consumers (mindfoo, bulletino, avotuner),
+  which infer dev-vs-prod from `window.location.hostname`, mcp-memory-bucket
+  is a CLI tool whose own page is always `localhost` regardless of which
+  folderfoo deployment (if any) is wanted — hence the explicit flag instead
+  of hostname-sniffing.
+
 ## Test
 
 ```sh

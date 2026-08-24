@@ -123,12 +123,12 @@ export function upsertFile<TFrontmatter>(
   spec: TableSyncSpec<TFrontmatter>,
   filePath: string
 ): void {
-  const existing = db
+  const existingBySourcePath = db
     .prepare(`SELECT mtime_ms FROM ${spec.table} WHERE source_path = ?`)
     .get(filePath) as { mtime_ms: number } | undefined;
 
   const parsed = readMarkdownFile<TFrontmatter>(filePath);
-  if (existing && existing.mtime_ms === parsed.mtimeMs) return; // unchanged, skip reprocessing
+  if (existingBySourcePath && existingBySourcePath.mtime_ms === parsed.mtimeMs) return; // unchanged, skip reprocessing
 
   const frontmatter = spec.deriveFrontmatter
     ? spec.deriveFrontmatter(parsed.frontmatter, filePath, parsed.mtimeMs)
@@ -137,6 +137,28 @@ export function upsertFile<TFrontmatter>(
   const id = spec.getId(frontmatter);
   if (!id) {
     console.error(`[memory-bucket] skipping ${filePath}: missing required id field in frontmatter`);
+    return;
+  }
+
+  // id/name is the table's real PRIMARY KEY (used as the sole addressing
+  // handle across the whole public API - skill_get(name), memory_get(id),
+  // etc.), so a DIFFERENT file claiming the same id is a genuine name
+  // collision across configured folders/sources, not a re-scan of the same
+  // file. The ON CONFLICT(id) below would otherwise silently overwrite
+  // whichever row synced first - the first-synced item's row (and its
+  // full content) simply vanishes from the cache with no error and no way
+  // to address it, since id is the only lookup key this schema has.
+  // Refuse the overwrite and warn loudly instead: the first-synced item
+  // keeps working, the colliding one is visibly excluded rather than
+  // invisibly clobbering it.
+  const existingById = db.prepare(`SELECT source_path FROM ${spec.table} WHERE id = ?`).get(id) as
+    | { source_path: string }
+    | undefined;
+  if (existingById && existingById.source_path !== filePath) {
+    console.error(
+      `[memory-bucket] SKIPPED indexing ${filePath}: id "${id}" already used by ${existingById.source_path} — ` +
+        `names must be unique across every configured folder. Rename one of these two files (or its frontmatter id/name) to resolve the collision.`
+    );
     return;
   }
 

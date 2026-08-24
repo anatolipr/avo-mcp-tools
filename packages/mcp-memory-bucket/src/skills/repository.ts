@@ -2,14 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import type { FSWatcher } from 'chokidar';
+import matter from 'gray-matter';
 import { writeMarkdownFile } from '../store/markdown-file.js';
 import { assertValidSkillName } from '../store/skill-name.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, skillSyncSpec, type TableSyncSpec } from '../store/sync.js';
 import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
 import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
-import type { NamedFolder } from '../config.js';
+import type { NamedFolder, RemoteFolder } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
+import { readFile as readRemoteFile, writeFile as writeRemoteFile, joinRemoteFolderPath } from '../remote/folderfoo-client.js';
 
 interface SkillRow {
   id: string;
@@ -60,8 +62,27 @@ export class SkillRepository {
   private watcher?: FSWatcher;
 
   /** `folders[0]` is always the builtin skills dir — never exposed for create()/removal. */
-  constructor(private db: Database.Database, private folders: NamedFolder[]) {
+  constructor(
+    private db: Database.Database,
+    private folders: NamedFolder[],
+    private remoteFolders: RemoteFolder[] = [],
+    private credentialsBaseDir?: string
+  ) {
     this.syncSpec = skillSyncSpec(folders);
+  }
+
+  /** The RemoteFolder a NamedFolder name resolves to, or undefined for a local (non-remote) folder. */
+  private remoteFor(folderName: string): RemoteFolder | undefined {
+    return this.remoteFolders.find((f) => f.name === folderName);
+  }
+
+  /** Pushes the just-written SKILL.md at filePath to folderfoo, if targetFolderName resolves to a remote source. No-op for a local folder. See get()'s comment on the folderPath/name split for a skill's directory-per-skill layout. */
+  private async pushToRemoteIfNeeded(targetFolderName: string, filePath: string): Promise<void> {
+    const remote = this.remoteFor(targetFolderName);
+    if (!remote || !this.credentialsBaseDir) return;
+    const skillDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(filePath)));
+    const fileContents = fs.readFileSync(filePath, 'utf-8');
+    await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath, 'SKILL', fileContents);
   }
 
   /** Attaches the live chokidar watcher so addFolder/removeFolder can mutate it without a restart. */
@@ -72,6 +93,16 @@ export class SkillRepository {
   /** User-addable folders — excludes the always-present builtin skills dir at folders[0]. */
   listFolders(): NamedFolder[] {
     return this.folders.slice(1);
+  }
+
+  /** Full RemoteFolder records (server/tenantId/folderPath/mirrorDir) for every connected remote source — for matching an incoming folderfoo-file-open address back to a configured source. */
+  listRemoteFolders(): RemoteFolder[] {
+    return [...this.remoteFolders];
+  }
+
+  /** Same as listFolders(), but tags each entry with whether it's a remote (folderfoo) source — for the web UI's folder list, e.g. to render remote folders in a distinct color. */
+  listFoldersWithRemoteInfo(): Array<NamedFolder & { remote: boolean }> {
+    return this.listFolders().map((f) => ({ ...f, remote: !!this.remoteFor(f.name) }));
   }
 
   private resolveFolder(folderName: string | undefined): NamedFolder {
@@ -88,6 +119,25 @@ export class SkillRepository {
       throw new Error('no skill folder configured — add one first (see bucket_open_ui)');
     }
     throw new Error(`multiple skill folders configured — specify folder: one of ${userFolders.map((f) => f.name).join(', ')}`);
+  }
+
+  /**
+   * Registers a new REMOTE (folderfoo) folder: creates its local mirror
+   * directory, registers it exactly like a local addFolder (so it starts
+   * watching/scanning immediately — empty at first, since nothing's been
+   * pulled from folderfoo yet), and records the folderfoo coordinates so
+   * get()/create()/update() know to treat this folder as remote. Does NOT
+   * perform the initial pull itself — the caller (the web route) does one
+   * immediate poll right after this returns, so content shows up without
+   * waiting for the first interval tick.
+   */
+  registerRemoteFolder(remote: RemoteFolder): void {
+    if (this.folders.some((f) => f.name === remote.name)) {
+      throw new Error(`a skill folder named "${remote.name}" already exists`);
+    }
+    fs.mkdirSync(remote.mirrorDir, { recursive: true });
+    this.remoteFolders.push(remote);
+    this.addFolder({ name: remote.name, path: remote.mirrorDir });
   }
 
   /** Registers a new folder: appends it, scans it once, and starts watching it live. */
@@ -211,14 +261,38 @@ export class SkillRepository {
     }
   }
 
-  get(name: string): SkillDoc | null {
+  /**
+   * For a skill in a LOCAL folder, returns the cached row unchanged (identical behavior to before
+   * remote sources existed). For a skill in a REMOTE folder, the cached `body` is only ever a
+   * poll-interval-stale mirror snapshot — per the settled design, `get` always fetches the current
+   * body live from folderfoo instead of trusting it.
+   */
+  async get(name: string): Promise<SkillDoc | null> {
     const row = this.db.prepare(`SELECT * FROM skills WHERE id = ?`).get(name) as SkillRow | undefined;
-    return row ? rowToDoc(row) : null;
+    if (!row) return null;
+    const doc = rowToDoc(row);
+    const remote = this.remoteFor(doc.folder);
+    if (!remote || !this.credentialsBaseDir) return doc;
+    // A skill's SKILL.md sits INSIDE a directory named after the skill
+    // (<mirrorDir>/[subfolder/]<name>/SKILL.md, per agentskills.io), unlike
+    // a memory doc's flat <id>.md - so the skill's own directory is part of
+    // the folderPath sent to folderfoo, and "SKILL" (no extension - the
+    // server stores opaque names) is the file name within it.
+    const skillDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(doc.source_path)));
+    // readRemoteFile returns the RAW file bytes folderfoo stored (whole
+    // SKILL.md, frontmatter included) - must parse it the same way a local
+    // file read would, or the next update() nests a fresh frontmatter
+    // block around this already-frontmattered blob (see memory/
+    // repository.ts's get() for the confirmed real-world corruption this
+    // caused).
+    const liveBody = matter(await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath, 'SKILL')).content.trim();
+    return { ...doc, body: liveBody };
   }
 
   /** Fetches many skills by name in one call — e.g. hydrating full bodies for a batch of search() hits. Missing names are simply absent from the result, not errors. */
-  bulkGet(names: string[]): SkillDoc[] {
-    return names.map((name) => this.get(name)).filter((doc): doc is SkillDoc => doc !== null);
+  async bulkGet(names: string[]): Promise<SkillDoc[]> {
+    const docs = await Promise.all(names.map((name) => this.get(name)));
+    return docs.filter((doc): doc is SkillDoc => doc !== null);
   }
 
   /**
@@ -227,7 +301,7 @@ export class SkillRepository {
    * `folder` selects which configured skill folder to write into; required only
    * when more than one user folder is configured.
    */
-  create(
+  async create(
     frontmatter: { name: string; description: string; license?: string; compatibility?: string; tags?: string[]; trigger_phrases?: string[] } & {
       owner?: string | null;
       status?: SkillStatus;
@@ -236,9 +310,9 @@ export class SkillRepository {
     body: string,
     subfolder?: string,
     folder?: string
-  ): SkillDoc {
+  ): Promise<SkillDoc> {
     assertValidSkillName(frontmatter.name);
-    if (this.get(frontmatter.name)) {
+    if (await this.get(frontmatter.name)) {
       throw new Error(`skill with name "${frontmatter.name}" already exists`);
     }
     const targetFolder = this.resolveFolder(folder);
@@ -267,6 +341,9 @@ export class SkillRepository {
       folder: targetFolder.name,
     };
     writeMarkdownFile(filePath, stripSourcePath(fm), body);
+    // Live/synchronous per the settled design — a folderfoo rejection here throws before upsertFile
+    // indexes the mirror as if the skill were successfully saved remotely.
+    await this.pushToRemoteIfNeeded(targetFolder.name, filePath);
     upsertFile(this.db, this.syncSpec, filePath);
     return { ...fm, body, paused: false };
   }
@@ -276,7 +353,7 @@ export class SkillRepository {
    * args. Returns per-name results so one bad entry (duplicate name, invalid
    * name, existing directory) doesn't abort the rest of the batch.
    */
-  bulkCreate(
+  async bulkCreate(
     entries: Array<{
       frontmatter: { name: string; description: string; license?: string; compatibility?: string; tags?: string[]; trigger_phrases?: string[] } & {
         owner?: string | null;
@@ -287,15 +364,17 @@ export class SkillRepository {
       subfolder?: string;
       folder?: string;
     }>
-  ): Array<{ name: string; ok: boolean; error?: string }> {
-    return entries.map((entry) => {
+  ): Promise<Array<{ name: string; ok: boolean; error?: string }>> {
+    const results = [];
+    for (const entry of entries) {
       try {
-        this.create(entry.frontmatter, entry.body, entry.subfolder, entry.folder);
-        return { name: entry.frontmatter.name, ok: true };
+        await this.create(entry.frontmatter, entry.body, entry.subfolder, entry.folder);
+        results.push({ name: entry.frontmatter.name, ok: true });
       } catch (err) {
-        return { name: entry.frontmatter.name, ok: false, error: (err as Error).message };
+        results.push({ name: entry.frontmatter.name, ok: false, error: (err as Error).message });
       }
-    });
+    }
+    return results;
   }
 
   /** Name of the always-present, non-removable builtin folder (folders[0]) — never user content, never deprecatable. */
@@ -303,7 +382,7 @@ export class SkillRepository {
     return doc.folder === this.folders[0]?.name;
   }
 
-  update(
+  async update(
     name: string,
     frontmatter?: Partial<Omit<SkillFrontmatter, 'name' | 'metadata'>> & {
       owner?: string | null;
@@ -312,8 +391,8 @@ export class SkillRepository {
     },
     body?: string,
     bodyEdits?: BodyEdit[]
-  ): SkillDoc {
-    const existing = this.get(name);
+  ): Promise<SkillDoc> {
+    const existing = await this.get(name);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
     // `paused` is local-cache-only and must never reach writeMarkdownFile — split it off of
     // `existing` before spreading the rest into the frontmatter that gets written to disk.
@@ -337,6 +416,7 @@ export class SkillRepository {
     };
     const newBody = bodyEdits ? applyBodyEdits(existing.body, bodyEdits).body : (body ?? existing.body);
     writeMarkdownFile(existing.source_path, stripSourcePath(merged), newBody);
+    await this.pushToRemoteIfNeeded(existing.folder, existing.source_path);
     upsertFile(this.db, this.syncSpec, existing.source_path);
     return { ...merged, body: newBody, paused: existingPaused };
   }
@@ -344,13 +424,20 @@ export class SkillRepository {
   /**
    * Renames a skill: moves <sourceDir>/[subfolder/]<oldName>/ to .../<newName>/ (keeping any
    * scripts/references/assets alongside SKILL.md) and updates the `name` frontmatter field to match.
+   *
+   * Remote-folder note: pushes the renamed skill's content to folderfoo at its NEW path (a plain
+   * write, via pushToRemoteIfNeeded), but does not delete the OLD path on folderfoo — a true
+   * remote rename would need a folderfoo folder-rename call scoped to one skill's directory, which
+   * is out of scope for this pass (the settled design's write scope covers create/update/
+   * attachment writes, not rename). Renaming a remote-sourced skill currently leaves a stale copy
+   * under the old name on folderfoo; flagged here rather than silently incomplete.
    */
-  rename(name: string, newName: string): SkillDoc {
+  async rename(name: string, newName: string): Promise<SkillDoc> {
     assertValidSkillName(newName);
-    const existing = this.get(name);
+    const existing = await this.get(name);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
     if (newName === name) return existing;
-    if (this.get(newName)) {
+    if (await this.get(newName)) {
       throw new Error(`skill with name "${newName}" already exists`);
     }
 
@@ -367,6 +454,7 @@ export class SkillRepository {
     const { paused: _existingPaused, ...existingForFile } = existing;
     const merged: SkillFrontmatter = { ...existingForFile, name: newName };
     writeMarkdownFile(newFilePath, stripSourcePath(merged), existing.body);
+    await this.pushToRemoteIfNeeded(existing.folder, newFilePath);
     removeFile(this.db, 'skills', existing.source_path);
     upsertFile(this.db, this.syncSpec, newFilePath);
     return { ...merged, body: existing.body, paused: false };
@@ -380,7 +468,7 @@ export class SkillRepository {
    * Returns per-name results so partial failures (e.g. an unknown name) don't
    * abort the rest of the batch.
    */
-  bulkUpdate(
+  async bulkUpdate(
     names: string[],
     changes: {
       add_tags?: string[];
@@ -390,27 +478,29 @@ export class SkillRepository {
       extends?: string | null;
       deprecated?: boolean;
     }
-  ): Array<{ name: string; ok: boolean; error?: string }> {
-    return names.map((name) => {
+  ): Promise<Array<{ name: string; ok: boolean; error?: string }>> {
+    const results = [];
+    for (const name of names) {
       try {
-        const existing = this.get(name);
+        const existing = await this.get(name);
         if (!existing) throw new Error(`skill with name "${name}" not found`);
         const builtin = this.isBuiltin(existing);
         let tags = existing.tags;
         if (changes.add_tags?.length) tags = Array.from(new Set([...tags, ...changes.add_tags]));
         if (changes.remove_tags?.length) tags = tags.filter((t) => !changes.remove_tags!.includes(t));
-        this.update(name, {
+        await this.update(name, {
           tags,
           owner: changes.owner,
           status: changes.status,
           extends: changes.extends,
           ...(changes.deprecated !== undefined && !builtin ? { deprecated: changes.deprecated } : {}),
         });
-        return { name, ok: true };
+        results.push({ name, ok: true });
       } catch (err) {
-        return { name, ok: false, error: (err as Error).message };
+        results.push({ name, ok: false, error: (err as Error).message });
       }
-    });
+    }
+    return results;
   }
 
   /**
@@ -421,18 +511,20 @@ export class SkillRepository {
    * follow the skill to another machine's cache, survive a rename, or survive the cache file
    * being deleted. Returns per-name results so one bad name doesn't abort the rest of the batch.
    */
-  setPaused(names: string[], paused: boolean): Array<{ name: string; ok: boolean; error?: string }> {
-    return names.map((name) => {
+  async setPaused(names: string[], paused: boolean): Promise<Array<{ name: string; ok: boolean; error?: string }>> {
+    const results = [];
+    for (const name of names) {
       try {
-        const existing = this.get(name);
+        const existing = await this.get(name);
         if (!existing) throw new Error(`skill with name "${name}" not found`);
         if (this.isBuiltin(existing)) throw new Error(`skill "${name}" is builtin and cannot be paused`);
         this.db.prepare(`UPDATE skills SET paused = ? WHERE id = ?`).run(paused ? 1 : 0, name);
-        return { name, ok: true };
+        results.push({ name, ok: true });
       } catch (err) {
-        return { name, ok: false, error: (err as Error).message };
+        results.push({ name, ok: false, error: (err as Error).message });
       }
-    });
+    }
+    return results;
   }
 
   /**
@@ -440,20 +532,22 @@ export class SkillRepository {
    * semantics as rename(). Returns per-entry results so one bad pair (unknown
    * name, name collision) doesn't abort the rest of the batch.
    */
-  bulkRename(entries: Array<{ name: string; new_name: string }>): Array<{ name: string; new_name: string; ok: boolean; error?: string }> {
-    return entries.map(({ name, new_name }) => {
+  async bulkRename(entries: Array<{ name: string; new_name: string }>): Promise<Array<{ name: string; new_name: string; ok: boolean; error?: string }>> {
+    const results = [];
+    for (const { name, new_name } of entries) {
       try {
-        this.rename(name, new_name);
-        return { name, new_name, ok: true };
+        await this.rename(name, new_name);
+        results.push({ name, new_name, ok: true });
       } catch (err) {
-        return { name, new_name, ok: false, error: (err as Error).message };
+        results.push({ name, new_name, ok: false, error: (err as Error).message });
       }
-    });
+    }
+    return results;
   }
 
-  /** Removes the whole skill directory, including any scripts/references/assets alongside SKILL.md. */
-  delete(name: string): void {
-    const existing = this.get(name);
+  /** Removes the whole skill directory, including any scripts/references/assets alongside SKILL.md. Remote-folder note: does not delete the corresponding content on folderfoo — deletion isn't in the settled design's remote write scope (create/update/attachment writes only), same gap flagged on rename(). */
+  async delete(name: string): Promise<void> {
+    const existing = await this.get(name);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
     if (this.isBuiltin(existing)) throw new Error(`skill "${name}" is builtin and cannot be deleted`);
     const skillDir = path.dirname(existing.source_path);
@@ -466,15 +560,17 @@ export class SkillRepository {
    * via search()/list(). Returns per-name results so one bad name doesn't
    * abort the rest of the batch.
    */
-  bulkDelete(names: string[]): Array<{ name: string; ok: boolean; error?: string }> {
-    return names.map((name) => {
+  async bulkDelete(names: string[]): Promise<Array<{ name: string; ok: boolean; error?: string }>> {
+    const results = [];
+    for (const name of names) {
       try {
-        this.delete(name);
-        return { name, ok: true };
+        await this.delete(name);
+        results.push({ name, ok: true });
       } catch (err) {
-        return { name, ok: false, error: (err as Error).message };
+        results.push({ name, ok: false, error: (err as Error).message });
       }
-    });
+    }
+    return results;
   }
 }
 

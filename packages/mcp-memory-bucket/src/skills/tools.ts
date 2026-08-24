@@ -70,7 +70,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       deprecated: z.boolean().optional().describe('marks skills as deprecated (or un-deprecates when false) — independent of status'),
     },
     async ({ names, add_tags, remove_tags, owner, status, extends: extendsId, deprecated }: any) => {
-      const results = repo.bulkUpdate(names, { add_tags, remove_tags, owner, status, extends: extendsId, deprecated });
+      const results = await repo.bulkUpdate(names, { add_tags, remove_tags, owner, status, extends: extendsId, deprecated });
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -80,7 +80,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     'Fetches a single skill by name, including its full markdown body.',
     { name: z.string() },
     async ({ name }) => {
-      const doc = repo.get(name);
+      const doc = await repo.get(name);
       if (!doc) {
         return { content: [{ type: 'text', text: `No skill found with name "${name}"` }], isError: true };
       }
@@ -93,7 +93,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     'Fetches many skills by name in one call, including full markdown bodies — e.g. hydrating a batch of skill_search hits. Missing names are simply omitted from the result, not errors.',
     { names: z.array(z.string()).min(1) },
     async ({ names }) => {
-      const docs = repo.bulkGet(names);
+      const docs = await repo.bulkGet(names);
       return { content: [{ type: 'text', text: JSON.stringify(docs, null, 2) }] };
     }
   );
@@ -120,7 +120,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     },
     async ({ name, description, body, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId, subfolder, folder }: any) => {
       try {
-        const doc = repo.create(
+        const doc = await repo.create(
           { name, description, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId },
           body,
           subfolder,
@@ -153,7 +153,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     `Creates many skills in one call — each entry is the same shape as skill_create's args. Returns per-name success/failure so one bad entry (duplicate name, invalid name, existing directory) doesn't abort the rest of the batch. ${AUTHORING_SKILL_HINT}`,
     { entries: z.array(skillEntrySchema).min(1) },
     async ({ entries }: any) => {
-      const results = repo.bulkCreate(
+      const results = await repo.bulkCreate(
         entries.map((e: any) => ({
           frontmatter: {
             name: e.name,
@@ -199,13 +199,13 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       try {
         let diff: string | undefined;
         if (body_edits) {
-          const existing = repo.get(name);
+          const existing = await repo.get(name);
           if (!existing) throw new Error(`skill with name "${name}" not found`);
           const { body: patchedBody, applied } = applyBodyEdits(existing.body, body_edits);
           diff = formatBodyEditsDiff(applied);
           body = patchedBody;
         }
-        const doc = repo.update(name, frontmatterFields, body);
+        const doc = await repo.update(name, frontmatterFields, body);
         // Body is omitted from the response: the caller either just sent it (full replacement),
         // already has it, or has `diff` — echoing a potentially large body back is pure waste.
         // Fetch skill_get(name) if the fresh full body is actually needed.
@@ -227,7 +227,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     },
     async ({ name, new_name }) => {
       try {
-        const doc = repo.rename(name, new_name);
+        const doc = await repo.rename(name, new_name);
         return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -244,7 +244,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
         .min(1),
     },
     async ({ entries }: any) => {
-      const results = repo.bulkRename(entries);
+      const results = await repo.bulkRename(entries);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -257,7 +257,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       paused: z.boolean().describe('true to pause (hide from skill_list/skill_search), false to resume'),
     },
     async ({ names, paused }) => {
-      const results = repo.setPaused(names, paused);
+      const results = await repo.setPaused(names, paused);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -268,7 +268,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     { name: z.string() },
     async ({ name }) => {
       try {
-        repo.delete(name);
+        await repo.delete(name);
         return { content: [{ type: 'text', text: `Deleted skill "${name}"` }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -281,7 +281,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     'Hard-deletes many skills by name in one call — e.g. cleaning up a batch found via skill_search/skill_list. No tombstone. Returns per-name success/failure so one bad name doesn\'t abort the rest of the batch.',
     { names: z.array(z.string()).min(1) },
     async ({ names }) => {
-      const results = repo.bulkDelete(names);
+      const results = await repo.bulkDelete(names);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );

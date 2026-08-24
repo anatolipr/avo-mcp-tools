@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { FSWatcher } from 'chokidar';
+import matter from 'gray-matter';
 import { writeMarkdownFile } from '../store/markdown-file.js';
 import { slugify } from '../store/slug.js';
 import { resolveWithinBase } from '../store/safe-path.js';
@@ -10,8 +11,9 @@ import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, memorySyncS
 import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
 import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import { attachmentsDirFor } from '../attachments/storage.js';
-import type { NamedFolder } from '../config.js';
+import type { NamedFolder, RemoteFolder } from '../config.js';
 import { normalizeKey } from '../types.js';
+import { readFile as readRemoteFile, writeFile as writeRemoteFile, joinRemoteFolderPath } from '../remote/folderfoo-client.js';
 import type { MemoryDoc, MemoryDocType, MemoryFrontmatter, MemoryKeyType, MemoryStatus } from '../types.js';
 
 /** Uppercases and strips everything but letters/digits — used to compare keys that differ only in
@@ -62,8 +64,18 @@ export class MemoryRepository {
   private syncSpec: TableSyncSpec<MemoryFrontmatter>;
   private watcher?: FSWatcher;
 
-  constructor(private db: Database.Database, private folders: NamedFolder[]) {
+  constructor(
+    private db: Database.Database,
+    private folders: NamedFolder[],
+    private remoteFolders: RemoteFolder[] = [],
+    private credentialsBaseDir?: string
+  ) {
     this.syncSpec = memorySyncSpec(folders);
+  }
+
+  /** The RemoteFolder a NamedFolder name resolves to, or undefined for a local (non-remote) folder. */
+  private remoteFor(folderName: string): RemoteFolder | undefined {
+    return this.remoteFolders.find((f) => f.name === folderName);
   }
 
   /** Attaches the live chokidar watcher so addFolder/removeFolder can mutate it without a restart. */
@@ -73,6 +85,16 @@ export class MemoryRepository {
 
   listFolders(): NamedFolder[] {
     return [...this.folders];
+  }
+
+  /** Full RemoteFolder records (server/tenantId/folderPath/mirrorDir) for every connected remote source — for matching an incoming folderfoo-file-open address back to a configured source. */
+  listRemoteFolders(): RemoteFolder[] {
+    return [...this.remoteFolders];
+  }
+
+  /** Same as listFolders(), but tags each entry with whether it's a remote (folderfoo) source — for the web UI's folder list, e.g. to render remote folders in a distinct color. */
+  listFoldersWithRemoteInfo(): Array<NamedFolder & { remote: boolean }> {
+    return this.folders.map((f) => ({ ...f, remote: !!this.remoteFor(f.name) }));
   }
 
   private resolveFolder(folderName: string | undefined): NamedFolder {
@@ -88,6 +110,25 @@ export class MemoryRepository {
       throw new Error('no memory folder configured — add one first (see bucket_open_ui)');
     }
     throw new Error(`multiple memory folders configured — specify folder: one of ${this.folders.map((f) => f.name).join(', ')}`);
+  }
+
+  /**
+   * Registers a new REMOTE (folderfoo) folder: creates its local mirror
+   * directory, registers it exactly like a local addFolder (so it starts
+   * watching/scanning immediately — empty at first, since nothing's been
+   * pulled from folderfoo yet), and records the folderfoo coordinates so
+   * get()/create()/update() know to treat this folder as remote. Does NOT
+   * perform the initial pull itself — the caller (the web route) does one
+   * immediate poll right after this returns, so content shows up without
+   * waiting for the first interval tick.
+   */
+  registerRemoteFolder(remote: RemoteFolder): void {
+    if (this.folders.some((f) => f.name === remote.name)) {
+      throw new Error(`a memory folder named "${remote.name}" already exists`);
+    }
+    fs.mkdirSync(remote.mirrorDir, { recursive: true });
+    this.remoteFolders.push(remote);
+    this.addFolder({ name: remote.name, path: remote.mirrorDir });
   }
 
   /** Registers a new folder: appends it, scans it once, and starts watching it live. */
@@ -200,14 +241,39 @@ export class MemoryRepository {
     }
   }
 
-  get(id: string): MemoryDoc | null {
+  /**
+   * For a doc in a LOCAL folder, returns the cached row unchanged (identical behavior to before
+   * remote sources existed). For a doc in a REMOTE folder, the cached `body` is only ever a
+   * poll-interval-stale mirror snapshot — per the settled design, `get` always fetches the current
+   * body live from folderfoo instead of trusting it, so a caller never sees stale content just
+   * because the last poll tick hasn't run yet.
+   */
+  async get(id: string): Promise<MemoryDoc | null> {
     const row = this.db.prepare(`SELECT * FROM memory_docs WHERE id = ?`).get(id) as MemoryRow | undefined;
-    return row ? rowToDoc(row) : null;
+    if (!row) return null;
+    const doc = rowToDoc(row);
+    const remote = this.remoteFor(doc.folder);
+    if (!remote || !this.credentialsBaseDir) return doc;
+    const relPath = path.relative(remote.mirrorDir, doc.source_path).replace(/\.md$/, '');
+    const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(relPath));
+    const name = path.basename(relPath);
+    // readRemoteFile returns the file's RAW bytes as folderfoo stored them -
+    // the whole markdown file, frontmatter block included, since folderfoo
+    // has no concept of frontmatter/body separation (that's purely a
+    // mem-bucket/gray-matter concept). Using this raw content directly as
+    // `body` was a real bug: the next update() would writeMarkdownFile a
+    // FRESH frontmatter block wrapped around this already-frontmattered
+    // blob, nesting one level deeper on every single edit (confirmed via a
+    // real corrupted doc: 3 levels of self-nested frontmatter+body after 3
+    // edits). Must parse it exactly like a local file read would.
+    const liveBody = matter(await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name)).content.trim();
+    return { ...doc, body: liveBody };
   }
 
   /** Fetches many memory docs by id in one call — e.g. hydrating full bodies for a batch of search() hits. Missing ids are simply absent from the result, not errors. */
-  bulkGet(ids: string[]): MemoryDoc[] {
-    return ids.map((id) => this.get(id)).filter((doc): doc is MemoryDoc => doc !== null);
+  async bulkGet(ids: string[]): Promise<MemoryDoc[]> {
+    const docs = await Promise.all(ids.map((id) => this.get(id)));
+    return docs.filter((doc): doc is MemoryDoc => doc !== null);
   }
 
   listKeys(keyPrefix?: string): Array<{ key: string; docCount: number }> {
@@ -247,7 +313,7 @@ export class MemoryRepository {
       .map(({ key, docCount }) => ({ key, docCount }));
   }
 
-  create(input: {
+  async create(input: {
     key: string;
     key_type: MemoryKeyType;
     doc_type: MemoryDocType;
@@ -258,10 +324,20 @@ export class MemoryRepository {
     related_to?: string | null;
     subfolder?: string;
     folder?: string;
-  }): MemoryDoc {
+  }): Promise<MemoryDoc> {
     const normalizedKey = normalizeKey(input.key);
-    const id = `${slugify(normalizedKey)}-${slugify(input.description)}-${randomUUID().slice(0, 8)}`;
     const targetFolder = this.resolveFolder(input.folder);
+    let id = `${slugify(normalizedKey)}-${slugify(input.description)}-${randomUUID().slice(0, 8)}`;
+    // folderfoo's POST /save/:filename silently strips every character
+    // outside [0-9a-zA-Z_] from the final filename segment (hyphens
+    // included) - a remote-bound id must not contain characters folderfoo
+    // will drop, or the name mem-bucket thinks the file is called
+    // permanently diverges from what folderfoo actually stored it as the
+    // moment it's written, breaking every future get/update for that doc
+    // with a 404 (confirmed: this is exactly what happened before this
+    // fix). Stripped ONLY for remote-bound docs - local-only folders keep
+    // the more readable hyphenated id unchanged.
+    if (this.remoteFor(targetFolder.name)) id = id.replace(/-/g, '');
     const filePath = resolveWithinBase(targetFolder.path, input.subfolder, `${id}.md`);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
@@ -280,6 +356,18 @@ export class MemoryRepository {
       folder: targetFolder.name,
     };
     writeMarkdownFile(filePath, stripSourcePath(fm), input.body);
+    // Remote write happens BEFORE upsertFile, live/synchronous per the settled design (no local
+    // staging) — if folderfoo rejects the write, this throws and the mirror is never indexed as
+    // if the doc were successfully saved. Reads the just-written mirror file back so folderfoo
+    // gets writeMarkdownFile's own formatting verbatim, not a hand-reconstructed string.
+    const remote = this.remoteFor(targetFolder.name);
+    if (remote && this.credentialsBaseDir) {
+      const relPath = path.relative(remote.mirrorDir, filePath).replace(/\.md$/, '');
+      const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(relPath));
+      const name = path.basename(relPath);
+      const fileContents = fs.readFileSync(filePath, 'utf-8');
+      await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, fileContents);
+    }
     upsertFile(this.db, this.syncSpec, filePath);
     return { ...fm, body: input.body, paused: false };
   }
@@ -289,7 +377,7 @@ export class MemoryRepository {
    * create()'s input. Returns per-key results (with the id filled in on
    * success) so one bad entry doesn't abort the rest of the batch.
    */
-  bulkCreate(
+  async bulkCreate(
     entries: Array<{
       key: string;
       key_type: MemoryKeyType;
@@ -302,19 +390,21 @@ export class MemoryRepository {
       subfolder?: string;
       folder?: string;
     }>
-  ): Array<{ key: string; ok: boolean; id?: string; error?: string }> {
-    return entries.map((entry) => {
+  ): Promise<Array<{ key: string; ok: boolean; id?: string; error?: string }>> {
+    const results = [];
+    for (const entry of entries) {
       try {
-        const doc = this.create(entry);
-        return { key: entry.key, ok: true, id: doc.id };
+        const doc = await this.create(entry);
+        results.push({ key: entry.key, ok: true, id: doc.id });
       } catch (err) {
-        return { key: entry.key, ok: false, error: (err as Error).message };
+        results.push({ key: entry.key, ok: false, error: (err as Error).message });
       }
-    });
+    }
+    return results;
   }
 
-  update(id: string, frontmatter?: Partial<MemoryFrontmatter>, body?: string, bodyEdits?: BodyEdit[]): MemoryDoc {
-    const existing = this.get(id);
+  async update(id: string, frontmatter?: Partial<MemoryFrontmatter>, body?: string, bodyEdits?: BodyEdit[]): Promise<MemoryDoc> {
+    const existing = await this.get(id);
     if (!existing) throw new Error(`memory doc with id "${id}" not found`);
     // `paused` is local-cache-only and must never reach writeMarkdownFile — split it off of
     // `existing` before spreading the rest into the frontmatter that gets written to disk.
@@ -328,6 +418,14 @@ export class MemoryRepository {
     };
     const newBody = bodyEdits ? applyBodyEdits(existing.body, bodyEdits).body : (body ?? existing.body);
     writeMarkdownFile(existing.source_path, stripSourcePath(merged), newBody);
+    const remote = this.remoteFor(existing.folder);
+    if (remote && this.credentialsBaseDir) {
+      const relPath = path.relative(remote.mirrorDir, existing.source_path).replace(/\.md$/, '');
+      const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(relPath));
+      const name = path.basename(relPath);
+      const fileContents = fs.readFileSync(existing.source_path, 'utf-8');
+      await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, fileContents);
+    }
     upsertFile(this.db, this.syncSpec, existing.source_path);
     return { ...merged, body: newBody, paused: existingPaused };
   }
@@ -340,7 +438,7 @@ export class MemoryRepository {
    * when provided. Never touches body. Returns per-id results so partial
    * failures (e.g. an unknown id) don't abort the rest of the batch.
    */
-  bulkUpdate(
+  async bulkUpdate(
     ids: string[],
     changes: {
       add_tags?: string[];
@@ -349,25 +447,27 @@ export class MemoryRepository {
       related_to?: string | null;
       deprecated?: boolean;
     }
-  ): Array<{ id: string; ok: boolean; error?: string }> {
-    return ids.map((id) => {
+  ): Promise<Array<{ id: string; ok: boolean; error?: string }>> {
+    const results = [];
+    for (const id of ids) {
       try {
-        const existing = this.get(id);
+        const existing = await this.get(id);
         if (!existing) throw new Error(`memory doc with id "${id}" not found`);
         let tags = existing.tags;
         if (changes.add_tags?.length) tags = Array.from(new Set([...tags, ...changes.add_tags]));
         if (changes.remove_tags?.length) tags = tags.filter((t) => !changes.remove_tags!.includes(t));
-        this.update(id, {
+        await this.update(id, {
           tags,
           ...(changes.status !== undefined ? { status: changes.status } : {}),
           ...(changes.related_to !== undefined ? { related_to: changes.related_to } : {}),
           ...(changes.deprecated !== undefined ? { deprecated: changes.deprecated } : {}),
         });
-        return { id, ok: true };
+        results.push({ id, ok: true });
       } catch (err) {
-        return { id, ok: false, error: (err as Error).message };
+        results.push({ id, ok: false, error: (err as Error).message });
       }
-    });
+    }
+    return results;
   }
 
   /**
@@ -378,21 +478,23 @@ export class MemoryRepository {
    * local-only, the flag does not follow the doc to another machine's cache or survive the cache
    * file being deleted. Returns per-id results so one bad id doesn't abort the rest of the batch.
    */
-  setPaused(ids: string[], paused: boolean): Array<{ id: string; ok: boolean; error?: string }> {
-    return ids.map((id) => {
+  async setPaused(ids: string[], paused: boolean): Promise<Array<{ id: string; ok: boolean; error?: string }>> {
+    const results = [];
+    for (const id of ids) {
       try {
-        const existing = this.get(id);
+        const existing = await this.get(id);
         if (!existing) throw new Error(`memory doc with id "${id}" not found`);
         this.db.prepare(`UPDATE memory_docs SET paused = ? WHERE id = ?`).run(paused ? 1 : 0, id);
-        return { id, ok: true };
+        results.push({ id, ok: true });
       } catch (err) {
-        return { id, ok: false, error: (err as Error).message };
+        results.push({ id, ok: false, error: (err as Error).message });
       }
-    });
+    }
+    return results;
   }
 
-  delete(id: string): void {
-    const existing = this.get(id);
+  async delete(id: string): Promise<void> {
+    const existing = await this.get(id);
     if (!existing) throw new Error(`memory doc with id "${id}" not found`);
     // The <id>/ wrapper directory exists solely to hold attachments/ for this doc (memory docs
     // are otherwise flat <id>.md files), so remove the whole wrapper — not just attachments/ —
@@ -410,8 +512,8 @@ export class MemoryRepository {
    * deriveFrontmatter's fallback, so the caller should treat this doc as gone under its old id
    * once this returns (look it up by the new filename-derived id/key instead).
    */
-  stripFrontmatter(id: string): void {
-    const existing = this.get(id);
+  async stripFrontmatter(id: string): Promise<void> {
+    const existing = await this.get(id);
     if (!existing) throw new Error(`memory doc with id "${id}" not found`);
     writeMarkdownFile(existing.source_path, {}, existing.body);
     upsertFile(this.db, this.syncSpec, existing.source_path);
@@ -422,15 +524,17 @@ export class MemoryRepository {
    * abandoned docs found via search(). Returns per-id results so one bad id
    * doesn't abort the rest of the batch.
    */
-  bulkDelete(ids: string[]): Array<{ id: string; ok: boolean; error?: string }> {
-    return ids.map((id) => {
+  async bulkDelete(ids: string[]): Promise<Array<{ id: string; ok: boolean; error?: string }>> {
+    const results = [];
+    for (const id of ids) {
       try {
-        this.delete(id);
-        return { id, ok: true };
+        await this.delete(id);
+        results.push({ id, ok: true });
       } catch (err) {
-        return { id, ok: false, error: (err as Error).message };
+        results.push({ id, ok: false, error: (err as Error).message });
       }
-    });
+    }
+    return results;
   }
 }
 

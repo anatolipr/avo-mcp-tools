@@ -19,6 +19,7 @@ import { buildWebRouter } from './web/routes.js';
 import { registerUiTool } from './web/ui-tool.js';
 import { registerMemoryChannelTools } from './channels/tools.js';
 import { startChannelSweep } from './channels/store.js';
+import { startRemotePolling, type RemotePollerHandle } from './remote/remote-sync.js';
 
 // server.ts is rebuilt from `buildMcpServer()` on every /mcp request (see below),
 // so tool schemas (which conditionally include `folder` based on folder count) always
@@ -49,12 +50,26 @@ initialScan(db, memorySpec);
 const skillWatcher = watchSources(db, skillSpec);
 const memoryWatcher = watchSources(db, memorySpec);
 
-const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: builtinSkillsDir }, ...config.skillFolders]);
-const memoryRepo = new MemoryRepository(db, config.memoryFolders);
+const skillRepo = new SkillRepository(
+  db,
+  [{ name: 'builtin', path: builtinSkillsDir }, ...config.skillFolders],
+  config.remoteSkillFolders,
+  config.baseDir
+);
+const memoryRepo = new MemoryRepository(db, config.memoryFolders, config.remoteMemoryFolders, config.baseDir);
 skillRepo.setWatcher(skillWatcher);
 memoryRepo.setWatcher(memoryWatcher);
 
 const attachmentRepo = new AttachmentRepository(memoryRepo, skillRepo);
+
+// Remote sources have no filesystem to watch (chokidar doesn't apply) - a
+// fixed-interval poller stands in for watchSources above, pulling changes
+// into each remote source's local mirror directory and reusing the exact
+// same upsertFile/removeFile path a local file-watch event would.
+const remoteSkillPoller: RemotePollerHandle | undefined =
+  config.remoteSkillFolders.length > 0 ? startRemotePolling(db, skillSpec, config.remoteSkillFolders, config.baseDir) : undefined;
+const remoteMemoryPoller: RemotePollerHandle | undefined =
+  config.remoteMemoryFolders.length > 0 ? startRemotePolling(db, memorySpec, config.remoteMemoryFolders, config.baseDir) : undefined;
 
 if (config.skillFolders.length === 0 && config.memoryFolders.length === 0) {
   console.error(
@@ -90,7 +105,7 @@ startChannelSweep((name) => console.error(`[memory-bucket] sweeping idle memory 
 
 const app = express();
 app.use(express.json());
-app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec));
+app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, { skill: remoteSkillPoller, memory: remoteMemoryPoller }));
 app.use(express.static(path.join(packageRoot, 'dist', 'client')));
 
 app.post('/mcp', async (req, res) => {
@@ -120,11 +135,25 @@ app.delete('/mcp', methodNotAllowed);
 app.listen(PORT, () => {
   console.error(`[memory-bucket] MCP server listening on http://localhost:${PORT}/mcp`);
   console.error(`[memory-bucket] UI available at http://localhost:${PORT}`);
+  console.error(
+    `[memory-bucket] folderfoo integration: ${config.folderfooMode}${config.folderfooHost ? ` (${config.folderfooHost})` : ''}` +
+      (config.folderfooMode === 'off' ? ' — pass --folderfoo-mode dev|cloud (or set FOLDERFOO_MODE) to enable' : '')
+  );
   console.error(`[memory-bucket] skill folders: ${config.skillFolders.map((f) => `${f.name}=${f.path}`).join(', ') || '(none)'}`);
   console.error(`[memory-bucket] memory folders: ${config.memoryFolders.map((f) => `${f.name}=${f.path}`).join(', ') || '(none)'}`);
+  if (config.remoteSkillFolders.length > 0 || config.remoteMemoryFolders.length > 0) {
+    console.error(
+      `[memory-bucket] remote (folderfoo) skill folders: ${config.remoteSkillFolders.map((f) => `${f.name}@${f.server}`).join(', ') || '(none)'}`
+    );
+    console.error(
+      `[memory-bucket] remote (folderfoo) memory folders: ${config.remoteMemoryFolders.map((f) => `${f.name}@${f.server}`).join(', ') || '(none)'}`
+    );
+  }
 });
 
 process.on('SIGINT', () => {
+  remoteSkillPoller?.stop();
+  remoteMemoryPoller?.stop();
   db.close();
   process.exit(0);
 });

@@ -66,6 +66,7 @@ export interface Folder {
   name: string;
   path: string;
   kind: 'skill' | 'memory';
+  remote: boolean;
 }
 
 export interface FoldersResponse {

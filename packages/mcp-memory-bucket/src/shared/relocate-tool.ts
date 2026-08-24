@@ -39,7 +39,7 @@ export function registerRelocateTool(mcp: McpServer, skillRepo: SkillRepository,
       overrides: overridesSchema,
     },
     async (opts) => {
-      const result = relocate(opts, skillRepo, memoryRepo);
+      const result = await relocate(opts, skillRepo, memoryRepo);
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         isError: !result.moved,
@@ -63,7 +63,7 @@ export function registerRelocateTool(mcp: McpServer, skillRepo: SkillRepository,
         .min(1),
     },
     async ({ entries }) => {
-      const results = relocateMany(entries, skillRepo, memoryRepo);
+      const results = await relocateMany(entries, skillRepo, memoryRepo);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );

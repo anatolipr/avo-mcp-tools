@@ -6,13 +6,16 @@ import express from 'express';
 import matter from 'gray-matter';
 import type Database from 'better-sqlite3';
 import type { BucketConfig } from '../config.js';
-import { saveFolder, removeFolder as removeFolderFromConfig, sanitizeFolderName } from '../config.js';
+import { saveFolder, saveRemoteFolder, removeFolder as removeFolderFromConfig, sanitizeFolderName, mirrorDirFor } from '../config.js';
 import type { SkillRepository } from '../skills/repository.js';
 import { stripKey, type MemoryRepository } from '../memory/repository.js';
 import { initialScan, type TableSyncSpec } from '../store/sync.js';
 import { sanitizeFtsQuery } from '../store/search.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { attachmentsDirFor, guessMimeType } from '../attachments/storage.js';
+import { listFolders as listFolderfooFolders } from '../remote/folderfoo-client.js';
+import { setCredential } from '../remote/credentials.js';
+import { pollOne, type RemotePollerHandle } from '../remote/remote-sync.js';
 
 type EntryType = 'skill' | 'memory' | 'all';
 
@@ -396,12 +399,20 @@ export function buildWebRouter(
   skillRepo: SkillRepository,
   memoryRepo: MemoryRepository,
   skillSpec: TableSyncSpec<any>,
-  memorySpec: TableSyncSpec<any>
+  memorySpec: TableSyncSpec<any>,
+  remotePollers?: { skill?: RemotePollerHandle; memory?: RemotePollerHandle }
 ): Router {
   const router = express.Router();
 
-  router.post('/api/rebuild-cache', (_req: Request, res: Response) => {
+  // Resyncs every remote source FIRST (force: true - always does real work,
+  // including reconcileDeletions, regardless of the watermark check), so a
+  // deletion made on folderfoo shows up here even if the poller's next
+  // regular tick hasn't fired yet. Without this, the wipe-and-rescan below
+  // is LOCAL-ONLY - it would silently resurrect a file that was deleted on
+  // folderfoo but whose stale mirror copy hadn't been reconciled away yet.
+  router.post('/api/rebuild-cache', async (_req: Request, res: Response) => {
     try {
+      await Promise.all([remotePollers?.skill?.resyncAll(), remotePollers?.memory?.resyncAll()]);
       db.exec(`DELETE FROM skills; DELETE FROM memory_docs; DELETE FROM search_index; DELETE FROM doc_dates;`);
       initialScan(db, skillSpec);
       initialScan(db, memorySpec);
@@ -534,7 +545,7 @@ export function buildWebRouter(
     });
   });
 
-  router.patch('/api/entries/:table/:id/deprecated', (req: Request, res: Response) => {
+  router.patch('/api/entries/:table/:id/deprecated', async (req: Request, res: Response) => {
     const { table, id } = req.params;
     const { deprecated } = req.body as { deprecated?: boolean };
     if (table !== 'skills' && table !== 'memory_docs') {
@@ -550,15 +561,15 @@ export function buildWebRouter(
       return;
     }
     try {
-      if (table === 'skills') skillRepo.update(id, { deprecated });
-      else memoryRepo.update(id, { deprecated });
+      if (table === 'skills') await skillRepo.update(id, { deprecated });
+      else await memoryRepo.update(id, { deprecated });
       res.json({ id, deprecated });
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });
     }
   });
 
-  router.post('/api/entries/:table/bulk/deprecated', (req: Request, res: Response) => {
+  router.post('/api/entries/:table/bulk/deprecated', async (req: Request, res: Response) => {
     const { table } = req.params;
     const { ids, deprecated } = req.body as { ids?: string[]; deprecated?: boolean };
     if (table !== 'skills' && table !== 'memory_docs') {
@@ -569,7 +580,7 @@ export function buildWebRouter(
       res.status(400).json({ error: 'body must be { ids: string[], deprecated: boolean }' });
       return;
     }
-    const results = table === 'skills' ? skillRepo.bulkUpdate(ids, { deprecated }) : memoryRepo.bulkUpdate(ids, { deprecated });
+    const results = table === 'skills' ? await skillRepo.bulkUpdate(ids, { deprecated }) : await memoryRepo.bulkUpdate(ids, { deprecated });
     res.json({ results });
   });
 
@@ -578,7 +589,7 @@ export function buildWebRouter(
   // "add" is just this same call supplying real values). Memory `key` is editable here (update()
   // normalizes it). Skill `name` is not — SkillRepository.update() rejects it outright since
   // renaming requires a real folder move (see the rename route below).
-  router.patch('/api/entries/:table/:id', (req: Request, res: Response) => {
+  router.patch('/api/entries/:table/:id', async (req: Request, res: Response) => {
     const { table, id } = req.params;
     const { frontmatter } = req.body as { frontmatter?: Record<string, unknown> };
     if (table !== 'skills' && table !== 'memory_docs') {
@@ -598,14 +609,14 @@ export function buildWebRouter(
       return;
     }
     try {
-      const updated = table === 'skills' ? skillRepo.update(id, frontmatter) : memoryRepo.update(id, frontmatter);
+      const updated = table === 'skills' ? await skillRepo.update(id, frontmatter) : await memoryRepo.update(id, frontmatter);
       res.json(updated);
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });
     }
   });
 
-  router.post('/api/entries/skills/:name/rename', (req: Request, res: Response) => {
+  router.post('/api/entries/skills/:name/rename', async (req: Request, res: Response) => {
     const { name } = req.params;
     const { new_name } = req.body as { new_name?: string };
     if (!name) {
@@ -617,7 +628,7 @@ export function buildWebRouter(
       return;
     }
     try {
-      const renamed = skillRepo.rename(name, new_name);
+      const renamed = await skillRepo.rename(name, new_name);
       res.json(renamed);
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
@@ -626,14 +637,14 @@ export function buildWebRouter(
 
   // Memory docs only — skill frontmatter (name/description) is required by the agentskills.io
   // spec, so stripping it would produce a non-conformant SKILL.md no compliant agent can load.
-  router.delete('/api/entries/memory_docs/:id/frontmatter', (req: Request, res: Response) => {
+  router.delete('/api/entries/memory_docs/:id/frontmatter', async (req: Request, res: Response) => {
     const { id } = req.params;
     if (!id) {
       res.status(400).json({ error: 'id is required' });
       return;
     }
     try {
-      memoryRepo.stripFrontmatter(id);
+      await memoryRepo.stripFrontmatter(id);
       res.json({ id, frontmatterRemoved: true });
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });
@@ -642,7 +653,7 @@ export function buildWebRouter(
 
   // `paused` is a local-only cache toggle (see SkillRepository/MemoryRepository#setPaused) — it
   // never touches the source file, so this goes through setPaused, not update()/bulkUpdate().
-  router.patch('/api/entries/:table/:id/paused', (req: Request, res: Response) => {
+  router.patch('/api/entries/:table/:id/paused', async (req: Request, res: Response) => {
     const { table, id } = req.params;
     const { paused } = req.body as { paused?: boolean };
     if (table !== 'skills' && table !== 'memory_docs') {
@@ -657,7 +668,7 @@ export function buildWebRouter(
       res.status(400).json({ error: 'body must be { paused: boolean }' });
       return;
     }
-    const [result] = table === 'skills' ? skillRepo.setPaused([id], paused) : memoryRepo.setPaused([id], paused);
+    const [result] = table === 'skills' ? await skillRepo.setPaused([id], paused) : await memoryRepo.setPaused([id], paused);
     if (!result?.ok) {
       res.status(404).json({ error: result?.error ?? 'not found' });
       return;
@@ -665,7 +676,7 @@ export function buildWebRouter(
     res.json({ id, paused });
   });
 
-  router.post('/api/entries/:table/bulk/paused', (req: Request, res: Response) => {
+  router.post('/api/entries/:table/bulk/paused', async (req: Request, res: Response) => {
     const { table } = req.params;
     const { ids, paused } = req.body as { ids?: string[]; paused?: boolean };
     if (table !== 'skills' && table !== 'memory_docs') {
@@ -676,11 +687,11 @@ export function buildWebRouter(
       res.status(400).json({ error: 'body must be { ids: string[], paused: boolean }' });
       return;
     }
-    const results = table === 'skills' ? skillRepo.setPaused(ids, paused) : memoryRepo.setPaused(ids, paused);
+    const results = table === 'skills' ? await skillRepo.setPaused(ids, paused) : await memoryRepo.setPaused(ids, paused);
     res.json({ results });
   });
 
-  router.delete('/api/entries/:table/:id', (req: Request, res: Response) => {
+  router.delete('/api/entries/:table/:id', async (req: Request, res: Response) => {
     const { table, id } = req.params;
     if (table !== 'skills' && table !== 'memory_docs') {
       res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
@@ -691,15 +702,15 @@ export function buildWebRouter(
       return;
     }
     try {
-      if (table === 'skills') skillRepo.delete(id);
-      else memoryRepo.delete(id);
+      if (table === 'skills') await skillRepo.delete(id);
+      else await memoryRepo.delete(id);
       res.json({ deleted: id });
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });
     }
   });
 
-  router.post('/api/entries/:table/bulk/delete', (req: Request, res: Response) => {
+  router.post('/api/entries/:table/bulk/delete', async (req: Request, res: Response) => {
     const { table } = req.params;
     const { ids } = req.body as { ids?: string[] };
     if (table !== 'skills' && table !== 'memory_docs') {
@@ -710,7 +721,7 @@ export function buildWebRouter(
       res.status(400).json({ error: 'body must be { ids: string[] }' });
       return;
     }
-    const results = table === 'skills' ? skillRepo.bulkDelete(ids) : memoryRepo.bulkDelete(ids);
+    const results = table === 'skills' ? await skillRepo.bulkDelete(ids) : await memoryRepo.bulkDelete(ids);
     res.json({ results });
   });
 
@@ -732,10 +743,86 @@ export function buildWebRouter(
     res.json(buildHealth(db));
   });
 
+  // Tells the client which folderfoo deployment (if any) to point the
+  // "Connect folderfoo" flow and the page-level login widget at — see
+  // config.ts's FolderfooMode doc comment for why this can't be inferred
+  // from window.location.hostname the way mindfoo/bulletino/avotuner do.
+  router.get('/api/config', (_req: Request, res: Response) => {
+    res.json({ folderfooMode: config.folderfooMode, folderfooHost: config.folderfooHost });
+  });
+
   router.get('/api/folders', (_req: Request, res: Response) => {
     res.json({
-      skill: skillRepo.listFolders().map((f) => ({ ...f, kind: 'skill' as const })),
-      memory: memoryRepo.listFolders().map((f) => ({ ...f, kind: 'memory' as const })),
+      skill: skillRepo.listFoldersWithRemoteInfo().map((f) => ({ ...f, kind: 'skill' as const })),
+      memory: memoryRepo.listFoldersWithRemoteInfo().map((f) => ({ ...f, kind: 'memory' as const })),
+    });
+  });
+
+  // Resolves a file opened via folderfoo's own File Open dialog
+  // (<folderfoo-profile-circle>'s "folderfoo-file-open" event) back to a
+  // memory-bucket doc, so the web UI can select it in the right panel —
+  // and, since that panel's edits already push through to folderfoo for
+  // any doc whose folder resolves to a remote source (see PATCH
+  // /api/entries/:table/:id), frontmatter changes made there persist to
+  // the cloud automatically once the right doc is open, no separate wiring
+  // needed for that half.
+  //
+  // Only works when the opened file's (server, tenantId, folderPath) falls
+  // under a folder ALREADY connected as a remote source here — folderfoo's
+  // File Open dialog browses the user's whole folderfoo tree, not just
+  // connected folders, so a miss (file from an unconnected folder) is a
+  // real, expected case the client surfaces as a clear message, not
+  // silently swallowed.
+  router.post('/api/folderfoo/resolve-open', (req: Request, res: Response) => {
+    const { server, tenantId, folderPath, name } = req.body as {
+      server?: string;
+      tenantId?: string;
+      folderPath?: string;
+      name?: string;
+    };
+    if (!server || !tenantId || !name) {
+      res.status(400).json({ error: 'server, tenantId, and name are required' });
+      return;
+    }
+    const openedFolderPath = folderPath || '';
+
+    for (const [table, repo] of [
+      ['skills', skillRepo],
+      ['memory_docs', memoryRepo],
+    ] as const) {
+      for (const remote of repo.listRemoteFolders()) {
+        if (remote.server !== server || remote.tenantId !== tenantId) continue;
+        // The opened file's folder must be remote.folderPath itself, or nested inside it.
+        const sourceFolder = remote.folderPath;
+        let withinFolder: string;
+        if (openedFolderPath === sourceFolder) {
+          withinFolder = '';
+        } else if (sourceFolder === '' ) {
+          withinFolder = openedFolderPath;
+        } else if (openedFolderPath.startsWith(`${sourceFolder}/`)) {
+          withinFolder = openedFolderPath.slice(sourceFolder.length + 1);
+        } else {
+          continue; // not under this source
+        }
+
+        const sourcePath =
+          table === 'skills'
+            ? path.join(remote.mirrorDir, withinFolder, name, 'SKILL.md')
+            : path.join(remote.mirrorDir, withinFolder, `${name}.md`);
+        const row = db.prepare(`SELECT id FROM ${table} WHERE source_path = ?`).get(sourcePath) as { id: string } | undefined;
+        if (row) {
+          res.json({ table, id: row.id });
+          return;
+        }
+        // Matched the connected source but no cache row yet (e.g. the
+        // poller hasn't picked it up since it was just created elsewhere) —
+        // a different, more specific miss than "not connected at all".
+        res.status(404).json({ error: `matched remote source "${remote.name}", but no cached doc found yet for this file — try Resync` });
+        return;
+      }
+    }
+    res.status(404).json({
+      error: `this file's folder isn't connected in memory-bucket yet — add it as a remote source first`,
     });
   });
 
@@ -766,6 +853,129 @@ export function buildWebRouter(
       res.json({ name: folderName, path: dirPath, kind });
     } catch (err) {
       res.status(409).json({ error: (err as Error).message });
+    }
+  });
+
+  // Persists a folderfoo JWT the browser already obtained (see
+  // credentials.ts — keyed by server URL, so every remote source pointing
+  // at the same folderfoo deployment shares this one login). The actual
+  // login UI is folderfoo's own <folderfoo-profile-circle> widget,
+  // dynamically imported into the client page exactly like every other
+  // folderfoo-consuming app (bulletino, mindfoo) — that widget stores its
+  // token in THIS page's localStorage (browser-only), so the client reads
+  // it back out and POSTs it here to also persist it server-side, where
+  // the Node process (poller, live reads/writes) actually needs it. This
+  // avoids a second username/password prompt: one login, reused for both
+  // the browser tab and the backend.
+  router.post('/api/folderfoo/login', async (req: Request, res: Response) => {
+    const { server, token } = req.body as { server?: string; token?: string };
+    if (!server || !token) {
+      res.status(400).json({ error: 'server and token are required' });
+      return;
+    }
+    setCredential(config.baseDir, server, token);
+    res.json({ connected: true, server });
+  });
+
+  // Lists the caller's own folderfoo folders for the "connect a folder"
+  // picker, once already logged in to `server` (via the route above).
+  router.get('/api/folderfoo/folders', async (req: Request, res: Response) => {
+    const server = req.query.server as string | undefined;
+    const tenantId = req.query.tenantId as string | undefined;
+    if (!server || !tenantId) {
+      res.status(400).json({ error: 'server and tenantId query params are required' });
+      return;
+    }
+    try {
+      const folders = await listFolderfooFolders(server, config.baseDir, tenantId);
+      res.json(folders);
+    } catch (err) {
+      res.status(401).json({ error: (err as Error).message });
+    }
+  });
+
+  // Registers a REMOTE (folderfoo) source — the connect-a-folder counterpart
+  // to POST /api/folders above, which only ever handles local filesystem
+  // paths. Creates the local mirror directory, registers it with the
+  // repository (so it starts watching/scanning like any local folder), then
+  // immediately triggers one poll so content shows up without waiting for
+  // the first interval tick.
+  router.post('/api/remote-folders', async (req: Request, res: Response) => {
+    const { kind, name, server, tenantId, folderPath } = req.body as {
+      kind?: string;
+      name?: string;
+      server?: string;
+      tenantId?: string;
+      folderPath?: string;
+    };
+    if (kind !== 'skill' && kind !== 'memory') {
+      res.status(400).json({ error: 'kind must be "skill" or "memory"' });
+      return;
+    }
+    if (!server || !tenantId || folderPath === undefined) {
+      res.status(400).json({ error: 'server, tenantId, and folderPath are required' });
+      return;
+    }
+    const folderName = sanitizeFolderName(name || folderPath.split('/').filter(Boolean).pop() || tenantId);
+    if (!folderName) {
+      res.status(400).json({ error: 'could not derive a valid folder name — provide one explicitly' });
+      return;
+    }
+
+    const repo = kind === 'skill' ? skillRepo : memoryRepo;
+    const spec = kind === 'skill' ? skillSpec : memorySpec;
+    const mirrorDir = mirrorDirFor(config.baseDir, folderName);
+    const remote = { name: folderName, server, tenantId, folderPath, mirrorDir };
+    try {
+      repo.registerRemoteFolder(remote);
+      saveRemoteFolder(config, kind, { name: folderName, server, tenantId, folderPath });
+      await pollOne(db, spec, remote, config.baseDir);
+      res.json({ name: folderName, server, tenantId, folderPath, kind });
+    } catch (err) {
+      res.status(409).json({ error: (err as Error).message });
+    }
+  });
+
+  // Triggers one immediate out-of-cycle poll for a single remote source —
+  // backs the web UI's per-source "resync now" action, so a user who just
+  // saved something remotely doesn't have to wait out the fixed poll
+  // interval to see it reflected locally.
+  router.post('/api/remote-folders/:kind/:name/resync', async (req: Request, res: Response) => {
+    const { kind, name } = req.params;
+    if (kind !== 'skill' && kind !== 'memory') {
+      res.status(400).json({ error: 'kind must be "skill" or "memory"' });
+      return;
+    }
+    if (!name) {
+      res.status(400).json({ error: 'name is required' });
+      return;
+    }
+    const handle = kind === 'skill' ? remotePollers?.skill : remotePollers?.memory;
+    if (!handle) {
+      res.status(404).json({ error: `no remote ${kind} sources configured` });
+      return;
+    }
+    try {
+      await handle.resyncNow(name);
+      res.json({ resynced: name, kind });
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  // Lightweight "check every remote source for changes right now" — unlike
+  // rebuild-cache (which wipes the WHOLE local cache and re-scans
+  // everything, including local-only folders), this only force-resyncs the
+  // remote sources' own incremental pull+reconcile, so it's cheap enough to
+  // call on every tab focus without the user needing to hit rebuild-cache
+  // by hand just to see a remote change (e.g. a deletion) sooner than the
+  // fixed poll interval.
+  router.post('/api/remote-folders/resync-all', async (_req: Request, res: Response) => {
+    try {
+      await Promise.all([remotePollers?.skill?.resyncAll(), remotePollers?.memory?.resyncAll()]);
+      res.json({ resynced: true });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
     }
   });
 

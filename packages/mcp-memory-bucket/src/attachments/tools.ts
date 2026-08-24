@@ -28,8 +28,8 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
       try {
         assertFileSizeOk(file_path);
         const data = fs.readFileSync(file_path);
-        const entry = attachRepo.add(kind, doc, filename, data);
-        const absolute_path = attachRepo.absolutePathFor(kind, doc, entry.filename);
+        const entry = await attachRepo.add(kind, doc, filename, data);
+        const absolute_path = await attachRepo.absolutePathFor(kind, doc, entry.filename);
         return { content: [{ type: 'text', text: JSON.stringify({ ...entry, absolute_path }, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -43,9 +43,9 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
     { kind: kindSchema, doc: z.string(), filename: z.string() },
     async ({ kind, doc, filename }: any) => {
       try {
-        const entry = attachRepo.get(kind, doc, filename);
+        const entry = await attachRepo.get(kind, doc, filename);
         if (!entry) throw new Error(`attachment "${filename}" not found`);
-        const absolute_path = attachRepo.absolutePathFor(kind, doc, entry.filename);
+        const absolute_path = await attachRepo.absolutePathFor(kind, doc, entry.filename);
         return { content: [{ type: 'text', text: JSON.stringify({ ...entry, absolute_path }, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -61,8 +61,8 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
       try {
         assertFileSizeOk(file_path);
         const data = fs.readFileSync(file_path);
-        const entry = attachRepo.update(kind, doc, filename, data);
-        const absolute_path = attachRepo.absolutePathFor(kind, doc, entry.filename);
+        const entry = await attachRepo.update(kind, doc, filename, data);
+        const absolute_path = await attachRepo.absolutePathFor(kind, doc, entry.filename);
         return { content: [{ type: 'text', text: JSON.stringify({ ...entry, absolute_path }, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -76,7 +76,7 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
     { kind: kindSchema, doc: z.string(), filename: z.string() },
     async ({ kind, doc, filename }: any) => {
       try {
-        attachRepo.remove(kind, doc, filename);
+        await attachRepo.remove(kind, doc, filename);
         return { content: [{ type: 'text', text: `removed "${filename}"` }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -90,11 +90,13 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
     { kind: kindSchema, doc: z.string() },
     async ({ kind, doc }: any) => {
       try {
-        const entries = attachRepo.list(kind, doc);
-        const withPaths = entries.map((entry) => ({
-          ...entry,
-          absolute_path: attachRepo.absolutePathFor(kind, doc, entry.filename),
-        }));
+        const entries = await attachRepo.list(kind, doc);
+        const withPaths = await Promise.all(
+          entries.map(async (entry) => ({
+            ...entry,
+            absolute_path: await attachRepo.absolutePathFor(kind, doc, entry.filename),
+          }))
+        );
         return { content: [{ type: 'text', text: JSON.stringify(withPaths, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -108,7 +110,7 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
     { kind: kindSchema, doc: z.string() },
     async ({ kind, doc }: any) => {
       try {
-        const result = attachRepo.reconcile(kind, doc);
+        const result = await attachRepo.reconcile(kind, doc);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };

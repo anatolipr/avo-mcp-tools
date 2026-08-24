@@ -36,7 +36,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
     'Fetches many memory docs by id in one call, including full markdown bodies — e.g. hydrating a batch of memory_search hits (which return ids, not keys). Missing ids are simply omitted from the result, not errors.',
     { ids: z.array(z.string()).min(1) },
     async ({ ids }) => {
-      const docs = repo.bulkGet(ids);
+      const docs = await repo.bulkGet(ids);
       return { content: [{ type: 'text', text: JSON.stringify(docs, null, 2) }] };
     }
   );
@@ -86,7 +86,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       deprecated: z.boolean().optional().describe('marks docs as deprecated (or un-deprecates when false) — independent of status'),
     },
     async ({ ids, add_tags, remove_tags, status, related_to, deprecated }) => {
-      const results = repo.bulkUpdate(ids, { add_tags, remove_tags, status, related_to, deprecated });
+      const results = await repo.bulkUpdate(ids, { add_tags, remove_tags, status, related_to, deprecated });
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -114,7 +114,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
           .suggestKeys(key, 3)
           .find((m) => stripKey(m.key) === strippedNew && m.key !== normalized);
 
-        const doc = repo.create({ key, key_type, doc_type, description, body, tags, status, related_to, subfolder, folder });
+        const doc = await repo.create({ key, key_type, doc_type, description, body, tags, status, related_to, subfolder, folder });
 
         const result: Record<string, unknown> = { ...doc };
         if (nearDuplicate) {
@@ -145,7 +145,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
     `Writes many memory docs in one call — each entry is the same shape as memory_create's args. Returns per-key success/failure (with the new id on success) so one bad entry doesn't abort the rest of the batch. ${AUTHORING_SKILL_HINT}`,
     { entries: z.array(memoryEntrySchema).min(1) },
     async ({ entries }: any) => {
-      const results = repo.bulkCreate(entries);
+      const results = await repo.bulkCreate(entries);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -173,13 +173,13 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       try {
         let diff: string | undefined;
         if (body_edits) {
-          const existing = repo.get(id);
+          const existing = await repo.get(id);
           if (!existing) throw new Error(`memory doc with id "${id}" not found`);
           const { body: patchedBody, applied } = applyBodyEdits(existing.body, body_edits);
           diff = formatBodyEditsDiff(applied);
           body = patchedBody;
         }
-        const doc = repo.update(id, frontmatterFields, body);
+        const doc = await repo.update(id, frontmatterFields, body);
         // Body is omitted from the response: the caller either just sent it (full replacement),
         // already has it, or has `diff` — echoing a potentially large body back is pure waste.
         // Fetch memory_get(id) if the fresh full body is actually needed.
@@ -200,7 +200,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       paused: z.boolean().describe('true to pause (hide from memory_get/memory_search), false to resume'),
     },
     async ({ ids, paused }) => {
-      const results = repo.setPaused(ids, paused);
+      const results = await repo.setPaused(ids, paused);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -211,7 +211,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
     { id: z.string() },
     async ({ id }) => {
       try {
-        repo.delete(id);
+        await repo.delete(id);
         return { content: [{ type: 'text', text: `Deleted memory doc "${id}"` }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -224,7 +224,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
     'Hard-deletes many memory docs by id in one call — e.g. cleaning up a batch of abandoned docs found via memory_search. No tombstone. Returns per-id success/failure so one bad id doesn\'t abort the rest of the batch.',
     { ids: z.array(z.string()).min(1) },
     async ({ ids }) => {
-      const results = repo.bulkDelete(ids);
+      const results = await repo.bulkDelete(ids);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -253,7 +253,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
         };
       }
       try {
-        const doc = repo.create({
+        const doc = await repo.create({
           key,
           key_type: /^[A-Z]+-\d+$/i.test(key) ? 'ticket' : 'freeform',
           doc_type: 'session-summary',

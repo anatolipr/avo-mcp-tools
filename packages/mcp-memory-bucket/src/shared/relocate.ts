@@ -73,11 +73,11 @@ export interface RelocateOptions {
   };
 }
 
-export function relocate(
+export async function relocate(
   opts: RelocateOptions,
   skillRepo: SkillRepository,
   memoryRepo: MemoryRepository
-): RelocateResult {
+): Promise<RelocateResult> {
   if (!fs.existsSync(opts.path) || !fs.statSync(opts.path).isFile()) {
     return { moved: false, reason: `file not found or not readable: ${opts.path}` };
   }
@@ -98,7 +98,7 @@ export function relocate(
       return { moved: false, reason: 'skill description cannot be inferred from a filename — provide overrides.description (what it does and when to use it)' };
     }
 
-    const doc = skillRepo.create(
+    const doc = await skillRepo.create(
       {
         name,
         description,
@@ -136,7 +136,7 @@ export function relocate(
     return { moved: false, reason: `already relocated as memory doc "${already.id}"`, id: already.id, target: 'memory' };
   }
 
-  const doc = memoryRepo.create({
+  const doc = await memoryRepo.create({
     key,
     key_type: keyType,
     doc_type: docType,
@@ -157,12 +157,16 @@ export function relocate(
  * RelocateResult per path (in order) so one bad/ambiguous file doesn't abort
  * the rest of the batch — same "no guess, no partial write" behavior per file.
  */
-export function relocateMany(
+export async function relocateMany(
   entries: Array<{ path: string } & Omit<RelocateOptions, 'path'>>,
   skillRepo: SkillRepository,
   memoryRepo: MemoryRepository
-): Array<RelocateResult & { path: string }> {
-  return entries.map((entry) => ({ path: entry.path, ...relocate(entry, skillRepo, memoryRepo) }));
+): Promise<Array<RelocateResult & { path: string }>> {
+  const results = [];
+  for (const entry of entries) {
+    results.push({ path: entry.path, ...(await relocate(entry, skillRepo, memoryRepo)) });
+  }
+  return results;
 }
 
 function slugFromFilename(filePath: string): string {

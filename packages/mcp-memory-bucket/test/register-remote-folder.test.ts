@@ -1,0 +1,160 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { openCache } from '../src/store/db.js';
+import { memorySyncSpec } from '../src/store/sync.js';
+import { MemoryRepository } from '../src/memory/repository.js';
+import { SkillRepository } from '../src/skills/repository.js';
+import { setCredential } from '../src/remote/credentials.js';
+import { pollOne } from '../src/remote/remote-sync.js';
+import { mirrorDirFor } from '../src/config.js';
+import type { RemoteFolder } from '../src/config.js';
+
+function tmpDir(prefix: string): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function mockFolderfoo(state: { lastChanged: number; files: Array<{ name: string; folderPath: string; mtime: number; content: string }> }) {
+  return async (url: string) => {
+    if (url.includes('/folders/last-changed')) {
+      return { ok: true, status: 200, json: async () => ({ lastChanged: state.lastChanged }) } as Response;
+    }
+    if (url.includes('/folders/changed-since')) {
+      const sinceMatch = url.match(/since=(\d+)/);
+      const since = sinceMatch ? Number(sinceMatch[1]) : 0;
+      const files = state.files.filter((f) => f.mtime > since).map((f) => ({ name: f.name, folderPath: f.folderPath, mtime: f.mtime }));
+      return { ok: true, status: 200, json: async () => ({ files, serverTime: Date.now() }) } as Response;
+    }
+    if (url.includes('/data/')) {
+      const found = state.files.find((f) => url.endsWith(`:${f.name}`) || url.endsWith(`/${f.name}`));
+      return { ok: true, status: 200, text: async () => found?.content ?? '' } as Response;
+    }
+    throw new Error(`unexpected mocked fetch call: ${url}`);
+  };
+}
+
+test('MemoryRepository.registerRemoteFolder: creates the mirror dir, registers it, and is findable via listFolders', async () => {
+  const credsDir = tmpDir('mb-register-creds-');
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [], [], credsDir);
+
+  const mirrorDir = mirrorDirFor(credsDir, 'team-qa');
+  const remote: RemoteFolder = { name: 'team-qa', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'plans', mirrorDir };
+
+  repo.registerRemoteFolder(remote);
+
+  assert.ok(fs.existsSync(mirrorDir));
+  assert.deepEqual(
+    repo.listFolders().map((f) => f.name),
+    ['team-qa']
+  );
+});
+
+test('MemoryRepository.listFoldersWithRemoteInfo: flags remote folders true, local folders false', () => {
+  const credsDir = tmpDir('mb-register-creds-');
+  const localDir = tmpDir('mb-local-');
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [{ name: 'local-notes', path: localDir }], [], credsDir);
+
+  const remote: RemoteFolder = {
+    name: 'team-qa',
+    server: 'https://folderfoo.example.com',
+    tenantId: 't1',
+    folderPath: 'plans',
+    mirrorDir: mirrorDirFor(credsDir, 'team-qa'),
+  };
+  repo.registerRemoteFolder(remote);
+
+  const withInfo = repo.listFoldersWithRemoteInfo();
+  assert.deepEqual(
+    withInfo.map((f) => ({ name: f.name, remote: f.remote })).sort((a, b) => a.name.localeCompare(b.name)),
+    [
+      { name: 'local-notes', remote: false },
+      { name: 'team-qa', remote: true },
+    ]
+  );
+});
+
+test('SkillRepository.listFoldersWithRemoteInfo: flags remote folders true, local folders false, excludes builtin', () => {
+  const credsDir = tmpDir('mb-register-creds-');
+  const localDir = tmpDir('mb-local-');
+  const db = openCache(':memory:');
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'local-skills', path: localDir }], [], credsDir);
+
+  const remote: RemoteFolder = {
+    name: 'team-qa',
+    server: 'https://folderfoo.example.com',
+    tenantId: 't1',
+    folderPath: 'skills',
+    mirrorDir: mirrorDirFor(credsDir, 'team-qa'),
+  };
+  repo.registerRemoteFolder(remote);
+
+  const withInfo = repo.listFoldersWithRemoteInfo();
+  assert.deepEqual(
+    withInfo.map((f) => ({ name: f.name, remote: f.remote })).sort((a, b) => a.name.localeCompare(b.name)),
+    [
+      { name: 'local-skills', remote: false },
+      { name: 'team-qa', remote: true },
+    ]
+  );
+  assert.ok(!withInfo.some((f) => f.name === 'builtin'));
+});
+
+test('MemoryRepository.registerRemoteFolder: rejects a duplicate name', () => {
+  const credsDir = tmpDir('mb-register-creds-');
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [{ name: 'existing', path: tmpDir('mb-existing-') }], [], credsDir);
+
+  const remote: RemoteFolder = {
+    name: 'existing',
+    server: 'https://folderfoo.example.com',
+    tenantId: 't1',
+    folderPath: 'x',
+    mirrorDir: mirrorDirFor(credsDir, 'existing'),
+  };
+  assert.throws(() => repo.registerRemoteFolder(remote), /already exists/);
+});
+
+test('registerRemoteFolder followed by pollOne pulls remote content into the newly-registered folder (route-level flow)', async (t) => {
+  const credsDir = tmpDir('mb-register-creds-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [], [], credsDir);
+
+  const mirrorDir = mirrorDirFor(credsDir, 'team-qa');
+  const remote: RemoteFolder = { name: 'team-qa', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'plans', mirrorDir };
+  repo.registerRemoteFolder(remote);
+
+  t.mock.method(
+    globalThis,
+    'fetch',
+    mockFolderfoo({ lastChanged: 100, files: [{ name: 'roadmap', folderPath: 'plans', mtime: 100, content: '---\nid: roadmap\nkey: roadmap\ndescription: The roadmap\n---\nBody.' }] })
+  );
+
+  // Mirrors what the POST /api/remote-folders route does right after
+  // registerRemoteFolder: one immediate poll so content shows up without
+  // waiting for the first interval tick.
+  await pollOne(db, memorySyncSpec(repo.listFolders()), remote, credsDir);
+
+  const row = db.prepare(`SELECT description FROM memory_docs WHERE id = ?`).get('roadmap') as { description: string } | undefined;
+  assert.equal(row?.description, 'The roadmap');
+});
+
+test('SkillRepository.registerRemoteFolder: creates the mirror dir under builtin+remote folders', () => {
+  const credsDir = tmpDir('mb-register-creds-');
+  const db = openCache(':memory:');
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }], [], credsDir);
+
+  const mirrorDir = mirrorDirFor(credsDir, 'team-qa');
+  const remote: RemoteFolder = { name: 'team-qa', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'skills', mirrorDir };
+  repo.registerRemoteFolder(remote);
+
+  assert.ok(fs.existsSync(mirrorDir));
+  assert.deepEqual(
+    repo.listFolders().map((f) => f.name),
+    ['team-qa']
+  );
+});

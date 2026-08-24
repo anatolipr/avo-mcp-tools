@@ -6,6 +6,8 @@ import './detail-panel.js';
 import './add-folder-modal.js';
 import './tag-multiselect.js';
 import type { Entry, Facets, Selection, TypeFilter, FoldersResponse, Folder } from './types.js';
+import { TENANT_ID, getFolderfooConfig } from './server-config.js';
+import { parseFolderfooAddress } from './folderfoo-address.js';
 
 const TYPE_OPTIONS: Array<{ value: TypeFilter; label: string }> = [
   { value: 'all', label: 'All' },
@@ -251,6 +253,17 @@ export class MemBucketApp extends LitElement {
       cursor: pointer; background: none; color: inherit; display: inline-flex; align-items: center; gap: 6px;
     }
     .folder-chip.active { background: var(--purple-tint); border-color: var(--purple); color: var(--purple-fg); }
+    /* Remote (folderfoo) folders get the accent color instead of the default border, so they're
+       visually distinct from local folders at a glance — active-state purple still wins when both apply. */
+    .folder-chip.remote { border-color: var(--accent); color: var(--accent); }
+    .folder-chip.remote.active { background: var(--purple-tint); border-color: var(--purple); color: var(--purple-fg); }
+    .folder-chip .remote-dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0;
+    }
+    .folder-chip.active .remote-dot { background: var(--purple); }
+    .folder-chip .kind {
+      opacity: 0.55; font-size: 10px;
+    }
     .folder-chip .remove {
       opacity: 0.6; font-size: 12px; line-height: 1; padding: 2px; border-radius: 50%;
     }
@@ -260,6 +273,14 @@ export class MemBucketApp extends LitElement {
       cursor: pointer; background: none; color: inherit; opacity: 0.75;
     }
     .add-folder-btn:hover { opacity: 1; }
+    .folderfoo-open-banner {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 8px 16px; font-size: 12px; background: var(--accent-tint); border-bottom: 1px solid var(--border);
+    }
+    .folderfoo-open-banner .dismiss {
+      background: none; border: none; color: inherit; cursor: pointer; opacity: 0.6; padding: 2px; border-radius: 50%;
+    }
+    .folderfoo-open-banner .dismiss:hover { opacity: 1; background: var(--hover-strong); }
     .first-run {
       display: flex; flex-direction: column; align-items: center; justify-content: center;
       flex: 1 1 auto; gap: 16px; text-align: center; padding: 24px;
@@ -310,6 +331,7 @@ export class MemBucketApp extends LitElement {
   #removingFolder = new Signal<string>('');
   #foldersLoaded = new Signal<boolean>(false);
   #splitPct = new Signal<number>(loadSplitPct());
+  #folderfooOpenStatus = new Signal<string>(''); // transient banner for the folderfoo-file-open handler's result/miss message
   #dragging = new Signal<boolean>(false);
   #sort = new Signal<string>(this.#initialFilters.sort ?? 'mtime_desc');
   #deprecatedFilter = new Signal<TriState>(this.#initialFilters.deprecatedFilter ?? 'all');
@@ -390,6 +412,7 @@ export class MemBucketApp extends LitElement {
   });
 
   #boundOnFocus = () => this.#onFocus();
+  #boundOnFolderfooFileOpen = (e: Event) => this.#onFolderfooFileOpen(e as CustomEvent<{ name: string }>);
 
   connectedCallback() {
     super.connectedCallback();
@@ -398,16 +421,114 @@ export class MemBucketApp extends LitElement {
     this.#refetchFolders();
     window.addEventListener('focus', this.#boundOnFocus);
     document.addEventListener('visibilitychange', this.#boundOnFocus);
+    document.addEventListener('folderfoo-file-open', this.#boundOnFolderfooFileOpen);
+    this.#mountFolderfooProfileCircle();
+  }
+
+  // Opens a file picked via folderfoo's own File Open dialog directly in
+  // this app's right panel, IF its folder is already connected here as a
+  // remote source — see /api/folderfoo/resolve-open's own doc comment for
+  // the matching logic and why a miss is a real, expected case (folderfoo's
+  // File Open browses the user's whole tree, not just connected folders).
+  // Once selected, the existing detail panel + PATCH /api/entries route
+  // already push any edit straight through to folderfoo (see M5's live-
+  // write design) — no separate "save to cloud" wiring needed for that half.
+  //
+  // Scoped to the CURRENT folderfoo session only (owner-shared files opened
+  // from someone else's tree don't resolve here, since a connected
+  // RemoteFolder's folderPath is always relative to ITS OWNER's tree, not
+  // the viewer's) - a real but narrow gap, not attempted here.
+  async #onFolderfooFileOpen(e: CustomEvent<{ name: string }>) {
+    const address = e.detail?.name;
+    if (!address) return;
+    const parsed = parseFolderfooAddress(address);
+    if (parsed.owner) {
+      this.#folderfooOpenStatus.set(`"${parsed.name}" is from a shared folder — opening shared files here isn't supported yet.`);
+      return;
+    }
+    const { folderfooMode, folderfooHost } = await getFolderfooConfig();
+    if (folderfooMode === 'off' || !folderfooHost) return; // no session to resolve against
+    try {
+      const res = await fetch('/api/folderfoo/resolve-open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ server: folderfooHost, tenantId: TENANT_ID, folderPath: parsed.folderPath, name: parsed.name }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        this.#folderfooOpenStatus.set(data.error ?? `couldn't open "${parsed.name}"`);
+        return;
+      }
+      this.#folderfooOpenStatus.set('');
+      this.#selected.set({ table: data.table, id: data.id });
+    } catch (err) {
+      this.#folderfooOpenStatus.set((err as Error).message);
+    }
+  }
+
+  // Per the adding-folderfoo-integration skill's Step 4: dynamically import
+  // and mount folderfoo's own login/account widget, exactly like every
+  // other folderfoo-consuming app (mindfoo, bulletino, screenmarker) does —
+  // never vendor/copy these files, so this stays current with the server's
+  // widget automatically. This is a SEPARATE login from the "Connect
+  // folderfoo" flow in add-folder-modal.ts: this one authenticates the
+  // human viewing this page (stored in this page's own localStorage), the
+  // modal's flow reads that same token back out to also persist it
+  // server-side for the Node process (poller, live reads/writes) to use.
+  //
+  // No-ops entirely when --folderfoo-mode/FOLDERFOO_MODE is "off" (the
+  // default) — most users run mcp-memory-bucket with no folderfoo account
+  // and shouldn't see a login prompt or pay for the network calls a
+  // logged-out widget still makes (GET /me, refresh scheduling).
+  async #mountFolderfooProfileCircle() {
+    if (document.querySelector('folderfoo-profile-circle')) return; // already mounted (e.g. hot reload)
+    const { folderfooMode, folderfooHost } = await getFolderfooConfig();
+    if (folderfooMode === 'off' || !folderfooHost) return;
+    import(/* @vite-ignore */ `${folderfooHost}/elements/folderfoo-profile-circle.js`)
+      .then(() => {
+        const el = document.createElement('folderfoo-profile-circle');
+        el.setAttribute('app-name', 'Memory Bucket');
+        el.setAttribute('tenant-id', TENANT_ID);
+        document.body.appendChild(el);
+      })
+      .catch((err) => {
+        // Best-effort, matching every other consuming app's posture: the
+        // rest of the page works fine without it if folderfoo is
+        // unreachable, just no login widget appears.
+        console.warn('folderfoo-profile-circle unavailable:', (err as Error).message);
+      });
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('focus', this.#boundOnFocus);
     document.removeEventListener('visibilitychange', this.#boundOnFocus);
+    document.removeEventListener('folderfoo-file-open', this.#boundOnFolderfooFileOpen);
   }
 
-  #onFocus() {
+  #resyncingOnFocus = false; // guards against overlapping resync-all calls when focus fires repeatedly (fast tab-switching)
+
+  async #onFocus() {
     if (document.visibilityState !== 'visible') return;
+    // Force-resyncs every remote source before refetching, so a change made
+    // remotely (e.g. deleting a doc via folderfoo's own UI) shows up on
+    // tab-focus instead of requiring the user to hit the rebuild-cache
+    // button by hand and wait out the fixed poll interval. Only bothers
+    // calling this when at least one remote folder is actually connected -
+    // the common local-only case pays no extra round trip. Best-effort: a
+    // failed resync (folderfoo unreachable, session expired) still lets the
+    // normal local refetch below proceed, same "local always works" posture
+    // remote failures have everywhere else in this app.
+    if (this.#allFolders().some((f) => f.remote) && !this.#resyncingOnFocus) {
+      this.#resyncingOnFocus = true;
+      try {
+        await fetch('/api/remote-folders/resync-all', { method: 'POST' });
+      } catch {
+        // best-effort - local refetch below still runs regardless
+      } finally {
+        this.#resyncingOnFocus = false;
+      }
+    }
     this.#refetch();
     this.#refetchFacets();
     this.#refetchFolders();
@@ -680,11 +801,12 @@ export class MemBucketApp extends LitElement {
         ${allFolders.map(
           (folder) => html`
             <button
-              class="folder-chip ${this.#activeFolders.value.includes(folder.name) ? 'active' : ''}"
-              title=${folder.path}
+              class="folder-chip ${folder.remote ? 'remote' : ''} ${this.#activeFolders.value.includes(folder.name) ? 'active' : ''}"
+              title=${folder.remote ? `${folder.path} (remote — folderfoo)` : folder.path}
               @click=${() => this.#toggleFolder(folder.name)}
             >
-              📁 ${folder.name}
+              ${folder.remote ? html`<span class="remote-dot"></span>` : '📁'} ${folder.name}
+              <span class="kind">(${folder.kind === 'skill' ? 's' : 'm'})</span>
               <span
                 class="remove"
                 title="Remove folder"
@@ -696,6 +818,14 @@ export class MemBucketApp extends LitElement {
         )}
         <button class="add-folder-btn" @click=${() => this.#showAddFolder.set(true)}>+ Add folder</button>
       </div>
+      ${this.#folderfooOpenStatus.value
+        ? html`
+            <div class="folderfoo-open-banner">
+              ${this.#folderfooOpenStatus.value}
+              <button class="dismiss" @click=${() => this.#folderfooOpenStatus.set('')}>✕</button>
+            </div>
+          `
+        : ''}
       <div class="filters">
         <div class="row search-row">
           <div class="search-field">
