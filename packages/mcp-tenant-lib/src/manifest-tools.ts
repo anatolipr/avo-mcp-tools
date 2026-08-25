@@ -3,13 +3,15 @@ import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server
 import type { Tenant, TenantConnection } from './tenant.js';
 import type { ToolManifestEntry, ToolParamSpec } from './types.js';
 
+class UnsupportedParamTypeError extends Error {}
+
 function paramSpecToZod(spec: ToolParamSpec): z.ZodTypeAny {
   let schema: z.ZodTypeAny;
   switch (spec.type) {
     case 'string': schema = z.string(); break;
     case 'number': schema = z.number(); break;
     case 'boolean': schema = z.boolean(); break;
-    default: throw new Error(`unsupported param type "${(spec as any).type}" (supported: string, number, boolean)`);
+    default: throw new UnsupportedParamTypeError(`unsupported param type "${(spec as any).type}" (supported: string, number, boolean)`);
   }
   if (spec.description) schema = schema.describe(spec.description);
   return spec.optional ? schema.optional() : schema;
@@ -26,6 +28,37 @@ function manifestEntryToZodShape(entry: ToolManifestEntry): Record<string, z.Zod
 export interface ManifestToolRegistry {
   handles: Map<string, RegisteredTool>;
   sync(): void;
+}
+
+/**
+ * Same shape describe_tools returns for the caller's own current channel,
+ * built from any Tenant — shared with describe_channel (channel-tools.ts)
+ * so a channel's manifest can be inspected by name without join_channel
+ * retargeting the session onto it first.
+ */
+export function buildDescribePayload<TSchema, TValues>(t: Tenant<TSchema, TValues>) {
+  const conns = [...t.connections.values()];
+
+  if (conns.length <= 1) {
+    return {
+      summary: t.toolManifestSummary ?? null,
+      tools: t.toolManifest.map((e) => ({ name: e.name, description: e.description })),
+    };
+  }
+
+  const slugFor = computeSlugs(conns);
+  return {
+    connections: conns.map((c) => ({
+      id: c.id,
+      label: c.label ?? null,
+      toolPrefix: slugFor.get(c.id),
+      summary: c.summary ?? null,
+      tools: c.manifest.map((e) => ({
+        name: `${slugFor.get(c.id)}__${e.name}`,
+        description: e.description,
+      })),
+    })),
+  };
 }
 
 const DESCRIBE_TOOLS_NAME = 'describe_tools';
@@ -51,7 +84,10 @@ const DESCRIBE_TOOLS_DESCRIPTION =
   'IMPORTANT — an empty or unexpected result here does NOT mean no page is bridged: this session may ' +
   'simply be on the wrong channel (see join_channel). If the user expects a specific bridged app/page by ' +
   'name (e.g. "the bulletino tab") and it\'s missing, call list_channels to check for a matching channel ' +
-  'and join_channel to it before assuming nothing is connected.';
+  'and join_channel to it before assuming nothing is connected. If a tool listed here instead fails to ' +
+  'invoke with "No such tool available" (typically right after the MCP server process was restarted), ' +
+  'your MCP client\'s own connection is stale, not this manifest — tell the user to reconnect the MCP ' +
+  'client (e.g. /mcp in Claude Code) rather than retrying the call.';
 
 /**
  * Derives a stable, unique tool-name prefix per connection: sanitized from
@@ -109,30 +145,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
       DESCRIBE_TOOLS_NAME,
       { description: DESCRIBE_TOOLS_DESCRIPTION, inputSchema: {} },
       async () => {
-        const t = tenant();
-        const conns = [...t.connections.values()];
-
-        if (conns.length <= 1) {
-          const payload = {
-            summary: t.toolManifestSummary ?? null,
-            tools: t.toolManifest.map((e) => ({ name: e.name, description: e.description })),
-          };
-          return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
-        }
-
-        const slugFor = computeSlugs(conns);
-        const payload = {
-          connections: conns.map((c) => ({
-            id: c.id,
-            label: c.label ?? null,
-            toolPrefix: slugFor.get(c.id),
-            summary: c.summary ?? null,
-            tools: c.manifest.map((e) => ({
-              name: `${slugFor.get(c.id)}__${e.name}`,
-              description: e.description,
-            })),
-          })),
-        };
+        const payload = buildDescribePayload(tenant());
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
       }
     );
@@ -203,9 +216,23 @@ export function createManifestToolRegistry<TSchema, TValues>(
 
     for (const [registeredName, { connectionId, entry }] of registeredNow) {
       if (handles.has(registeredName)) continue;
+      let inputSchema: Record<string, z.ZodTypeAny>;
+      try {
+        inputSchema = manifestEntryToZodShape(entry);
+      } catch (err) {
+        // A single page-authored tool with a malformed param spec (bad/missing
+        // `type`) must not take down sync() for every other tool on the
+        // channel, nor crash whatever triggered this sync (e.g. join_channel
+        // migrating the registry) — skip just this one entry.
+        if (err instanceof UnsupportedParamTypeError) {
+          console.error(`[mcp-tenant-lib] skipping tool "${registeredName}": ${err.message}`);
+          continue;
+        }
+        throw err;
+      }
       const handle = mcp.registerTool(
         registeredName,
-        { description: entry.description, inputSchema: manifestEntryToZodShape(entry) },
+        { description: entry.description, inputSchema },
         async (args: any) => {
           try {
             const result = await tenant().call(connectionId, entry.name, args);

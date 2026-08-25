@@ -3,6 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Tenant } from './tenant.js';
 import { tenants, getOrCreateTenant, isValidChannelName } from './tenant.js';
 import { findChannelMatches } from './channel-search.js';
+import { buildDescribePayload } from './manifest-tools.js';
 
 /**
  * Registers `join_channel` and `list_channels` on an MCP server built via
@@ -30,7 +31,8 @@ export function registerChannelTools<TSchema, TValues>(
     'anonymous "default" channel, visible to every other unnamed session on this server — skip only when the ' +
     'user says it\'s a one-off/throwaway, or nothing suggests a distinct topic worth naming. Reusing an ' +
     'existing name is expected, not an error: it retargets this session onto that channel\'s live state (e.g. ' +
-    'to resume, or redefine/refresh it). Names are URL-safe slugs: letters, digits, underscore, hyphen only.',
+    'to resume, or redefine/refresh it). Names are URL-safe slugs: letters, digits, underscore, hyphen only. ' +
+    'To only inspect a channel\'s tools without retargeting this session onto it, use describe_channel instead.',
     { channel: z.string().describe('Agent-chosen channel name, e.g. "pets" or "pet_questions_1_of_2". Letters/digits/underscore/hyphen only.') },
     async ({ channel }: { channel: string }) => {
       if (!isValidChannelName(channel)) {
@@ -50,11 +52,11 @@ export function registerChannelTools<TSchema, TValues>(
   mcp.tool(
     'list_channels',
     'Lists every channel currently live on this server, including "default" (the shared, anonymous channel ' +
-    'sessions land on before calling join_channel). Use this to discover an existing named channel before ' +
-    'calling join_channel on it, e.g. when a human refers to "the pets form" without giving the exact channel ' +
-    'name. Each entry includes a `connections` array — one item per live browser tab/page bridged into that ' +
-    'channel, with its display `label` and `toolCount` — so you can tell which channels actually have ' +
-    'something connected without joining each one to check.',
+    'sessions land on before calling join_channel). Use this to discover an existing named channel, e.g. when ' +
+    'a human refers to "the pets form" without giving the exact channel name. Each entry includes a ' +
+    '`connections` array — one item per live browser tab/page bridged into that channel, with its display ' +
+    '`label` and `toolCount` — so you can tell which channels actually have something connected. To see the ' +
+    'actual tools on one, call describe_channel rather than joining just to look.',
     {},
     async () => {
       const channels = [...tenants.entries()].map(([channel, t]) => ({
@@ -83,6 +85,30 @@ export function registerChannelTools<TSchema, TValues>(
     async ({ query }: { query: string }) => {
       const matches = findChannelMatches(query, [...tenants.keys()]);
       return { content: [{ type: 'text', text: JSON.stringify(matches, null, 2) }] };
+    }
+  );
+
+  mcp.tool(
+    'describe_channel',
+    'Returns the tool manifest for a named channel — same payload as describe_tools, but for ANY channel, ' +
+    'not just the one this session is currently on. Use this to go straight from a channel name (e.g. from ' +
+    'list_channels or channel_find) to what tools it has, without join_channel first retargeting this ' +
+    'session\'s own state onto it. Read-only: does not join, create, or affect this session\'s current ' +
+    'channel. Errors if the channel does not exist yet — check list_channels/channel_find first. If a tool ' +
+    'listed here fails to invoke with "No such tool available" (typically right after the MCP server ' +
+    'process was restarted), your MCP client\'s own connection is stale, not this manifest — tell the user ' +
+    'to reconnect the MCP client (e.g. /mcp in Claude Code) rather than retrying the call.',
+    { channel: z.string().describe('Exact channel name, e.g. from list_channels or channel_find.') },
+    async ({ channel }: { channel: string }) => {
+      const t = tenants.get(channel);
+      if (!t) {
+        return {
+          content: [{ type: 'text', text: `Error: no channel named "${channel}" — use list_channels or channel_find to find the right name.` }],
+          isError: true,
+        };
+      }
+      const payload = buildDescribePayload(t);
+      return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
     }
   );
 }

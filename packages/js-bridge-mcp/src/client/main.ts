@@ -23,6 +23,11 @@ const pageSummary: string | undefined = (window as any).__mcpSummary ?? undefine
 // prompt right after) reassigns it, so a reconnect after a dropped socket
 // re-registers under the chosen label instead of reverting to the original
 // document.title-derived one.
+//
+// hostProvidedLabel tracks whether the PAGE itself set __mcpAppName before
+// this script ran, as opposed to us falling back to document.title below —
+// see labelForFirstRegister's use of it.
+const hostProvidedLabel = typeof (window as any).__mcpAppName === 'string' && (window as any).__mcpAppName;
 let appLabel: string | undefined = (window as any).__mcpAppName ?? document.title ?? undefined;
 
 // A rename that happens AFTER an agent has already connected and read
@@ -35,10 +40,19 @@ let appLabel: string | undefined = (window as any).__mcpAppName ?? document.titl
 // load (not on every reconnect) via `askedOnce`, and silently falls back
 // to the auto-derived appLabel if the human cancels/dismisses the prompt
 // — never blocks the connection on an answer.
+//
+// Skipped entirely when the host page already set window.__mcpAppName
+// before importing this script (hostProvidedLabel) — that's a page
+// deliberately orchestrating its OWN connect flow (e.g. an app-level
+// Connect button with its own rename UI), so this generic prompt would
+// just be a redundant, unwanted popup on top of that page's own UX. Still
+// asked for the classic paste-the-snippet flow, where the page never set a
+// label and document.title is the only fallback.
 let askedOnce = false;
 function labelForFirstRegister(): string | undefined {
   if (askedOnce) return appLabel;
   askedOnce = true;
+  if (hostProvidedLabel) return appLabel;
   const chosen = prompt('Name this MCP connection (used to identify it to the agent):', appLabel ?? '');
   if (chosen) appLabel = chosen;
   return appLabel;
