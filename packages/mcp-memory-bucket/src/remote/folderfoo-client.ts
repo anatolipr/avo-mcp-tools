@@ -125,6 +125,32 @@ export async function listFolders(server: string, baseDir: string, tenantId: str
   );
 }
 
+/** Thrown when a write targets a remote folder that no longer exists on folderfoo (deleted server-side since the last connect/UI-open sync). */
+export class RemoteFolderGoneError extends Error {
+  constructor(folderName: string) {
+    super(`remote folder "${folderName}" no longer exists on folderfoo — reconnect or remove this source`);
+    this.name = 'RemoteFolderGoneError';
+  }
+}
+
+/**
+ * Confirms `folderPath` still exists on `server` before a write proceeds. folderfoo's own
+ * POST /save/:filename can never fail for a gone folder path — it unconditionally
+ * `mkdirSync(userDir, { recursive: true })`s before writing, silently recreating (un-deleting) the
+ * folder rather than erroring — so this is the only way to catch "the folder was deleted since we
+ * last checked" before a write silently resurrects it. Per the settled design, a write into a
+ * confirmed-gone folder should fail loudly (RemoteFolderGoneError), not silently recreate the
+ * folder — the user may have deleted it deliberately. `folderPath === ''` (a source's own root) is
+ * never gone (the user's account root always exists), so this only ever checks a non-root path.
+ */
+export async function assertRemoteFolderExists(server: string, baseDir: string, tenantId: string, folderPath: string, folderName: string): Promise<void> {
+  if (!folderPath) return;
+  const folders = await listFolders(server, baseDir, tenantId);
+  if (!folders.some((f) => f.path === folderPath)) {
+    throw new RemoteFolderGoneError(folderName);
+  }
+}
+
 export interface ChangedFile {
   name: string;
   folderPath: string;

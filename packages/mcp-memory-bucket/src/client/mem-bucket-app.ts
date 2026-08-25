@@ -438,6 +438,8 @@ export class MemBucketApp extends LitElement {
 
   #boundOnFocus = () => this.#onFocus();
   #boundOnFolderfooFileOpen = (e: Event) => this.#onFolderfooFileOpen(e as CustomEvent<{ name: string }>);
+  #boundOnFolderfooFolderChanged = (e: Event) =>
+    this.#onFolderfooFolderChanged(e as CustomEvent<{ path: string; action: 'delete' | 'rename' | 'move'; newPath?: string }>);
   #boundOnFolderfooAuthChange = () => this.#onFolderfooAuthChange();
   #unsubscribeIdentity?: () => void;
 
@@ -449,6 +451,7 @@ export class MemBucketApp extends LitElement {
     window.addEventListener('focus', this.#boundOnFocus);
     document.addEventListener('visibilitychange', this.#boundOnFocus);
     document.addEventListener('folderfoo-file-open', this.#boundOnFolderfooFileOpen);
+    document.addEventListener('folderfoo-folder-changed', this.#boundOnFolderfooFolderChanged);
     window.addEventListener('folderfoo-auth-change', this.#boundOnFolderfooAuthChange);
     this.#mountFolderfooProfileCircle();
     // Covers the case where the browser already holds a valid folderfoo
@@ -506,6 +509,37 @@ export class MemBucketApp extends LitElement {
     }
   }
 
+  // Fired by the embedded File Open dialog (folderfoo-file-open.js's _dispatchFolderChanged, see
+  // that file's doc comment) the moment a folder is deleted/renamed/moved from within THIS tab's
+  // dialog — a same-tab optimization layered on top of #onFocus's reload-triggered resync above,
+  // not a replacement for it (a change made via folderfoo.com directly, another device, or another
+  // tab still only surfaces on next focus/reload, since there's no cross-tab/cross-origin event
+  // for those). 'delete' needs no server call here: GET /api/folders (in #refetchFolders below)
+  // already prunes any remote source folderfoo confirms is gone (see routes.ts's
+  // pruneDeletedRemoteFolders), so a plain refetch picks it up. 'rename'/'move' repoint the
+  // affected source(s) in place first (POST /api/folders/renamed — same content, new remote path,
+  // never a delete+reconnect) before refetching.
+  async #onFolderfooFolderChanged(e: CustomEvent<{ path: string; action: 'delete' | 'rename' | 'move'; newPath?: string }>) {
+    const { path: oldPath, action, newPath } = e.detail ?? {};
+    if (oldPath === undefined || !action) return;
+    if ((action === 'rename' || action === 'move') && newPath) {
+      const { folderfooHost } = await getFolderfooConfig();
+      if (!folderfooHost) return;
+      try {
+        await fetch('/api/folders/renamed', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ server: folderfooHost, oldPath, newPath }),
+        });
+      } catch {
+        // Best-effort — the source stays registered at its old (now-stale) folderPath until the
+        // next successful poll/focus resync surfaces the mismatch as a live-call failure; no worse
+        // than before this event existed.
+      }
+    }
+    this.#refetchFolders();
+  }
+
   // Per the adding-folderfoo-integration skill's Step 4: dynamically import
   // and mount folderfoo's own login/account widget, exactly like every
   // other folderfoo-consuming app (mindfoo, bulletino, screenmarker) does —
@@ -554,6 +588,7 @@ export class MemBucketApp extends LitElement {
     window.removeEventListener('focus', this.#boundOnFocus);
     document.removeEventListener('visibilitychange', this.#boundOnFocus);
     document.removeEventListener('folderfoo-file-open', this.#boundOnFolderfooFileOpen);
+    document.removeEventListener('folderfoo-folder-changed', this.#boundOnFolderfooFolderChanged);
     window.removeEventListener('folderfoo-auth-change', this.#boundOnFolderfooAuthChange);
     this.#unsubscribeIdentity?.();
   }

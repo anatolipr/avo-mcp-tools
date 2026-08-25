@@ -12,8 +12,9 @@ import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
 import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import { attachmentsDirFor } from '../attachments/storage.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
+import { rebaseFolderPath } from '../config.js';
 import { normalizeKey } from '../types.js';
-import { readFile as readRemoteFile, writeFile as writeRemoteFile, joinRemoteFolderPath } from '../remote/folderfoo-client.js';
+import { readFile as readRemoteFile, writeFile as writeRemoteFile, joinRemoteFolderPath, assertRemoteFolderExists } from '../remote/folderfoo-client.js';
 import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 import type { MemoryDoc, MemoryDocType, MemoryFrontmatter, MemoryKeyType, MemoryStatus } from '../types.js';
 
@@ -179,16 +180,36 @@ export class MemoryRepository {
   }
 
   /**
+   * Repoints a registered remote source's `folderPath` in place after it was renamed/moved on
+   * folderfoo — see SkillRepository's identical method for the full rationale (kept in sync with
+   * that one; this file has its own remoteFolders array, not shared state).
+   */
+  updateRemoteFolderPath(name: string, renamedFolderPath: string, newFolderPath: string): void {
+    const remote = this.remoteFolders.find((f) => f.name === name);
+    if (!remote) return;
+    remote.folderPath = rebaseFolderPath(remote.folderPath, renamedFolderPath, newFolderPath);
+  }
+
+  /**
    * Exact-match lookup by normalized key, per V0 (no fuzzy matching).
    * `includePaused` defaults to false: paused docs are hidden from discovery (see setPaused).
+   * `folder`, when passed, restricts to docs in that one folder — memory_docs.id never collides
+   * across folders (it bakes in a random UUID suffix), but a human-facing `key` can legitimately
+   * repeat in different folders, so any caller treating "same key+description" as "the same doc"
+   * (e.g. relocate's already-relocated check) needs this to avoid a false match against an
+   * unrelated doc that just happens to share a key/description in a different folder.
    */
-  getByKey(key: string, docType?: MemoryDocType, opts: { includePaused?: boolean } = {}): MemoryDoc[] {
+  getByKey(key: string, docType?: MemoryDocType, opts: { includePaused?: boolean; folder?: string } = {}): MemoryDoc[] {
     const normalized = normalizeKey(key);
     const conditions = ['key = ?'];
     const params: unknown[] = [normalized];
     if (docType) {
       conditions.push('doc_type = ?');
       params.push(docType);
+    }
+    if (opts.folder) {
+      conditions.push('folder = ?');
+      params.push(opts.folder);
     }
     if (!opts.includePaused) {
       conditions.push('paused = 0');
@@ -401,11 +422,23 @@ export class MemoryRepository {
     // gets writeMarkdownFile's own formatting verbatim, not a hand-reconstructed string.
     const remote = this.remoteFor(targetFolder.name);
     if (remote && this.credentialsBaseDir) {
-      const relPath = path.relative(remote.mirrorDir, filePath).replace(/\.md$/, '');
-      const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(relPath));
-      const name = path.basename(relPath);
-      const fileContents = fs.readFileSync(filePath, 'utf-8');
-      await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, fileContents);
+      try {
+        // Confirms the remote folder still exists before writing — folderfoo's own save endpoint
+        // would otherwise silently recreate a deleted folder rather than failing (see
+        // assertRemoteFolderExists's doc comment).
+        await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, targetFolder.name);
+        const relPath = path.relative(remote.mirrorDir, filePath).replace(/\.md$/, '');
+        const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(relPath));
+        const name = path.basename(relPath);
+        const fileContents = fs.readFileSync(filePath, 'utf-8');
+        await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, fileContents);
+      } catch (err) {
+        // Remote push failed after the local mirror file was already written — remove the orphaned
+        // local file synchronously rather than leaving it for the next poll tick's
+        // reconcileDeletions to eventually clean up, so a failed create leaves zero trace immediately.
+        fs.unlinkSync(filePath);
+        throw err;
+      }
     }
     upsertFile(this.db, this.syncSpec, filePath);
     return { ...fm, body: input.body, paused: false };
@@ -459,6 +492,7 @@ export class MemoryRepository {
     writeMarkdownFile(existing.source_path, stripSourcePath(merged), newBody);
     const remote = this.remoteFor(existing.folder);
     if (remote && this.credentialsBaseDir) {
+      await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder);
       const relPath = path.relative(remote.mirrorDir, existing.source_path).replace(/\.md$/, '');
       const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(relPath));
       const name = path.basename(relPath);

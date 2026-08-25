@@ -6,7 +6,14 @@ import express from 'express';
 import matter from 'gray-matter';
 import type Database from 'better-sqlite3';
 import type { BucketConfig } from '../config.js';
-import { saveFolder, saveRemoteFolder, removeFolder as removeFolderFromConfig, sanitizeFolderName, mirrorDirFor } from '../config.js';
+import {
+  saveFolder,
+  saveRemoteFolder,
+  removeFolder as removeFolderFromConfig,
+  updateRemoteFolderPath as updateRemoteFolderPathInConfig,
+  sanitizeFolderName,
+  mirrorDirFor,
+} from '../config.js';
 import type { SkillRepository } from '../skills/repository.js';
 import { stripKey, type MemoryRepository } from '../memory/repository.js';
 import { initialScan, type TableSyncSpec } from '../store/sync.js';
@@ -181,7 +188,14 @@ function queryTable(
     params.push(filters.paused === '1' ? 1 : 0);
   }
   if (restrictToIds) {
-    where += ` AND id IN (${[...restrictToIds].map(() => '?').join(', ')})`;
+    // Skills restrict on the composite (folder, id) pair — see skillKey's comment — since a bare
+    // `id IN (...)` could match the wrong folder's same-named skill once names are folder-scoped.
+    // memory_docs restricts on plain id, unchanged (its ids never collide across folders).
+    if (table === 'skills') {
+      where += ` AND (folder || '${SKILL_KEY_SEP}' || id) IN (${[...restrictToIds].map(() => '?').join(', ')})`;
+    } else {
+      where += ` AND id IN (${[...restrictToIds].map(() => '?').join(', ')})`;
+    }
     params.push(...restrictToIds);
   }
 
@@ -254,6 +268,16 @@ function queryTable(
   }));
 }
 
+// Skills key on (folder, id) — two different folders can legitimately share a skill name — so an
+// id-only restriction set can no longer safely identify "this one skill" for filtering (it would
+// either miss a real match or wrongly include the other folder's same-named skill). Skill entries in
+// these restriction sets are therefore composite `folder\0id` strings; memory_docs entries stay
+// plain ids, since memory_docs.id already bakes in a random UUID suffix and never collides.
+const SKILL_KEY_SEP = ' ';
+function skillKey(folder: string, id: string): string {
+  return `${folder}${SKILL_KEY_SEP}${id}`;
+}
+
 /** Combines two optional id-restriction sets (e.g. from `q` and a date range) into one, when both are present. */
 function intersectIds(a: Set<string> | undefined, b: Set<string> | undefined): Set<string> | undefined {
   if (!a) return b;
@@ -280,10 +304,11 @@ function matchDateRange(
     params.push(to);
   }
   const rows = db
-    .prepare(`SELECT DISTINCT ref_table, ref_id FROM doc_dates WHERE ${where}`)
-    .all(...params) as Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string }>;
+    .prepare(`SELECT DISTINCT ref_table, ref_id, ref_folder FROM doc_dates WHERE ${where}`)
+    .all(...params) as Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string; ref_folder: string }>;
   for (const row of rows) {
-    (row.ref_table === 'skills' ? skills : memory_docs).add(row.ref_id);
+    if (row.ref_table === 'skills') skills.add(skillKey(row.ref_folder, row.ref_id));
+    else memory_docs.add(row.ref_id);
   }
   return { skills, memory_docs };
 }
@@ -292,17 +317,18 @@ function matchDateRange(
 function matchSearch(db: Database.Database, q: string): { skills: Set<string>; memory_docs: Set<string> } {
   const skills = new Set<string>();
   const memory_docs = new Set<string>();
-  let rows: Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string }>;
+  let rows: Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string; ref_folder: string }>;
   try {
     rows = db
-      .prepare(`SELECT ref_table, ref_id FROM search_index WHERE search_index MATCH ? ORDER BY rank`)
+      .prepare(`SELECT ref_table, ref_id, ref_folder FROM search_index WHERE search_index MATCH ? ORDER BY rank`)
       .all(sanitizeFtsQuery(q)) as typeof rows;
   } catch {
     // Bad FTS5 query syntax (e.g. a bare quote) — treat as no matches rather than 500ing.
     return { skills, memory_docs };
   }
   for (const row of rows) {
-    (row.ref_table === 'skills' ? skills : memory_docs).add(row.ref_id);
+    if (row.ref_table === 'skills') skills.add(skillKey(row.ref_folder, row.ref_id));
+    else memory_docs.add(row.ref_id);
   }
   return { skills, memory_docs };
 }
@@ -770,12 +796,76 @@ export function buildWebRouter(
     res.json({ folderfooMode: config.folderfooMode, folderfooHost: config.folderfooHost });
   });
 
-  router.get('/api/folders', (_req: Request, res: Response) => {
+  router.get('/api/folders', async (_req: Request, res: Response) => {
+    await pruneDeletedRemoteFolders();
     res.json({
       skill: skillRepo.listFoldersWithRemoteInfo().map((f) => ({ ...f, kind: 'skill' as const })),
       memory: memoryRepo.listFoldersWithRemoteInfo().map((f) => ({ ...f, kind: 'memory' as const })),
     });
   });
+
+  /**
+   * Checked on every web UI open/focus (this route is what the client's mount/load fetches) rather
+   * than on every poll tick — a folder deleted server-side on folderfoo otherwise lingers forever
+   * in mem-bucket's config/UI as a permanently-empty source: the poller's own reconcileDeletions
+   * (remote-sync.ts) already correctly empties out a deleted remote folder's mirrored FILES on its
+   * normal cycle, but nothing previously checked whether the folder itself still exists at all, as
+   * opposed to whether its contents changed.
+   *
+   * Reuses folderfoo's existing GET /folders (via listFolderfooFolders) — one bulk call per
+   * distinct folderfoo server returns every currently-existing folder path for that login, cheaper
+   * than a per-folder existence check would be for an account with many connected sources. Sources
+   * sharing one server (the common case — see credentials.ts, one login per server) dedupe to a
+   * single call. A confirmed-gone folder is auto-removed via the same removeFolder()+
+   * removeFolderFromConfig() pair the manual "✕ remove folder" route above already uses — this
+   * never touches a folder's contents, only mem-bucket's own registration of it (see
+   * removeFolder's doc comment: it drops DB rows + the local mirror dir, never anything the
+   * folder's write path would consider "the user's own content" beyond that mirror).
+   *
+   * Deliberately does NOT run at write time: a write against a since-deleted remote folder instead
+   * fails loudly with its own specific error (see repository create()/update()'s remote-push
+   * handling) rather than silently recreating the folder — auto-recreating on write would silently
+   * undo a deletion the user may have made deliberately, with no visibility that it happened.
+   */
+  async function pruneDeletedRemoteFolders(): Promise<void> {
+    const byServer = new Map<string, Array<{ kind: 'skill' | 'memory'; name: string; folderPath: string; tenantId: string }>>();
+    for (const [kind, repo] of [
+      ['skill', skillRepo],
+      ['memory', memoryRepo],
+    ] as const) {
+      for (const remote of repo.listRemoteFolders()) {
+        const list = byServer.get(remote.server) ?? [];
+        list.push({ kind, name: remote.name, folderPath: remote.folderPath, tenantId: remote.tenantId });
+        byServer.set(remote.server, list);
+      }
+    }
+    if (byServer.size === 0) return;
+
+    for (const [server, sources] of byServer) {
+      let livePaths: Set<string>;
+      try {
+        // Every source on one server shares one login/tenant (credentials.ts is keyed by server
+        // alone), so any one source's tenantId is representative for the whole group's GET /folders
+        // call.
+        const folders = await listFolderfooFolders(server, config.baseDir, sources[0]!.tenantId);
+        livePaths = new Set(folders.map((f) => f.path));
+      } catch {
+        // Not logged in, network blip, etc. — leave every source on this server untouched rather
+        // than treating "couldn't check" as "confirmed gone."
+        continue;
+      }
+      for (const source of sources) {
+        if (livePaths.has(source.folderPath)) continue;
+        const repo = source.kind === 'skill' ? skillRepo : memoryRepo;
+        try {
+          repo.removeFolder(source.name);
+          removeFolderFromConfig(config, source.kind, source.name);
+        } catch (err) {
+          console.error(`[memory-bucket] failed to auto-remove deleted remote folder "${source.name}":`, err);
+        }
+      }
+    }
+  }
 
   // Resolves a file opened via folderfoo's own File Open dialog
   // (<folderfoo-profile-circle>'s "folderfoo-file-open" event) back to a
@@ -1058,6 +1148,41 @@ export function buildWebRouter(
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });
     }
+  });
+
+  /**
+   * Reacts to the embedded File Open dialog's `folderfoo-folder-changed` event (rename/move, see
+   * the client's mem-bucket-app.ts listener) — repoints any registered remote source whose
+   * folderPath is the renamed folder itself or nested under it, in BOTH repos (a folderPath rename
+   * has no kind of its own; the same folderfoo path could in principle be connected as a skill
+   * source, a memory source, or both, independently). Unlike DELETE /api/folders above, this never
+   * removes anything — same content, same local mirror, just a different remote path going
+   * forward — matching folderfoo's own rename semantics.
+   *
+   * `server` scopes the match: a folderPath string is only meaningful within one folderfoo
+   * deployment, and a source connected to a different server sharing the same path string by
+   * coincidence must not be touched.
+   */
+  router.post('/api/folders/renamed', (req: Request, res: Response) => {
+    const { server, oldPath, newPath } = req.body as { server?: string; oldPath?: string; newPath?: string };
+    if (!server || oldPath === undefined || !newPath) {
+      res.status(400).json({ error: 'server, oldPath, and newPath are required' });
+      return;
+    }
+    const updated: Array<{ kind: 'skill' | 'memory'; name: string; folderPath: string }> = [];
+    for (const [kind, repo] of [
+      ['skill', skillRepo],
+      ['memory', memoryRepo],
+    ] as const) {
+      for (const remote of repo.listRemoteFolders()) {
+        if (remote.server !== server) continue;
+        if (remote.folderPath !== oldPath && !(oldPath && remote.folderPath.startsWith(`${oldPath}/`))) continue;
+        repo.updateRemoteFolderPath(remote.name, oldPath, newPath);
+        updateRemoteFolderPathInConfig(config, kind, remote.name, oldPath, newPath);
+        updated.push({ kind, name: remote.name, folderPath: repo.listRemoteFolders().find((f) => f.name === remote.name)!.folderPath });
+      }
+    }
+    res.json({ updated });
   });
 
   router.get('/api/fs/list', (req: Request, res: Response) => {

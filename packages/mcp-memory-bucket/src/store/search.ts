@@ -124,19 +124,24 @@ export function searchByDate(
 
   const rows = db
     .prepare(
-      `SELECT ref_table, ref_id, MIN(date) AS matched_date
+      `SELECT ref_table, ref_id, ref_folder, MIN(date) AS matched_date
        FROM doc_dates
        WHERE date BETWEEN ? AND ? ${table ? 'AND ref_table = ?' : ''}
-       GROUP BY ref_table, ref_id
+       GROUP BY ref_table, ref_id, ref_folder
        ORDER BY matched_date
        LIMIT ? OFFSET ?`
     )
-    .all(...params) as Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string; matched_date: string }>;
+    .all(...params) as Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string; ref_folder: string; matched_date: string }>;
 
   return rows.map((row) => {
-    const bodyRow = db
-      .prepare(`SELECT body FROM ${row.ref_table} WHERE id = ?`)
-      .get(row.ref_id) as { body: string } | undefined;
+    // Scoped by ref_folder for skills (compound key: a bare `id` can match two different
+    // folders' same-named skills — see doc_dates'/search_index's ref_folder column). memory_docs
+    // ids never collide, so ref_folder is always '' there and the extra condition is a no-op.
+    const bodyRow = (
+      row.ref_table === 'skills'
+        ? db.prepare(`SELECT body FROM skills WHERE id = ? AND folder = ?`).get(row.ref_id, row.ref_folder)
+        : db.prepare(`SELECT body FROM memory_docs WHERE id = ?`).get(row.ref_id)
+    ) as { body: string } | undefined;
     return {
       ref_table: row.ref_table,
       ref_id: row.ref_id,
@@ -172,7 +177,7 @@ export function searchCombined(db: Database.Database, query: string, limit = 20,
                 snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
                 -bm25(search_index) AS score
          FROM search_index
-         LEFT JOIN skills s ON search_index.ref_table = 'skills' AND s.id = search_index.ref_id
+         LEFT JOIN skills s ON search_index.ref_table = 'skills' AND s.id = search_index.ref_id AND s.folder = search_index.ref_folder
          LEFT JOIN memory_docs m ON search_index.ref_table = 'memory_docs' AND m.id = search_index.ref_id
          WHERE search_index MATCH ?
          ORDER BY bm25(search_index)

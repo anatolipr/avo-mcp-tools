@@ -77,14 +77,18 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_get',
-    'Fetches a single skill by name, including its full markdown body.',
-    { name: z.string() },
-    async ({ name }) => {
-      const doc = await repo.get(name);
-      if (!doc) {
-        return { content: [{ type: 'text', text: `No skill found with name "${name}"` }], isError: true };
+    `Fetches a single skill by name, including its full markdown body.${multiFolder ? ` Names are unique per folder, not globally — if "${folderNames}" has more than one skill sharing this name, pass folder to disambiguate; omitting it errors out when the name is ambiguous instead of guessing.` : ''}`,
+    multiFolder ? { name: z.string(), folder: z.string().optional().describe(`disambiguates when the name exists in more than one folder: ${folderNames}`) } : { name: z.string() },
+    async ({ name, folder }: any) => {
+      try {
+        const doc = await repo.get(name, folder);
+        if (!doc) {
+          return { content: [{ type: 'text', text: `No skill found with name "${name}"` }], isError: true };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
       }
-      return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
     }
   );
 
@@ -191,21 +195,22 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       trigger_phrases: z.array(z.string()).optional(),
       extends: z.string().optional(),
       deprecated: z.boolean().optional().describe('marks the skill as deprecated (or un-deprecates when false) — independent of status'),
+      ...(multiFolder ? { folder: z.string().optional().describe(`disambiguates when the name exists in more than one folder: ${folderNames}`) } : {}),
     },
-    async ({ name, body, body_edits, ...frontmatterFields }) => {
+    async ({ name, body, body_edits, folder, ...frontmatterFields }: any) => {
       if (body !== undefined && body_edits !== undefined) {
         return { content: [{ type: 'text', text: 'Pass either body or body_edits, not both.' }], isError: true };
       }
       try {
         let diff: string | undefined;
         if (body_edits) {
-          const existing = await repo.get(name);
+          const existing = await repo.get(name, folder);
           if (!existing) throw new Error(`skill with name "${name}" not found`);
           const { body: patchedBody, applied } = applyBodyEdits(existing.body, body_edits);
           diff = formatBodyEditsDiff(applied);
           body = patchedBody;
         }
-        const doc = await repo.update(name, frontmatterFields, body);
+        const doc = await repo.update(name, frontmatterFields, body, undefined, folder);
         // Body is omitted from the response: the caller either just sent it (full replacement),
         // already has it, or has `diff` — echoing a potentially large body back is pure waste.
         // Fetch skill_get(name) if the fresh full body is actually needed.
@@ -220,14 +225,20 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_rename',
-    'Renames a skill: moves its folder to the new name and updates the frontmatter `name` field to match, preserving any scripts/references/assets alongside SKILL.md.',
-    {
-      name: z.string().describe('current skill name'),
-      new_name: z.string().describe(SKILL_NAME_DESCRIPTION),
-    },
-    async ({ name, new_name }) => {
+    `Renames a skill: moves its folder to the new name and updates the frontmatter \`name\` field to match, preserving any scripts/references/assets alongside SKILL.md.${multiFolder ? ` If the current name exists in more than one folder, pass folder to disambiguate which one to rename.` : ''}`,
+    multiFolder
+      ? {
+          name: z.string().describe('current skill name'),
+          new_name: z.string().describe(SKILL_NAME_DESCRIPTION),
+          folder: z.string().optional().describe(`disambiguates when the current name exists in more than one folder: ${folderNames}`),
+        }
+      : {
+          name: z.string().describe('current skill name'),
+          new_name: z.string().describe(SKILL_NAME_DESCRIPTION),
+        },
+    async ({ name, new_name, folder }: any) => {
       try {
-        const doc = await repo.rename(name, new_name);
+        const doc = await repo.rename(name, new_name, folder);
         return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -264,11 +275,13 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_delete',
-    'Hard-deletes a skill by name — removes the whole skill folder (SKILL.md plus any scripts/references/assets), no tombstone.',
-    { name: z.string() },
-    async ({ name }) => {
+    `Hard-deletes a skill by name — removes the whole skill folder (SKILL.md plus any scripts/references/assets), no tombstone.${multiFolder ? ` If the name exists in more than one folder, pass folder to disambiguate which one to delete.` : ''}`,
+    multiFolder
+      ? { name: z.string(), folder: z.string().optional().describe(`disambiguates when the name exists in more than one folder: ${folderNames}`) }
+      : { name: z.string() },
+    async ({ name, folder }: any) => {
       try {
-        await repo.delete(name);
+        await repo.delete(name, folder);
         return { content: [{ type: 'text', text: `Deleted skill "${name}"` }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };

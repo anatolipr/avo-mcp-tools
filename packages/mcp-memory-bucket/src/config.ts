@@ -248,6 +248,55 @@ export function sanitizeFolderName(raw: string): string {
 }
 
 /**
+ * Rewrites a REMOTE source's stored `folderPath` in the config file after it was renamed/moved on
+ * folderfoo — matched by the source's `name` (mem-bucket's own local identifier, immutable across
+ * a folderfoo-side rename), not by the old `folderPath` (which is exactly what just changed and so
+ * can no longer be used to find the entry). No-op if `name` isn't found or isn't a remote entry.
+ *
+ * `oldFolderPath`/`newFolderPath` describe the RENAMED FOLDER ITSELF, which may be an ancestor of
+ * (not necessarily equal to) the source's own `folderPath` — folderfoo's rename is recursive
+ * (renaming `work` also moves everything under `work/`), so a source registered at
+ * `work/project-x` must become `work2/project-x` when `work` itself is renamed to `work2`, not
+ * just when the source's exact path matches. Only rewrites when the source's folderPath is the
+ * renamed folder itself or nested under it — an unrelated source elsewhere in the tree is untouched.
+ */
+export function updateRemoteFolderPath(
+  config: BucketConfig,
+  kind: 'skill' | 'memory',
+  name: string,
+  oldFolderPath: string,
+  newFolderPath: string
+): void {
+  const current = readConfigFile(config.configPath);
+  const key = kind === 'skill' ? 'skill_sources' : 'memory_sources';
+  const existing = current[key];
+  if (!existing) return;
+
+  let changed = false;
+  const next = existing.map((entry) => {
+    if (typeof entry === 'string' || entry.name !== name || !isRemoteEntry(entry)) return entry;
+    const rebased = rebaseFolderPath(entry.remote.folderPath, oldFolderPath, newFolderPath);
+    if (rebased === entry.remote.folderPath) return entry;
+    changed = true;
+    return { ...entry, remote: { ...entry.remote, folderPath: rebased } };
+  });
+  if (!changed) return;
+
+  fs.writeFileSync(config.configPath, JSON.stringify({ ...current, [key]: next }, null, 2) + '\n');
+}
+
+/**
+ * Rewrites `path` to reflect `oldPrefix` having been renamed to `newPrefix` — returns `path`
+ * unchanged if it isn't `oldPrefix` itself or nested under it. Shared by updateRemoteFolderPath
+ * (config file) and the repository-layer equivalent that repoints the in-memory RemoteFolder[].
+ */
+export function rebaseFolderPath(path: string, oldPrefix: string, newPrefix: string): string {
+  if (path === oldPrefix) return newPrefix;
+  if (oldPrefix && path.startsWith(`${oldPrefix}/`)) return `${newPrefix}${path.slice(oldPrefix.length)}`;
+  return path;
+}
+
+/**
  * Removes a named folder from the config file by name. Matches both explicit
  * {name, path} entries and bare-string entries (via their derived name).
  * No-op if the name isn't found (e.g. it only ever existed in-memory).

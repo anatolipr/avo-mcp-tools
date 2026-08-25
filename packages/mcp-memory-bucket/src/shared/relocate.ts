@@ -113,6 +113,15 @@ export async function relocate(
       opts.overrides?.folder
     );
 
+    // Belt-and-suspenders per the "never lose the source file" requirement: create() already
+    // throws (skipping the unlink below) on any failure, so this positive re-fetch is redundant
+    // today — but it guards against a future refactor of create()'s error handling silently
+    // swallowing a failure instead of throwing, which would otherwise make the unlink below
+    // fire despite the target write never actually landing.
+    if (!(await skillRepo.get(doc.name, doc.folder))) {
+      throw new Error(`relocate: skill "${doc.name}" create() reported success but is not readable back — refusing to delete the source file`);
+    }
+
     if (!opts.keep_original) fs.unlinkSync(opts.path);
     return { moved: true, id: doc.name, target: 'skill' };
   }
@@ -131,7 +140,11 @@ export async function relocate(
     };
   }
 
-  const already = memoryRepo.getByKey(key, docType).find((d) => d.description === description);
+  // Scoped to the destination folder: a same-key/description doc in a DIFFERENT folder is not
+  // "this file already relocated" — memory_docs ids never collide (see getByKey's doc comment),
+  // so without this scoping a genuinely new file could be silently refused because an unrelated
+  // doc elsewhere happens to share the same key+description.
+  const already = memoryRepo.getByKey(key, docType, { folder: opts.overrides?.folder }).find((d) => d.description === description);
   if (already) {
     return { moved: false, reason: `already relocated as memory doc "${already.id}"`, id: already.id, target: 'memory' };
   }
@@ -146,6 +159,11 @@ export async function relocate(
     subfolder: opts.overrides?.subfolder,
     folder: opts.overrides?.folder,
   });
+
+  // Same belt-and-suspenders re-fetch as the skill branch above.
+  if (!(await memoryRepo.get(doc.id))) {
+    throw new Error(`relocate: memory doc "${doc.id}" create() reported success but is not readable back — refusing to delete the source file`);
+  }
 
   if (!opts.keep_original) fs.unlinkSync(opts.path);
   return { moved: true, id: doc.id, target: 'memory' };

@@ -10,8 +10,9 @@ import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, skillSyncSp
 import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
 import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
+import { rebaseFolderPath } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
-import { readFile as readRemoteFile, writeFile as writeRemoteFile, joinRemoteFolderPath } from '../remote/folderfoo-client.js';
+import { readFile as readRemoteFile, writeFile as writeRemoteFile, joinRemoteFolderPath, assertRemoteFolderExists } from '../remote/folderfoo-client.js';
 import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 
 interface SkillRow {
@@ -93,10 +94,19 @@ export class SkillRepository {
     return this.remoteFolders.filter((f) => !isFolderVisible(f, identity)).map((f) => f.name);
   }
 
-  /** Pushes the just-written SKILL.md at filePath to folderfoo, if targetFolderName resolves to a remote source. No-op for a local folder. See get()'s comment on the folderPath/name split for a skill's directory-per-skill layout. */
+  /**
+   * Pushes the just-written SKILL.md at filePath to folderfoo, if targetFolderName resolves to a
+   * remote source. No-op for a local folder. See get()'s comment on the folderPath/name split for
+   * a skill's directory-per-skill layout.
+   *
+   * Confirms the remote folder still exists before writing: folderfoo's own save endpoint would
+   * otherwise silently recreate a deleted folder rather than failing (see assertRemoteFolderExists's
+   * doc comment) — this turns that into a loud, specific RemoteFolderGoneError instead.
+   */
   private async pushToRemoteIfNeeded(targetFolderName: string, filePath: string): Promise<void> {
     const remote = this.remoteFor(targetFolderName);
     if (!remote || !this.credentialsBaseDir) return;
+    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, targetFolderName);
     const skillDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(filePath)));
     const fileContents = fs.readFileSync(filePath, 'utf-8');
     await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath, 'SKILL', fileContents);
@@ -187,6 +197,24 @@ export class SkillRepository {
       const [removedRemote] = this.remoteFolders.splice(remoteIdx, 1);
       fs.rmSync(removedRemote!.mirrorDir, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * Repoints a registered remote source's `folderPath` in place after it was renamed/moved on
+   * folderfoo — e.g. the embedded File Open dialog's `folderfoo-folder-changed` event. Unlike
+   * removeFolder, this keeps the source's local mirror directory, cached rows, and content
+   * completely untouched: only WHERE ON FOLDERFOO future polls/writes target changes, matching
+   * folderfoo's own rename (same content, new path) rather than a delete+reconnect.
+   *
+   * `renamedFolderPath`/`newFolderPath` describe the folder that was actually renamed on
+   * folderfoo, which may be an ancestor of this source's own `folderPath` (folderfoo's rename is
+   * recursive) — see config.ts's rebaseFolderPath for the shared prefix-rewrite logic. No-op if
+   * this source's folderPath isn't the renamed folder or nested under it.
+   */
+  updateRemoteFolderPath(name: string, renamedFolderPath: string, newFolderPath: string): void {
+    const remote = this.remoteFolders.find((f) => f.name === name);
+    if (!remote) return;
+    remote.folderPath = rebaseFolderPath(remote.folderPath, renamedFolderPath, newFolderPath);
   }
 
   /** `includePaused` defaults to false: paused skills are hidden from discovery (see setPaused). */
@@ -289,7 +317,7 @@ export class SkillRepository {
                   snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
                   -bm25(search_index) AS score
            FROM search_index
-           JOIN skills s ON s.id = search_index.ref_id
+           JOIN skills s ON s.id = search_index.ref_id AND s.folder = search_index.ref_folder
            WHERE search_index.ref_table = 'skills' AND search_index MATCH ? ${conditions.map((c) => `AND ${c}`).join(' ')}
            ORDER BY bm25(search_index)
            LIMIT ? OFFSET ?`
@@ -302,13 +330,32 @@ export class SkillRepository {
   }
 
   /**
+   * Names are unique PER FOLDER, not globally (skills table key is (folder, id)) — so a bare `name`
+   * can match more than one row across configured folders. When `folder` is omitted and the name is
+   * unambiguous (unique across every configured folder, or only one folder configured), resolution
+   * works exactly as before. When it's genuinely ambiguous, this throws a disambiguation error
+   * listing the matching folders rather than silently picking one — per the settled multi-folder
+   * design (see FOLDERFOO-MULTI-FOLDER-SUPPORT's "Name collisions across sources" section).
+   */
+  private resolveRow(name: string, folder?: string): SkillRow | null {
+    if (folder) {
+      return (this.db.prepare(`SELECT * FROM skills WHERE folder = ? AND id = ?`).get(folder, name) as SkillRow | undefined) ?? null;
+    }
+    const rows = this.db.prepare(`SELECT * FROM skills WHERE id = ?`).all(name) as SkillRow[];
+    if (rows.length === 0) return null;
+    if (rows.length === 1) return rows[0]!;
+    const folders = rows.map((r) => r.folder).join(', ');
+    throw new Error(`skill "${name}" exists in multiple folders (${folders}) — specify folder to disambiguate`);
+  }
+
+  /**
    * For a skill in a LOCAL folder, returns the cached row unchanged (identical behavior to before
    * remote sources existed). For a skill in a REMOTE folder, the cached `body` is only ever a
    * poll-interval-stale mirror snapshot — per the settled design, `get` always fetches the current
    * body live from folderfoo instead of trusting it.
    */
-  async get(name: string): Promise<SkillDoc | null> {
-    const row = this.db.prepare(`SELECT * FROM skills WHERE id = ?`).get(name) as SkillRow | undefined;
+  async get(name: string, folder?: string): Promise<SkillDoc | null> {
+    const row = this.resolveRow(name, folder);
     if (!row) return null;
     const doc = rowToDoc(row);
     if (!this.isFolderNameVisible(doc.folder)) return null;
@@ -340,7 +387,9 @@ export class SkillRepository {
    * Creates <folder>/[subfolder/]<name>/SKILL.md — folder-per-skill, per the
    * agentskills.io spec (`name` must equal the containing folder's name).
    * `folder` selects which configured skill folder to write into; required only
-   * when more than one user folder is configured.
+   * when more than one user folder is configured. Name uniqueness is checked only
+   * WITHIN that target folder — the same name existing in a different configured
+   * folder is not a collision (skills key on (folder, id), not on id alone).
    */
   async create(
     frontmatter: { name: string; description: string; license?: string; compatibility?: string; tags?: string[]; trigger_phrases?: string[] } & {
@@ -353,10 +402,10 @@ export class SkillRepository {
     folder?: string
   ): Promise<SkillDoc> {
     assertValidSkillName(frontmatter.name);
-    if (await this.get(frontmatter.name)) {
-      throw new Error(`skill with name "${frontmatter.name}" already exists`);
-    }
     const targetFolder = this.resolveFolder(folder);
+    if (await this.get(frontmatter.name, targetFolder.name)) {
+      throw new Error(`skill with name "${frontmatter.name}" already exists in folder "${targetFolder.name}"`);
+    }
     const skillDir = resolveWithinBase(targetFolder.path, subfolder, frontmatter.name);
     if (fs.existsSync(skillDir)) {
       throw new Error(`skill directory already exists at ${skillDir}`);
@@ -382,9 +431,17 @@ export class SkillRepository {
       folder: targetFolder.name,
     };
     writeMarkdownFile(filePath, stripSourcePath(fm), body);
-    // Live/synchronous per the settled design — a folderfoo rejection here throws before upsertFile
-    // indexes the mirror as if the skill were successfully saved remotely.
-    await this.pushToRemoteIfNeeded(targetFolder.name, filePath);
+    try {
+      // Live/synchronous per the settled design — a folderfoo rejection here throws before upsertFile
+      // indexes the mirror as if the skill were successfully saved remotely.
+      await this.pushToRemoteIfNeeded(targetFolder.name, filePath);
+    } catch (err) {
+      // Remote push failed after the local mirror was already written — remove the orphaned local
+      // dir synchronously rather than leaving it for the next poll tick's reconcileDeletions to
+      // eventually clean up, so a failed create leaves zero trace immediately.
+      fs.rmSync(skillDir, { recursive: true, force: true });
+      throw err;
+    }
     upsertFile(this.db, this.syncSpec, filePath);
     return { ...fm, body, paused: false };
   }
@@ -431,9 +488,10 @@ export class SkillRepository {
       extends?: string | null;
     },
     body?: string,
-    bodyEdits?: BodyEdit[]
+    bodyEdits?: BodyEdit[],
+    folder?: string
   ): Promise<SkillDoc> {
-    const existing = await this.get(name);
+    const existing = await this.get(name, folder);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
     // `paused` is local-cache-only and must never reach writeMarkdownFile — split it off of
     // `existing` before spreading the rest into the frontmatter that gets written to disk.
@@ -473,13 +531,15 @@ export class SkillRepository {
    * attachment writes, not rename). Renaming a remote-sourced skill currently leaves a stale copy
    * under the old name on folderfoo; flagged here rather than silently incomplete.
    */
-  async rename(name: string, newName: string): Promise<SkillDoc> {
+  async rename(name: string, newName: string, folder?: string): Promise<SkillDoc> {
     assertValidSkillName(newName);
-    const existing = await this.get(name);
+    const existing = await this.get(name, folder);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
     if (newName === name) return existing;
-    if (await this.get(newName)) {
-      throw new Error(`skill with name "${newName}" already exists`);
+    // The rename target's collision check is scoped to the SAME folder the existing skill lives
+    // in — a rename never moves a skill to a different folder, so only that folder's names matter.
+    if (await this.get(newName, existing.folder)) {
+      throw new Error(`skill with name "${newName}" already exists in folder "${existing.folder}"`);
     }
 
     const oldDir = path.dirname(existing.source_path);
@@ -559,7 +619,9 @@ export class SkillRepository {
         const existing = await this.get(name);
         if (!existing) throw new Error(`skill with name "${name}" not found`);
         if (this.isBuiltin(existing)) throw new Error(`skill "${name}" is builtin and cannot be paused`);
-        this.db.prepare(`UPDATE skills SET paused = ? WHERE id = ?`).run(paused ? 1 : 0, name);
+        // Scoped to the resolved row's own folder — a bare `WHERE id = ?` would flip paused on
+        // EVERY folder's same-named skill at once now that names are only unique per folder.
+        this.db.prepare(`UPDATE skills SET paused = ? WHERE folder = ? AND id = ?`).run(paused ? 1 : 0, existing.folder, name);
         results.push({ name, ok: true });
       } catch (err) {
         results.push({ name, ok: false, error: (err as Error).message });
@@ -587,8 +649,8 @@ export class SkillRepository {
   }
 
   /** Removes the whole skill directory, including any scripts/references/assets alongside SKILL.md. Remote-folder note: does not delete the corresponding content on folderfoo — deletion isn't in the settled design's remote write scope (create/update/attachment writes only), same gap flagged on rename(). */
-  async delete(name: string): Promise<void> {
-    const existing = await this.get(name);
+  async delete(name: string, folder?: string): Promise<void> {
+    const existing = await this.get(name, folder);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
     if (this.isBuiltin(existing)) throw new Error(`skill "${name}" is builtin and cannot be deleted`);
     const skillDir = path.dirname(existing.source_path);

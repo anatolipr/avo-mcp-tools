@@ -140,68 +140,87 @@ export function upsertFile<TFrontmatter>(
     return;
   }
 
-  // id/name is the table's real PRIMARY KEY (used as the sole addressing
-  // handle across the whole public API - skill_get(name), memory_get(id),
-  // etc.), so a DIFFERENT file claiming the same id is a genuine name
-  // collision across configured folders/sources, not a re-scan of the same
-  // file. The ON CONFLICT(id) below would otherwise silently overwrite
-  // whichever row synced first - the first-synced item's row (and its
-  // full content) simply vanishes from the cache with no error and no way
-  // to address it, since id is the only lookup key this schema has.
-  // Refuse the overwrite and warn loudly instead: the first-synced item
-  // keeps working, the colliding one is visibly excluded rather than
-  // invisibly clobbering it.
-  const existingById = db.prepare(`SELECT source_path FROM ${spec.table} WHERE id = ?`).get(id) as
-    | { source_path: string }
-    | undefined;
+  const row = spec.toRow(frontmatter, filePath, parsed.mtimeMs);
+  const folder = folderForFile(spec.sources, filePath);
+
+  // `skills` keys on (folder, id): name is unique PER FOLDER, not globally (see skill_get's
+  // folder param) — two different folders each having a same-named skill is legitimate, so the
+  // collision guard and upsert conflict target both scope by folder too. `memory_docs` keeps a
+  // bare `id` PRIMARY KEY: its id already bakes in a random UUID suffix (memory/repository.ts's
+  // create()), so a genuine id collision there is a practically-impossible coincidence, not the
+  // everyday case skills hits from two folders sharing a human-chosen name.
+  const scopedById = spec.table === 'skills';
+
+  // id/name is (part of) the table's real PRIMARY KEY (the sole addressing handle across the
+  // whole public API - skill_get(name, folder?), memory_get(id), etc.), so a DIFFERENT file
+  // claiming the same id (within the same folder, for skills) is a genuine collision, not a
+  // re-scan of the same file. The ON CONFLICT below would otherwise silently overwrite whichever
+  // row synced first - the first-synced item's row (and its full content) simply vanishes from
+  // the cache with no error and no way to address it. Refuse the overwrite and warn loudly
+  // instead: the first-synced item keeps working, the colliding one is visibly excluded rather
+  // than invisibly clobbering it.
+  const existingById = (
+    scopedById
+      ? db.prepare(`SELECT source_path FROM ${spec.table} WHERE folder = ? AND id = ?`).get(folder, id)
+      : db.prepare(`SELECT source_path FROM ${spec.table} WHERE id = ?`).get(id)
+  ) as { source_path: string } | undefined;
   if (existingById && existingById.source_path !== filePath) {
     console.error(
-      `[memory-bucket] SKIPPED indexing ${filePath}: id "${id}" already used by ${existingById.source_path} — ` +
-        `names must be unique across every configured folder. Rename one of these two files (or its frontmatter id/name) to resolve the collision.`
+      `[memory-bucket] SKIPPED indexing ${filePath}: id "${id}"${scopedById ? ` in folder "${folder}"` : ''} already used by ${existingById.source_path} — ` +
+        `${scopedById ? 'names must be unique within a folder' : 'ids must be unique across every configured folder'}. Rename one of these two files (or its frontmatter id/name) to resolve the collision.`
     );
     return;
   }
 
-  const row = spec.toRow(frontmatter, filePath, parsed.mtimeMs);
-  const folder = folderForFile(spec.sources, filePath);
   const cols = [...spec.columns, 'source_path', 'folder', 'body', 'mtime_ms'];
   const values = [...spec.columns.map((c) => row[c]), filePath, folder, parsed.body, parsed.mtimeMs];
   const placeholders = cols.map(() => '?').join(', ');
   const updateClause = cols
-    .filter((c) => c !== 'id')
+    .filter((c) => c !== 'id' && c !== 'folder')
     .map((c) => `${c} = excluded.${c}`)
     .join(', ');
+  const conflictTarget = scopedById ? 'folder, id' : 'id';
 
   db.prepare(
     `INSERT INTO ${spec.table} (${cols.join(', ')}) VALUES (${placeholders})
-     ON CONFLICT(id) DO UPDATE SET ${updateClause}`
+     ON CONFLICT(${conflictTarget}) DO UPDATE SET ${updateClause}`
   ).run(...values);
 
-  db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(spec.table, id);
+  // ref_folder scopes these two tables' delete-then-reinsert the same way the skills upsert above
+  // does: two skills in different folders can now legitimately share an `id`, so ref_id alone is
+  // no longer enough to identify "this file's" search_index/doc_dates rows without also clobbering
+  // the other folder's same-named skill's rows. memory_docs ids never collide (see scopedById's
+  // comment above), so '' (unscoped) is safe there.
+  const refFolder = scopedById ? folder : '';
+  db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(spec.table, id, refFolder);
   db.prepare(
-    `INSERT INTO search_index (ref_table, ref_id, description, body, tags, key) VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(spec.table, id, String(row.description ?? ''), parsed.body, flattenTags(String(row.tags ?? '[]')), String(row.key ?? ''));
+    `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key) VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(spec.table, id, refFolder, String(row.description ?? ''), parsed.body, flattenTags(String(row.tags ?? '[]')), String(row.key ?? ''));
 
-  db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ?`).run(spec.table, id);
+  db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(spec.table, id, refFolder);
   const dates = new Set(extractDates(parsed.body));
   // created_at is a UTC instant; convert to the OS-local calendar date so it
   // lines up with what a user in this timezone would call "today", matching
   // extractDates()'s output, which is already timezone-naive local text.
   if (row.created_at) dates.add(toLocalDate(String(row.created_at)));
   if (dates.size > 0) {
-    const insertDate = db.prepare(`INSERT INTO doc_dates (ref_table, ref_id, date) VALUES (?, ?, ?)`);
-    for (const date of dates) insertDate.run(spec.table, id, date);
+    const insertDate = db.prepare(`INSERT INTO doc_dates (ref_table, ref_id, ref_folder, date) VALUES (?, ?, ?, ?)`);
+    for (const date of dates) insertDate.run(spec.table, id, refFolder, date);
   }
 }
 
 export function removeFile(db: Database.Database, table: 'skills' | 'memory_docs', filePath: string): void {
-  const existing = db.prepare(`SELECT id FROM ${table} WHERE source_path = ?`).get(filePath) as
-    | { id: string }
+  const existing = db.prepare(`SELECT id, folder FROM ${table} WHERE source_path = ?`).get(filePath) as
+    | { id: string; folder: string }
     | undefined;
   db.prepare(`DELETE FROM ${table} WHERE source_path = ?`).run(filePath);
   if (existing) {
-    db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(table, existing.id);
-    db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ?`).run(table, existing.id);
+    // Scoped by folder for the same reason upsertFile's ref_folder is (skills' compound key means
+    // ref_id alone can match another folder's same-named skill) - memory_docs ids never collide so
+    // its rows are always stored/looked-up with ref_folder='', matching backfillSearchIndex.
+    const refFolder = table === 'skills' ? existing.folder : '';
+    db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(table, existing.id, refFolder);
+    db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(table, existing.id, refFolder);
   }
 }
 
