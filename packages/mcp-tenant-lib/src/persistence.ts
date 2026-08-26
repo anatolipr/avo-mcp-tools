@@ -109,5 +109,16 @@ export function enablePersistence<TSchema, TValues>(filePath: string): { seededI
   }, WRITE_DEBOUNCE_MS);
   pollInterval.unref();
 
+  // A change followed by a kill within WRITE_DEBOUNCE_MS never reaches the
+  // poll loop above, so the process's last bit of state would silently be
+  // lost on an otherwise-ordinary Ctrl+C. Force one final synchronous write
+  // before actually exiting so a quick restart doesn't drop it.
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      writeToDisk();
+      process.exit(0);
+    });
+  }
+
   return { seededIds };
 }

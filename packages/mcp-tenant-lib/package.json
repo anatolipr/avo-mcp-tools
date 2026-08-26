@@ -1,6 +1,6 @@
 {
   "name": "mcp-tenant-lib",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "type": "module",
   "description": "Generic tenant/session bookkeeping + MCP wiring, reusable across projects.",
   "repository": {
