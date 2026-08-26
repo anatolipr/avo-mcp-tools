@@ -1,7 +1,8 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getOrCreateTenant as getOrCreateTenantForForm, tenants, startIdleSweep, createHttpServer, attachWebSocketServer } from 'mcp-tenant-lib';
+import { getOrCreateTenant as getOrCreateTenantForForm, tenants, startIdleSweep, createHttpServer, attachWebSocketServer, enablePersistence } from 'mcp-tenant-lib';
 import type { FormDef } from './types.js';
 import { initialValuesFor } from './types.js';
 import { makeRegisterFormTools } from './tools/register.js';
@@ -21,6 +22,21 @@ const initialFormDef = JSON.parse(
 
 const getOrCreateTenant = (id: string) =>
   getOrCreateTenantForForm(id, initialFormDef, initialValuesFor(initialFormDef));
+
+// Restores any tenants (schema + field values + submitted flag) that were
+// still active when the server last exited, so an MCP restart doesn't wipe
+// out a form the user was in the middle of filling out — previously this
+// only survived if the browser tab itself stayed open across the restart
+// and pushed a resync (see Tenant.restoreState). Must run before the
+// 'default' tenant is created below so a persisted 'default' wins over a
+// fresh blank one. One file per PORT so concurrent mcp-form instances (e.g.
+// a dev server alongside a real one) don't clobber each other's state.
+const PERSIST_FILE = process.env.MCP_FORM_PERSIST_FILE
+  || path.join(os.tmpdir(), 'mcp-form-state', `tenants-${PORT}.json`);
+const { seededIds } = enablePersistence(PERSIST_FILE);
+if (seededIds.length > 0) {
+  console.error(`[mcp-form] restored ${seededIds.length} tenant(s) from ${PERSIST_FILE}: ${seededIds.join(', ')}`);
+}
 
 // The 'default' tenant backs plain browser access (no MCP session), so
 // `npm start` + opening http://localhost:PORT keeps working standalone.

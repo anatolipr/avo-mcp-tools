@@ -1,6 +1,6 @@
 {
   "name": "mcp-form",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "type": "module",
   "description": "Tiny Lit web component with a signal-backed text field, synced live to an MCP server so an agent can read/write it.",
   "repository": {

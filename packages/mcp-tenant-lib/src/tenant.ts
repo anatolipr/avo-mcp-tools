@@ -4,6 +4,22 @@ import type { WebSocket } from 'ws';
 import type { SubmitPayload, ToolManifestEntry, CallMessage } from './types.js';
 
 /**
+ * Fires whenever the *shape* of the tenants map changes in a way a
+ * dashboard/monitoring view would care about: a tenant created/disposed, a
+ * connection opening/closing, or a connection's manifest/label changing.
+ * Deliberately does NOT fire on ordinary state (Store) changes or waiting/
+ * submitted flips — those are per-tenant form data, not "who's connected."
+ * One process-wide emitter (not per-tenant) so a single dashboard SSE
+ * stream can subscribe once for every channel rather than one listener per
+ * tenant. See dashboard.ts for the consumer.
+ */
+export const dashboardEvents = new EventEmitter();
+dashboardEvents.setMaxListeners(0);
+function notifyDashboard() {
+  dashboardEvents.emit('change');
+}
+
+/**
  * How long Tenant.call waits for some connection to reappear on a tenant
  * before giving up, when the connection it was targeting has already
  * vanished (see Tenant.call). Set comfortably above the client's 2s
@@ -168,6 +184,7 @@ export class Tenant<TSchema, TValues> {
   registerConnection(id: string, socket: WebSocket) {
     this.connections.set(id, { id, socket, manifest: [], summary: undefined, label: undefined });
     this.wsClients.add(socket);
+    notifyDashboard();
   }
 
   updateConnectionManifest(id: string, manifest: ToolManifestEntry[], summary?: string, label?: string) {
@@ -198,6 +215,7 @@ export class Tenant<TSchema, TValues> {
     if (conn) this.wsClients.delete(conn.socket);
     this.connections.delete(id);
     this.syncManifestToolRegistries();
+    notifyDashboard();
   }
 
   addManifestToolRegistry(registry: { sync(): void }) {
@@ -211,6 +229,7 @@ export class Tenant<TSchema, TValues> {
 
   syncManifestToolRegistries() {
     for (const registry of this.#manifestToolRegistries) registry.sync();
+    notifyDashboard();
   }
 
   /**
@@ -421,6 +440,25 @@ function isValidChannelName(id: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(id);
 }
 
+/**
+ * Best-effort fixup for a browser-supplied channel name that fails
+ * isValidChannelName — collapses any run of disallowed characters (spaces,
+ * punctuation, etc.) into a single underscore and trims leading/trailing
+ * underscores, e.g. "bulletino 222aaa" -> "bulletino_222aaa". Used only on
+ * the WS connect path (ws.ts): a human renaming a bridged tab via a plain
+ * `prompt()` has no reason to know or care about the exact slug rule, so
+ * silently coercing their input into something valid is friendlier than a
+ * hard 4404 reject with no recovery. Deliberately NOT applied to
+ * join_channel (channel-tools.ts) — that's agent-driven, the tool
+ * description already states the rule up front, and an agent silently
+ * landing on a DIFFERENT name than it asked for is more likely to cause
+ * confusion (e.g. mismatched describe_channel lookups) than a clear
+ * rejection it can self-correct from.
+ */
+function sanitizeChannelName(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
 const tenants = new Map<string, Tenant<any, any>>();
 
 function getOrCreateTenant<TSchema, TValues>(id: string, initialSchema: TSchema, initialValues: TValues): Tenant<TSchema, TValues> {
@@ -428,6 +466,7 @@ function getOrCreateTenant<TSchema, TValues>(id: string, initialSchema: TSchema,
   if (!tenant) {
     tenant = new Tenant(id, initialSchema, initialValues);
     tenants.set(id, tenant);
+    notifyDashboard();
   }
   return tenant;
 }
@@ -435,6 +474,7 @@ function getOrCreateTenant<TSchema, TValues>(id: string, initialSchema: TSchema,
 function disposeTenant(id: string) {
   tenants.get(id)?.dispose();
   tenants.delete(id);
+  notifyDashboard();
 }
 
 function envMs(name: string, defaultMs: number): number {
@@ -462,4 +502,4 @@ function startIdleSweep(onSweep: (id: string) => void) {
   return sweepInterval;
 }
 
-export { tenants, getOrCreateTenant, disposeTenant, startIdleSweep, isValidChannelName };
+export { tenants, getOrCreateTenant, disposeTenant, startIdleSweep, isValidChannelName, sanitizeChannelName };

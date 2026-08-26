@@ -447,9 +447,18 @@ export class MemBucketApp extends LitElement {
     super.connectedCallback();
     this.#refetch();
     this.#refetchFacets();
-    this.#refetchFolders();
+    // Awaited (unlike every other call here) so the #onFocus() below sees a
+    // populated #folders signal - #onFocus only force-resyncs when
+    // #allFolders() already contains a remote folder, and on a cold page
+    // load that list starts out empty until this fetch resolves.
+    this.#refetchFolders().then(() => this.#onFocus());
     window.addEventListener('focus', this.#boundOnFocus);
     document.addEventListener('visibilitychange', this.#boundOnFocus);
+    // Runs the same force-resync #onFocus does on a real focus transition,
+    // for the initial page load itself - otherwise a tab opened once and
+    // left open/visible (no focus/visibilitychange event ever refires) only
+    // ever shows whatever was last synced, even if another device wrote to
+    // a connected remote folder before this tab was opened.
     document.addEventListener('folderfoo-file-open', this.#boundOnFolderfooFileOpen);
     document.addEventListener('folderfoo-folder-changed', this.#boundOnFolderfooFolderChanged);
     window.addEventListener('folderfoo-auth-change', this.#boundOnFolderfooAuthChange);

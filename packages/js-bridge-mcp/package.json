@@ -1,6 +1,6 @@
 {
   "name": "js-bridge-mcp",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "type": "module",
   "description": "Generic bridge: exposes MCP tools discovered from a connected page's own JSON tool manifest, dispatched over a cross-origin WebSocket. Ships a hello-world example page under legacy-page/.",
   "repository": {
@@ -22,10 +22,11 @@
     "access": "public"
   },
   "scripts": {
-    "dev": "npm-run-all --parallel dev:client dev:mcp",
+    "dev": "npm-run-all --parallel dev:client dev:dashboard dev:mcp",
     "dev:client": "vite build --watch",
+    "dev:dashboard": "vite build --watch --config vite.dashboard.config.ts",
     "dev:mcp": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.build.json && vite build",
+    "build": "tsc -p tsconfig.build.json && vite build && vite build --config vite.dashboard.config.ts",
     "prestart:mcp": "npm run build",
     "start:mcp": "tsx src/server.ts",
     "start:static": "http-server legacy-page --cors -p 8080",
@@ -37,6 +38,8 @@
   "dependencies": {
     "mcp-tenant-lib": "^0.3.3",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "avosignals": "^1.0.16",
+    "lit": "^3.3.3",
     "ws": "^8.18.0",
     "zod": "^3.23.8"
   },

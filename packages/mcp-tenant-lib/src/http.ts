@@ -6,11 +6,18 @@ import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { getOrCreateTenant } from './tenant.js';
 import { buildMcpServer, type RegisterToolsFn, type McpServerIdentity } from './mcp.js';
+import { handleDashboardRoutes } from './dashboard.js';
 
 const UPLOAD_DIR = path.join(os.tmpdir(), 'mcp-form-uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
+const mime: Record<string, string> = {
+  '.html': 'text/html',
+  '.js': 'text/javascript',
+  '.json': 'application/json',
+  '.css': 'text/css',
+  '.svg': 'image/svg+xml',
+};
 
 const sessions = new Map<string, StreamableHTTPServerTransport>();
 
@@ -42,9 +49,24 @@ export interface CreateHttpServerOptions<TSchema, TValues> {
    *   to the previous one.
    */
   defaultTenantMode?: 'per-session' | 'shared';
+  /**
+   * Extra static asset roots served ahead of `staticDir`, keyed by URL path
+   * prefix. Two shapes:
+   *  - A directory-style prefix (e.g. `{ '/dashboard': '.../dist/dashboard' }`)
+   *    resolves requests under it relative to that directory, falling back
+   *    to `index.html` for the bare prefix or a `/`-suffixed request — same
+   *    convention as `staticDir`. Lets a consumer ship a second, independent
+   *    static app (e.g. a monitoring dashboard) without colliding with
+   *    `staticDir`'s own `index.html`.
+   *  - A single-file prefix with an extension (e.g. `{ '/main.js': '.../dist/client' }`)
+   *    serves exactly that one file (`dir/main.js`) for a request matching
+   *    the prefix exactly — for a fixed-URL asset other pages already
+   *    reference by that path regardless of what's mounted at `/`.
+   */
+  extraStaticMounts?: Record<string, string>;
 }
 
-export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSchema, initialValues, identity, registerFn, defaultTenantMode = 'per-session' }: CreateHttpServerOptions<TSchema, TValues>) {
+export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSchema, initialValues, identity, registerFn, defaultTenantMode = 'per-session', extraStaticMounts = {} }: CreateHttpServerOptions<TSchema, TValues>) {
   const getTenant = (id: string) => {
     const t = getOrCreateTenant(id, initialSchema, initialValues);
     t.touch();
@@ -133,6 +155,8 @@ export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSch
       return;
     }
 
+    if (url.pathname.startsWith('/api/dashboard') && handleDashboardRoutes(req, res, port)) return;
+
     if (url.pathname === '/upload' && req.method === 'POST') {
       const contentType = req.headers['content-type'] ?? '';
       const boundaryMatch = contentType.match(/boundary=(.+)$/);
@@ -178,8 +202,27 @@ export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSch
       pathname = '/';
     }
 
-    let filePath = pathname === '/' ? '/index.html' : pathname;
-    filePath = path.join(staticDir, filePath);
+    const mountEntry = Object.entries(extraStaticMounts).find(
+      ([prefix]) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+    );
+    let filePath: string;
+    if (mountEntry) {
+      const [prefix, dir] = mountEntry;
+      if (path.extname(prefix)) {
+        // A prefix with a file extension (e.g. "/main.js") is a single-file
+        // mount — `dir` is that file's parent directory, and any request
+        // exactly matching `prefix` resolves straight to it, no index.html
+        // fallback. Lets a consumer serve one fixed-URL asset (e.g. an
+        // embed script referenced by other pages as "<server>/main.js")
+        // from a build directory that also happens to hold other files.
+        filePath = path.join(dir, path.basename(prefix));
+      } else {
+        const rest = pathname.slice(prefix.length);
+        filePath = path.join(dir, rest === '' || rest === '/' ? '/index.html' : rest);
+      }
+    } else {
+      filePath = path.join(staticDir, pathname === '/' ? '/index.html' : pathname);
+    }
 
     fs.readFile(filePath, (err, data) => {
       if (err) { res.writeHead(404); res.end('Not found'); return; }

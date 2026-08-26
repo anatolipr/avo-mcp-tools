@@ -991,6 +991,12 @@ export function buildWebRouter(
     // already-stamped entries become visible.
     identity.setUsername(decodeUsername(token));
     res.json({ connected: true, server });
+    // Force-resyncs every remote source now that this identity's folders are
+    // visible again, rather than leaving them showing whatever was last
+    // synced until the next fixed poll tick or tab-focus resync. Fired after
+    // responding (best-effort, same posture as the rest of this route) so
+    // login doesn't wait on a round trip to every remote source.
+    Promise.all([remotePollers?.skill?.resyncAll(), remotePollers?.memory?.resyncAll()]).catch(() => {});
   });
 
   // Signals that the browser's folderfoo login session just ended (the page

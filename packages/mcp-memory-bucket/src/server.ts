@@ -83,6 +83,15 @@ const remoteSkillPoller: RemotePollerHandle | undefined =
 const remoteMemoryPoller: RemotePollerHandle | undefined =
   config.remoteMemoryFolders.length > 0 ? startRemotePolling(db, memorySpec, config.remoteMemoryFolders, config.baseDir) : undefined;
 
+// Forces one immediate poll of every remote source at process start, instead
+// of leaving the cache to show whatever was last synced until the first
+// fixed interval tick (up to POLL_INTERVAL_MS later) - this is effectively
+// "login" for a background server: a fresh process (laptop wake, editor
+// reopened) is exactly when another device's writes are most likely to be
+// unseen locally yet.
+remoteSkillPoller?.resyncAll().catch((err) => console.error('[memory-bucket] initial remote skill resync failed:', err));
+remoteMemoryPoller?.resyncAll().catch((err) => console.error('[memory-bucket] initial remote memory resync failed:', err));
+
 if (config.skillFolders.length === 0 && config.memoryFolders.length === 0) {
   console.error(
     `[memory-bucket] no folders configured — open http://localhost:${PORT} to add one`

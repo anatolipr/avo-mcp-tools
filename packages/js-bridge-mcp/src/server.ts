@@ -19,18 +19,24 @@ getOrCreateTenant('default');
 
 startIdleSweep((id) => console.error(`[mcp] sweeping idle tenant: ${id}`));
 
-// Only main.js is ever fetched from here — the legacy page this bundle is
-// injected into is hosted separately (see legacy-page/, run via
-// `npm run start:static`), not by this server.
-const STATIC_DIR = path.join(packageRoot, 'dist', 'client');
+// main.js is fetched from here by absolute path (get_embed_snippet always
+// embeds "<server>/main.js", see hello-tools.ts) regardless of what's
+// mounted at "/" — the legacy page it's injected into is hosted separately
+// (see legacy-page/, run via `npm run start:static`), not by this server.
+// "/" itself serves the connected-apps dashboard (dist/dashboard) instead,
+// so visiting the server's own URL shows something useful rather than
+// "Not found".
+const CLIENT_DIR = path.join(packageRoot, 'dist', 'client');
+const DASHBOARD_DIR = path.join(packageRoot, 'dist', 'dashboard');
 
 const httpServer = createHttpServer({
   port: PORT,
-  staticDir: STATIC_DIR,
+  staticDir: DASHBOARD_DIR,
   initialSchema: undefined,
   initialValues: initialHelloState,
   identity: { name: 'js-bridge-mcp', version: '0.1.0' },
   registerFn: registerHelloTools,
+  extraStaticMounts: { '/main.js': CLIENT_DIR },
   // js-bridge-mcp typically bridges a single browser page per server; MCP
   // clients aren't expected to pin ?tenant= themselves (some, like VS Code
   // Copilot, open a fresh MCP session with no ?tenant= on every
@@ -44,6 +50,7 @@ attachWebSocketServer(httpServer, PORT, undefined, initialHelloState);
 
 httpServer.listen(PORT, () => {
   console.error(`[js-bridge-mcp] MCP + bridge server listening on http://localhost:${PORT}`);
+  console.error(`[js-bridge-mcp] dashboard: http://localhost:${PORT}`);
   console.error(`[js-bridge-mcp] serve legacy-page/hello-world.html separately: npm run start:static`);
 });
 

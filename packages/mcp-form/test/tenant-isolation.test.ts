@@ -2,6 +2,10 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { Server } from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { WebSocket } from 'ws';
@@ -9,6 +13,12 @@ import { WebSocket } from 'ws';
 const PORT = 8901;
 const BASE_URL = `http://localhost:${PORT}`;
 let serverProcess: ChildProcess;
+// A dedicated, throwaway persistence file per test run — without this the
+// server would default to a fixed path keyed only by PORT (see
+// MCP_FORM_PERSIST_FILE in server.ts), so tenant state from one run (e.g.
+// "unit-test-resync-restores-state") would leak into the next and break
+// assertions that expect a channel to be genuinely new.
+const PERSIST_FILE = path.join(os.tmpdir(), `mcp-form-test-state-${randomUUID()}.json`);
 
 function textOf(result: Record<string, unknown>): string {
   const content = result.content as Array<{ text: string }>;
@@ -22,10 +32,16 @@ function requireSessionId(transport: StreamableHTTPClientTransport): string {
 }
 
 before(async () => {
+  // `detached: true` makes this the leader of its own process group, so
+  // `process.kill(-pid)` below can reach the real tsx/node process too —
+  // `npx` spawns tsx as a child of itself, and plain `serverProcess.kill()`
+  // only ever signals the npx wrapper, leaving the actual server (still
+  // holding the port open) running as an orphan after the test file exits.
   serverProcess = spawn('npx', ['tsx', 'src/server.ts'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, PORT: String(PORT) },
+    env: { ...process.env, PORT: String(PORT), MCP_FORM_PERSIST_FILE: PERSIST_FILE },
     stdio: ['ignore', 'ignore', 'inherit'],
+    detached: true,
   });
   // Wait for the HTTP server to accept connections.
   for (let i = 0; i < 50; i++) {
@@ -39,7 +55,10 @@ before(async () => {
 });
 
 after(() => {
-  serverProcess.kill();
+  if (serverProcess.pid) {
+    try { process.kill(-serverProcess.pid, 'SIGKILL'); } catch { /* already gone */ }
+  }
+  fs.rmSync(PERSIST_FILE, { force: true });
 });
 
 async function connectClient() {
@@ -77,8 +96,16 @@ test('two MCP sessions get distinct session ids', async () => {
 test('getOrCreateTenant returns independent tenants with isolated stores', async () => {
   const port = 8905;
   const previousPort = process.env.PORT;
+  const previousPersistFile = process.env.MCP_FORM_PERSIST_FILE;
   let importedServer: Server | undefined;
   process.env.PORT = String(port);
+  // Scoped to this test so it doesn't read/write the fixed
+  // os.tmpdir()/mcp-form-state/tenants-8905.json path a real server would
+  // default to — a leftover 'unit-test-tenant-a'/'unit-test-tenant-b' from
+  // a prior run would otherwise make `getOrCreateTenant` return persisted
+  // state instead of the fresh tenant this test expects.
+  const testPersistFile = path.join(os.tmpdir(), `mcp-form-test-state-${randomUUID()}.json`);
+  process.env.MCP_FORM_PERSIST_FILE = testPersistFile;
 
   try {
     const { getOrCreateTenant, httpServer } = await import('../src/server.js');
@@ -101,6 +128,9 @@ test('getOrCreateTenant returns independent tenants with isolated stores', async
   } finally {
     if (previousPort === undefined) delete process.env.PORT;
     else process.env.PORT = previousPort;
+    if (previousPersistFile === undefined) delete process.env.MCP_FORM_PERSIST_FILE;
+    else process.env.MCP_FORM_PERSIST_FILE = previousPersistFile;
+    fs.rmSync(testPersistFile, { force: true });
     if (importedServer?.listening) {
       await new Promise<void>((resolve, reject) => {
         importedServer!.close((error) => {
@@ -353,8 +383,27 @@ test('an older resync (stale tab) is ignored once a newer resync (freshly-edited
   ws.close();
 });
 
-test('WebSocket connection with an invalid tenant id is rejected with 4404', { timeout: 5000 }, async () => {
+test('WebSocket connection with a tenant id containing invalid characters is sanitized and accepted, not rejected', { timeout: 5000 }, async () => {
+  // A browser-supplied name (e.g. a human renaming a bridged tab via a
+  // plain prompt(), like bulletino's connect flow) has no reason to know
+  // mcp-tenant-lib's slug rule — ws.ts now coerces disallowed characters
+  // into underscores (sanitizeChannelName) instead of hard-rejecting with
+  // 4404, so the connection still succeeds under a close-enough name. See
+  // the next test for the one case that's still rejected: a name with
+  // NOTHING left after sanitizing.
   const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${encodeURIComponent('not a valid id!')}`);
+  const initMsg: any = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Timed out waiting for an "init" message')), 1000);
+    ws.on('message', (raw) => { clearTimeout(timer); resolve(JSON.parse(raw.toString())); });
+    ws.on('close', (code) => { clearTimeout(timer); reject(new Error(`connection closed unexpectedly with code ${code}`)); });
+    ws.on('error', reject);
+  });
+  assert.equal(initMsg.type, 'init');
+  ws.close();
+});
+
+test('WebSocket connection with a tenant id that sanitizes to nothing is rejected with 4404', { timeout: 5000 }, async () => {
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${encodeURIComponent('!!!')}`);
   const closeCode = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       ws.close();
@@ -441,15 +490,18 @@ test('two sessions joining the same channel share form state (the "Pets" scenari
 
 test('idle tenants are automatically disposed after a TTL, even without explicit session close', { timeout: 10000 }, async () => {
   const idlePort = 8906;
+  const idlePersistFile = path.join(os.tmpdir(), `mcp-form-test-state-${randomUUID()}.json`);
   const idleServerProcess = spawn('npx', ['tsx', 'src/server.ts'], {
     cwd: new URL('..', import.meta.url).pathname,
     env: {
       ...process.env,
       PORT: String(idlePort),
+      MCP_FORM_PERSIST_FILE: idlePersistFile,
       TENANT_IDLE_TIMEOUT_MS: '300',
       TENANT_SWEEP_INTERVAL_MS: '100',
     },
     stdio: ['ignore', 'ignore', 'inherit'],
+    detached: true,
   });
 
   try {
@@ -478,6 +530,9 @@ test('idle tenants are automatically disposed after a TTL, even without explicit
     await closed;
     assert.equal(ws.readyState, WebSocket.CLOSED);
   } finally {
-    idleServerProcess.kill();
+    if (idleServerProcess.pid) {
+      try { process.kill(-idleServerProcess.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    fs.rmSync(idlePersistFile, { force: true });
   }
 });

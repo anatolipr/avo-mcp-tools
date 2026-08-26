@@ -12,5 +12,5 @@
     "noEmit": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src/client/**/*.ts", "src/types.ts"]
+  "include": ["src/client/**/*.ts", "src/dashboard/**/*.ts", "src/types.ts"]
 }

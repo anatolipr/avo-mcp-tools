@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { ClientMessage } from './types.js';
-import { getOrCreateTenant, tenants, isValidChannelName } from './tenant.js';
+import { getOrCreateTenant, tenants, isValidChannelName, sanitizeChannelName } from './tenant.js';
 
 /**
  * Ping interval for the liveness check below. Half-open sockets (client
@@ -40,14 +40,23 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
 
   wss.on('connection', (ws, req) => {
     const wsUrl = new URL(req.url ?? '/', `http://localhost:${port}`);
-    const requestedTenantId = wsUrl.searchParams.get('tenant');
+    let requestedTenantId = wsUrl.searchParams.get('tenant');
 
     if (requestedTenantId && !isValidChannelName(requestedTenantId)) {
-      // Never silently vivify a channel from a malformed/hostile id — same
-      // validation join_channel applies agent-side.
-      console.error(`[ws] rejected connection: invalid tenant id "${requestedTenantId}"`);
-      ws.close(4404, 'Invalid tenant id');
-      return;
+      // A browser-supplied name (e.g. a human renaming a bridged tab via a
+      // plain prompt()) has no reason to know the slug rule — coerce it
+      // into something valid rather than rejecting outright, same as
+      // join_channel would reject a raw name but this WS path favors
+      // recovering the connection. Only a genuinely empty result (every
+      // character was disallowed) still gets rejected below.
+      const sanitized = sanitizeChannelName(requestedTenantId);
+      if (!sanitized) {
+        console.error(`[ws] rejected connection: invalid tenant id "${requestedTenantId}" (nothing left after sanitizing)`);
+        ws.close(4404, 'Invalid tenant id');
+        return;
+      }
+      console.error(`[ws] sanitized invalid tenant id "${requestedTenantId}" -> "${sanitized}"`);
+      requestedTenantId = sanitized;
     }
 
     const tenantId = requestedTenantId || 'default';

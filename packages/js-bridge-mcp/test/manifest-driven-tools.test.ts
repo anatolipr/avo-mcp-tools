@@ -15,10 +15,19 @@ function textOf(result: Record<string, unknown>): string {
 }
 
 before(async () => {
+  // detached: true so this spawns its own process group - `npx` execs `npm
+  // exec`, which execs the real tsx/node server as a GRANDCHILD, so a plain
+  // serverProcess.kill() below only signals the npx wrapper and leaves that
+  // grandchild running, still holding PORT open. Left unfixed, every test
+  // run leaks a live orphan server; node --test's process for this file then
+  // never exits on its own and eventually gets SIGKILLed by the runner after
+  // its own timeout, surfacing as a mysterious late "test failed" with no
+  // assertion detail even when every individual test already passed.
   serverProcess = spawn('npx', ['tsx', 'src/server.ts'], {
     cwd: new URL('..', import.meta.url).pathname,
     env: { ...process.env, PORT: String(PORT) },
     stdio: ['ignore', 'ignore', 'inherit'],
+    detached: true,
   });
   for (let i = 0; i < 50; i++) {
     try {
@@ -31,7 +40,10 @@ before(async () => {
 });
 
 after(() => {
-  serverProcess.kill();
+  // Negative pid targets the whole process group (see detached: true above),
+  // so this actually reaches the real tsx/node server, not just the npx
+  // wrapper that spawned it.
+  if (serverProcess.pid) process.kill(-serverProcess.pid, 'SIGKILL');
 });
 
 async function connectClient() {
@@ -72,7 +84,7 @@ async function waitForTool(client: Client, name: string, timeoutMs = 3000) {
 test('a fresh session only has the base tools until a page pushes its manifest', async () => {
   const a = await connectClient();
   const names = await toolNames(a.client);
-  assert.deepEqual(names.sort(), ['channel_find', 'describe_tools', 'get_embed_snippet', 'identify_connection', 'join_channel', 'list_channels']);
+  assert.deepEqual(names.sort(), ['channel_find', 'describe_channel', 'describe_tools', 'get_embed_snippet', 'identify_connection', 'join_channel', 'list_channels']);
   await a.client.close();
 });
 

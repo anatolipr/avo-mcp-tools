@@ -1,0 +1,43 @@
+name: Publish changed packages
+
+# Runs on every push to main. Does NOT assume a version was bumped — the
+# actual decision of "does anything need publishing" is made by
+# scripts/publish-changed.mjs, which compares each publishable package's
+# local package.json version against what's already on npm and no-ops if
+# nothing changed. Safe to run on every push for that reason.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {} # manual trigger, e.g. to retry after a transient npm failure
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      # mcp-tenant-lib first, explicitly: js-bridge-mcp and mcp-form both
+      # import it via its published package.json "main"/"exports" (dist/),
+      # not its source — `npm run build --workspaces` does NOT guarantee
+      # dependency order, so building it out of order risks the dependents
+      # bundling against its stale dist/ output.
+      - name: Build mcp-tenant-lib
+        run: npm run build -w mcp-tenant-lib
+
+      - name: Build remaining packages
+        run: npm run build --workspaces --if-present
+
+      - name: Publish changed packages (dependency order)
+        run: node scripts/publish-changed.mjs
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
