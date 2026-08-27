@@ -23,3 +23,21 @@ If you're unsure whether a description is bloated, measure it rather than guessi
 you touched. As a rough reference point, most single-purpose tools in this repo describe themselves in
 150–400 tokens; a tool description running past ~800–1000 tokens is worth a trim pass before considering
 it done.
+
+## Bump consumer dependency ranges when a shared package changes
+
+`mcp-tenant-lib` is a shared library consumed by other packages in this monorepo (currently `mcp-form` and
+`js-bridge-mcp`, via `"mcp-tenant-lib": "^0.x.y"` in their `package.json`). When you add, rename, or remove an
+export from `mcp-tenant-lib` (or otherwise make a change that consuming packages rely on), you MUST also:
+
+- Bump the `^0.x.y` version range in every consumer's `package.json` to require at least the new
+  `mcp-tenant-lib` version — do not leave it pointing at an old range that npm could still satisfy with a
+  version predating your change.
+- Bump the consumer package's own `version` too, since the auto-publish CI publishes on version bump.
+- Run `npm install --package-lock-only` at the repo root to refresh `package-lock.json`.
+
+Before publishing any change to `mcp-tenant-lib`, grep for it across the monorepo
+(`grep -rl "mcp-tenant-lib" packages/*/package.json`) to find every consumer that needs its range bumped.
+Skipping this lets `npm`/`npx` legally resolve a stale pre-change version for consumers, which can fail at
+runtime with errors like `SyntaxError: does not provide an export named 'X'` — this already happened once
+with `enablePersistence` and `mcp-form`.
