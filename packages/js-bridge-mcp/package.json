@@ -1,6 +1,6 @@
 {
   "name": "js-bridge-mcp",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "type": "module",
   "description": "Generic bridge: exposes MCP tools discovered from a connected page's own JSON tool manifest, dispatched over a cross-origin WebSocket. Ships a hello-world example page under legacy-page/.",
   "repository": {
@@ -36,7 +36,7 @@
     "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {
-    "mcp-tenant-lib": "^0.3.3",
+    "mcp-tenant-lib": "^0.3.8",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "avosignals": "^1.0.16",
     "lit": "^3.3.3",
