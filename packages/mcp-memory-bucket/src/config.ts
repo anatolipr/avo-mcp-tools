@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 export interface NamedFolder {
@@ -147,12 +148,24 @@ function resolveFolders(entries: SourceEntry[], baseDir: string): { folders: Nam
   return { folders: deduped, remoteFolders };
 }
 
+/**
+ * Default home for the cache DB, config file, credentials, and remote mirrors
+ * when nothing else is specified — centralized under the user's home directory
+ * so the same store is used regardless of which directory the tool is launched
+ * from. Overridable via --memory-dir/MEMORY_BUCKET_DIR for tests or anyone who
+ * still wants a per-project store.
+ */
+export function defaultBaseDir(): string {
+  return path.join(os.homedir(), '.mem-mcp');
+}
+
 export function loadConfig(cwd: string = process.cwd(), argv: string[] = process.argv): BucketConfig {
   const explicitDir = memoryDirFlag(argv) ?? process.env.MEMORY_BUCKET_DIR;
-  const baseDir = explicitDir ? path.resolve(cwd, explicitDir) : cwd;
-  // The config file lives alongside the cache DB in baseDir (which is cwd
-  // itself unless --memory-dir/MEMORY_BUCKET_DIR points elsewhere) — this
-  // must match where saveFolder/removeFolder write back to.
+  const baseDir = explicitDir ? path.resolve(cwd, explicitDir) : defaultBaseDir();
+  fs.mkdirSync(baseDir, { recursive: true });
+  // The config file lives alongside the cache DB in baseDir (~/.mem-mcp unless
+  // --memory-dir/MEMORY_BUCKET_DIR points elsewhere) — this must match where
+  // saveFolder/removeFolder write back to.
   const configPath = path.join(baseDir, 'memory-bucket.config.json');
   const overrides = readConfigFile(configPath);
 
