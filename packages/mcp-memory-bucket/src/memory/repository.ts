@@ -14,7 +14,7 @@ import { attachmentsDirFor } from '../attachments/storage.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
 import { rebaseFolderPath } from '../config.js';
 import { normalizeKey } from '../types.js';
-import { readFile as readRemoteFile, writeFile as writeRemoteFile, joinRemoteFolderPath, assertRemoteFolderExists } from '../remote/folderfoo-client.js';
+import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, joinRemoteFolderPath, assertRemoteFolderExists } from '../remote/folderfoo-client.js';
 import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 import type { MemoryDoc, MemoryDocType, MemoryFrontmatter, MemoryKeyType, MemoryStatus } from '../types.js';
 
@@ -94,6 +94,24 @@ export class MemoryRepository {
     if (!this.identity) return this.remoteFolders.map((f) => f.name);
     const identity = this.identity.current();
     return this.remoteFolders.filter((f) => !isFolderVisible(f, identity)).map((f) => f.name);
+  }
+
+  /**
+   * Pushes one attachment file's raw binary content to folderfoo, if `folderName` resolves to a
+   * remote source — the attachment counterpart to create()/update()'s inline remote-write blocks.
+   * Pushed under the attachment's own actual filename (unlike the doc's own .md file, which is
+   * pushed under its id with the .md suffix stripped). No-op for a local folder. Called by
+   * AttachmentRepository after it writes an attachment to the local mirror — callers must roll
+   * back the local write on a thrown error here, exactly like create() already rolls back its own
+   * .md file on a failed push.
+   */
+  async pushAttachmentIfNeeded(folderName: string, attachmentFilePath: string, mimeType: string): Promise<void> {
+    const remote = this.remoteFor(folderName);
+    if (!remote || !this.credentialsBaseDir) return;
+    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName);
+    const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
+    const data = fs.readFileSync(attachmentFilePath);
+    await writeRemoteBinaryFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath), data, mimeType);
   }
 
   /** Attaches the live chokidar watcher so addFolder/removeFolder can mutate it without a restart. */

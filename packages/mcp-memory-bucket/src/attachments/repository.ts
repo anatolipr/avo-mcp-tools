@@ -23,10 +23,33 @@ export class AttachmentRepository {
     }
   }
 
+  /**
+   * Pushes an attachment's binary content to folderfoo if the doc lives in a remote folder —
+   * no-op for a local folder (both repos' pushAttachmentIfNeeded already guard on that). Callers
+   * must roll back their own local file write if this throws, same as skill/memory create() rolls
+   * back its own file on a failed remote push.
+   */
+  private async pushAttachmentToRemoteIfNeeded(kind: DocKind, folder: string, filePath: string, mimeType: string): Promise<void> {
+    if (kind === 'memory') {
+      await this.memoryRepo.pushAttachmentIfNeeded(folder, filePath, mimeType);
+    } else {
+      await this.skillRepo.pushAttachmentIfNeeded(folder, filePath, mimeType);
+    }
+  }
+
   async add(kind: DocKind, docIdOrName: string, filename: string, data: Buffer): Promise<AttachmentEntry> {
     const doc = await this.getDoc(kind, docIdOrName);
     const dir = attachmentsDirFor(doc.source_path, kind);
     const entry = writeAttachmentFile(dir, filename, data);
+    try {
+      await this.pushAttachmentToRemoteIfNeeded(kind, doc.folder, path.join(dir, entry.filename), entry.mime_type);
+    } catch (err) {
+      // Mirrors create()'s rollback: remote push failed after the local mirror file was already
+      // written — remove the orphaned local file rather than leaving it registered as if it were
+      // already synced remotely.
+      fs.rmSync(path.join(dir, entry.filename), { force: true });
+      throw err;
+    }
     const existing = doc.attachments ?? [];
     await this.saveAttachmentsList(kind, docIdOrName, [...existing, entry]);
     return entry;
@@ -45,6 +68,7 @@ export class AttachmentRepository {
     const safePath = resolveWithinBase(dir, undefined, filename);
     fs.rmSync(safePath, { force: true });
     const written = writeAttachmentFile(dir, filename, data);
+    await this.pushAttachmentToRemoteIfNeeded(kind, doc.folder, path.join(dir, written.filename), written.mime_type);
     // Full replace: preserve position, overwrite metadata for this filename entry.
     const next = (doc.attachments ?? []).map((a) => (a.filename === filename ? written : a));
     await this.saveAttachmentsList(kind, docIdOrName, next);
@@ -56,6 +80,10 @@ export class AttachmentRepository {
     const dir = attachmentsDirFor(doc.source_path, kind);
     const safePath = resolveWithinBase(dir, undefined, filename);
     fs.rmSync(safePath, { force: true });
+    // Does NOT delete the corresponding file on folderfoo — there is no delete endpoint in
+    // folderfoo-client.ts, matching the same already-flagged gap on skill/memory doc rename/delete
+    // (see SkillRepository.rename()/remove() doc comments). A removed attachment leaves a stale
+    // copy on the remote source until folderfoo itself gains a delete API.
     const next = (doc.attachments ?? []).filter((a) => a.filename !== filename);
     await this.saveAttachmentsList(kind, docIdOrName, next);
     if (listAttachmentFiles(dir).length === 0) {

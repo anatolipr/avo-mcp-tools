@@ -226,3 +226,40 @@ export async function writeFile(server: string, baseDir: string, tenantId: strin
     async () => undefined
   );
 }
+
+/**
+ * Writes one file's raw BINARY content via POST /save/:filename — the attachment-file counterpart
+ * to writeFile's markdown-string upload. Same endpoint, same auth/retry wrapper, just a Buffer body
+ * and the attachment's own mime type instead of a fixed text/markdown content-type.
+ *
+ * NOT YET LIVE-VERIFIED against folderfoo: memory doc ids are deliberately stripped of hyphens
+ * before ever reaching writeFile's `name` param, per a confirmed-in-production finding that
+ * folderfoo's save endpoint silently drops non-[0-9a-zA-Z_] characters from the final filename
+ * segment. Attachment filenames routinely contain dots and hyphens (e.g. "entity.java.hbs") that
+ * this same stripping would mangle if it applies uniformly here too. This function intentionally
+ * does NOT pre-sanitize the name (unlike memory ids) because that behavior hasn't been confirmed
+ * for this endpoint/content-type combination from this client alone — verify with a real round-trip
+ * (attach a dotted/hyphenated filename to a doc in a remote folder, then check the folderfoo UI
+ * shows it unmangled) before relying on this for anything beyond best-effort.
+ */
+export async function writeBinaryFile(
+  server: string,
+  baseDir: string,
+  tenantId: string,
+  folderPath: string,
+  name: string,
+  data: Buffer,
+  mimeType: string
+): Promise<void> {
+  await withAuth(
+    server,
+    baseDir,
+    (jwt) =>
+      fetch(`${server}/save/${filenameParam(folderPath, name)}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': mimeType },
+        body: data,
+      }),
+    async () => undefined
+  );
+}
