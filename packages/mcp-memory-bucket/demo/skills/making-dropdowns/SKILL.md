@@ -25,8 +25,9 @@ metadata:
   owner: personal
   status: stable
   extends: null
+created_at: '2026-08-19T16:39:13.490Z'
 body: >-
-  # Making dropdowns
+  ## Making dropdowns
 
 
   This project's dropdowns are built on two native browser features, not a
@@ -127,23 +128,59 @@ body: >-
     static styles = css`
       .toggle { /* ...button styles... */ }
 
+      /* Two custom @position-try fallbacks, not the flip-block keyword —
+         see "Flipping AND shrinking to fit" below for why: flip-block
+         alone only remaps top/bottom, it doesn't also bound the far edge,
+         so a tall menu can still overflow whichever side it lands on.
+         Each fallback here pins BOTH edges (anchor side + a fixed margin
+         off the opposite viewport edge), which is what lets height: auto
+         actually shrink the box to fit. */
+      @position-try --menu-below {
+        top: anchor(bottom);
+        bottom: 8px;
+        margin-top: 4px;
+        margin-bottom: 0;
+      }
+      @position-try --menu-above {
+        bottom: anchor(top);
+        top: 8px;
+        margin-top: 0;
+        margin-bottom: 4px;
+      }
+
       .menu {
         /* [popover] promotes this to the top layer: renders above
            everything, no z-index, never clipped by an ancestor's
            overflow: hidden/auto. CSS anchor positioning keeps it glued to
-           the toggle button through any reflow with no JS measuring, and
-           position-try-fallbacks flips it upward automatically when there
-           isn't room below. */
+           the toggle button through any reflow with no JS measuring. */
         position: fixed;
         margin: 0;
         inset: auto;
         top: anchor(bottom);
+        bottom: 8px;
         left: anchor(left);
-        position-try-fallbacks: flip-block;
+        position-try-fallbacks: --menu-below, --menu-above;
+        /* Without this, the browser only tries --menu-above once the
+           --menu-below position actually overflows — so on a short page
+           where both sides have similar (insufficient) room, it can stay
+           "below" even when "above" would fit better. most-block-size
+           makes it evaluate both up front and pick whichever gives more
+           room, matching how native <select> always chooses the roomier
+           side. */
+        position-try-order: most-block-size;
+        /* Popovers get a UA-stylesheet default of height: fit-content,
+           which sizes to content and ignores the bottom inset entirely —
+           so even with both top and bottom set, the menu would still grow
+           to fit all its options and overflow. height: auto overrides
+           that default so top+bottom actually bound the box, letting it
+           shrink below max-height when space is tight (confirmed via
+           Playwright measurement: without this line the box measured
+           height: fit-content and ignored bottom; with it, bottom is
+           honored and the box shrinks to the true gap). */
+        height: auto;
+        max-height: 320px; /* ceiling for when there's plenty of room */
+        overflow-y: auto;  /* scroll within whatever space remains, if content still exceeds it */
         /* ...visual styles: background, border, box-shadow, padding... */
-      }
-      .menu:popover-open {
-        margin-top: 4px; /* the gap you'd normally get from top: calc(100% + 4px) */
       }
     `;
 
@@ -191,6 +228,194 @@ body: >-
     listen for the native `toggle` event:
     `@toggle=${(e) => e.newState === 'open' ? ... : ...}` — `e.newState` is
     `'open'` or `'closed'`.
+
+  ## Start here: the plain default (works for almost everything)
+
+
+  Before reaching for the "flip AND shrink" machinery below, use this —
+
+  it's what actually shipped and was confirmed working after a real bug
+
+  hunt (see "A bug this project actually hit" below). It's `flip-block` +
+
+  a fixed `max-height`, nothing more:
+
+
+  ```css
+
+  .menu {
+    position: fixed;
+    margin: 0;
+    inset: auto;
+    top: anchor(bottom);
+    left: anchor(left);
+    width: anchor-size(width); /* omit if the menu shouldn't match the anchor's width */
+    position-try-fallbacks: flip-block;
+    max-height: 320px;
+    overflow-y: auto;
+    /* ...visual styles: background, border, box-shadow, padding... */
+  }
+
+  /* The 4px gap belongs here, not baked into a custom @position-try —
+     see "A bug this project actually hit" for why. */
+  .menu:popover-open { margin-top: 4px; }
+
+  ```
+
+
+  Do **not** set both `top` and `bottom` on the base (non-fallback) rule.
+
+  Only `top: anchor(bottom)` — pin one edge, let the browser size the box
+
+  to its content, and use `max-height` + `overflow-y: auto` as the ceiling.
+
+  This covers the overwhelming majority of dropdowns (tag inputs, action
+
+  menus, single-field autocomplete). Reach for the heavier "flip AND
+
+  shrink" pattern below only if you've actually observed a menu getting
+
+  clipped by the viewport edge with the plain version — don't add it
+
+  preemptively.
+
+
+  ### A bug this project actually hit
+
+
+  An early version of a tag-input menu used the "flip AND shrink" pattern
+
+  below (paired `@position-try` blocks each setting `top`+`bottom`+one
+
+  margin) as its *only* positioning rule, including for the common case.
+
+  The menu rendered detached from its input — sometimes pinned near the
+
+  viewport top, overlapping unrelated content — even though the anchor
+
+  name/`position-anchor` wiring was correct and Chromium's anchor
+
+  positioning support was in range (confirmed at Chrome/Electron's bundled
+
+  146). Simplifying to the plain default above (one `top` pin, no `bottom`
+
+  on the base rule, gap moved to a `:popover-open` rule instead of inside
+
+  `@position-try`) fixed it immediately. The exact interaction between
+
+  over-constrained `top`+`bottom` and `anchor()` resolution on the *base*
+
+  (non-fallback) rule wasn't root-caused further, but the practical
+
+  takeaway holds: don't double-pin edges unless you've actually hit a
+
+  clipping problem that requires it.
+
+
+  ## Flipping AND shrinking to fit — only if the plain default clips
+
+
+  The naive version of this pattern uses `position-try-fallbacks:
+
+  flip-block` and a fixed `max-height`. That's enough to make the menu
+
+  *flip sides*, but it is **not** enough to make it *fit* — and the two get
+
+  conflated easily because they look like the same problem.
+
+
+  **Only reach for this section if you've confirmed clipping** (e.g. via
+
+  Playwright `getBoundingClientRect()` measurement, or a visibly cropped
+
+  menu near a viewport edge) — the plain default above resolves cleanly
+
+  for most dropdowns and doesn't have the double-pinning risk described
+
+  above.
+
+
+  **What `flip-block` actually does, and doesn't do:** it only tries the
+
+  flipped position once the *initial* declared position overflows the
+
+  viewport. If neither the initial position nor the flipped one has enough
+
+  room for the menu's full (fit-content) height, the browser sticks with
+
+  whichever it tried first — usually "below" — and the menu gets clipped by
+
+  the viewport edge. This is easy to miss in manual testing: on a page with
+
+  one field near the top, shrinking the window symmetrically eats into the
+
+  space above and below at the same rate, so you can shrink the window a
+
+  lot and never see a flip, then conclude flip-block is broken. It isn't —
+
+  it correctly determined that flipping wouldn't have helped, because the
+
+  menu (sized to its full content) didn't fit on the other side either.
+  Confirmed
+
+  by measuring actual `getBoundingClientRect()` values via Playwright: with
+
+  `spaceAbove ≈ spaceBelow ≈ 135px` and a 207px-tall (content-sized) menu,
+
+  neither side fits, so the browser correctly leaves it at the initial
+
+  "below" position rather than flipping into an equally-cramped "above."
+
+
+  **Two separate fixes, both needed for select-like behavior:**
+
+
+  1. **Pick the roomier side, not just "flip if the first choice overflows."**
+     Add `position-try-order: most-block-size` alongside
+     `position-try-fallbacks`. This makes the browser evaluate every listed
+     fallback *up front* and choose whichever gives the most room in the
+     block direction — closer to how native `<select>` always opens toward
+     the side with more space, rather than only reacting to overflow.
+     Baseline as of February 2026 (Chrome 125+, Edge 125+, Safari 26+,
+     Firefox 147+).
+
+  2. **Let the menu shrink to whatever room it actually has, not just cap
+     at a fixed max-height.** This needs a CSS mechanism most people reach
+     for and it silently fails on a popover: setting both `top` and
+     `bottom` insets is supposed to auto-compute the box's height to fill
+     the gap between them (normal CSS box-model over-constrained
+     resolution) — **but popovers carry a UA-stylesheet default of
+     `height: fit-content`**, which sizes the box to its content and
+     ignores the `bottom` inset as a sizing constraint entirely. The fix is
+     one line: explicitly declare `height: auto;` on the popover to
+     override that default. Once that's set, `top`/`bottom` genuinely bound
+     the box and it shrinks below `max-height` whenever the true available
+     space is smaller than the cap. This also means `flip-block` alone
+     (which only remaps `top`/`bottom`, not the *opposite* edge) can't
+     produce this effect — you need paired custom `@position-try` rules
+     (`--menu-below`/`--menu-above` above) that each pin *both* edges, not
+     just the keyword.
+
+  Symptom checklist if you're debugging a menu that opens toward the
+
+  "wrong" side or gets visibly cropped:
+
+
+  - [ ] Confirm it's actually a bug, not correct behavior: measure real
+        `spaceAbove`/`spaceBelow` vs. the menu's natural content height. If
+        neither side has enough room, clipping *is* correct without fix #2
+        below — the menu needs to shrink, not just flip.
+  - [ ] `position-try-order: most-block-size` is present if you want
+        "roomier side wins" instead of "only flip on overflow."
+    - [ ] `.menu` (or whatever element carries `popover`) has an explicit
+        `height: auto;` if you're relying on `top`+`bottom` insets to bound
+        its size — check computed style in DevTools; if it silently reads
+        back as `height: fit-content`-driven (i.e. equals the content's
+        natural height regardless of the `bottom` inset), this is missing.
+  - [ ] If flipping between two states, both fallbacks pin *both* edges
+        (anchor edge + a fixed offset from the *opposite* viewport edge),
+        not just the near edge — a bare `flip-block` keyword doesn't give
+        you this.
 
   ## Pattern B: popover on a child component's host, anchored to a parent's
   button
@@ -356,10 +581,15 @@ body: >-
   - [ ] No `z-index` anywhere in the new CSS — if you wrote one, you're
         probably fighting the top layer instead of using it; delete it.
   - [ ] No manual outside-click `document.addEventListener` — `popover`
-        gives you light-dismiss for free.
+        gives you light-dismiss for free (unless you're on `popover="manual"`
+        per lit-autocomplete-combobox's edge 1, which needs it).
   - [ ] No `getBoundingClientRect()` flip-detection code — `position-anchor`
-        + `position-try-fallbacks: flip-block` (or `flip-inline` for
-        horizontal flipping) replaces it.
+        + `position-try-fallbacks` (custom `@position-try` pair, or
+        `flip-block`/`flip-inline` for the simple case) replaces it.
+  - [ ] If the menu's content height can vary or the viewport can be short,
+        use the paired `@position-try` + `position-try-order:
+        most-block-size` + `height: auto` combo above, not bare
+        `flip-block` — see "Flipping AND shrinking to fit."
   - [ ] If multiple trigger buttons can exist at once (a list), the
         `anchor-name` is scoped to only the open one, not applied uniformly.
   - [ ] If the popover is its own child custom element, `popover` /
@@ -556,12 +786,69 @@ Key points:
   `@toggle=${(e) => e.newState === 'open' ? ... : ...}` — `e.newState` is
   `'open'` or `'closed'`.
 
-## Flipping AND shrinking to fit — the part that's easy to get wrong
+## Start here: the plain default (works for almost everything)
+
+Before reaching for the "flip AND shrink" machinery below, use this —
+it's what actually shipped and was confirmed working after a real bug
+hunt (see "A bug this project actually hit" below). It's `flip-block` +
+a fixed `max-height`, nothing more:
+
+```css
+.menu {
+  position: fixed;
+  margin: 0;
+  inset: auto;
+  top: anchor(bottom);
+  left: anchor(left);
+  width: anchor-size(width); /* omit if the menu shouldn't match the anchor's width */
+  position-try-fallbacks: flip-block;
+  max-height: 320px;
+  overflow-y: auto;
+  /* ...visual styles: background, border, box-shadow, padding... */
+}
+/* The 4px gap belongs here, not baked into a custom @position-try —
+   see "A bug this project actually hit" for why. */
+.menu:popover-open { margin-top: 4px; }
+```
+
+Do **not** set both `top` and `bottom` on the base (non-fallback) rule.
+Only `top: anchor(bottom)` — pin one edge, let the browser size the box
+to its content, and use `max-height` + `overflow-y: auto` as the ceiling.
+This covers the overwhelming majority of dropdowns (tag inputs, action
+menus, single-field autocomplete). Reach for the heavier "flip AND
+shrink" pattern below only if you've actually observed a menu getting
+clipped by the viewport edge with the plain version — don't add it
+preemptively.
+
+### A bug this project actually hit
+
+An early version of a tag-input menu used the "flip AND shrink" pattern
+below (paired `@position-try` blocks each setting `top`+`bottom`+one
+margin) as its *only* positioning rule, including for the common case.
+The menu rendered detached from its input — sometimes pinned near the
+viewport top, overlapping unrelated content — even though the anchor
+name/`position-anchor` wiring was correct and Chromium's anchor
+positioning support was in range (confirmed at Chrome/Electron's bundled
+146). Simplifying to the plain default above (one `top` pin, no `bottom`
+on the base rule, gap moved to a `:popover-open` rule instead of inside
+`@position-try`) fixed it immediately. The exact interaction between
+over-constrained `top`+`bottom` and `anchor()` resolution on the *base*
+(non-fallback) rule wasn't root-caused further, but the practical
+takeaway holds: don't double-pin edges unless you've actually hit a
+clipping problem that requires it.
+
+## Flipping AND shrinking to fit — only if the plain default clips
 
 The naive version of this pattern uses `position-try-fallbacks:
 flip-block` and a fixed `max-height`. That's enough to make the menu
 *flip sides*, but it is **not** enough to make it *fit* — and the two get
 conflated easily because they look like the same problem.
+
+**Only reach for this section if you've confirmed clipping** (e.g. via
+Playwright `getBoundingClientRect()` measurement, or a visibly cropped
+menu near a viewport edge) — the plain default above resolves cleanly
+for most dropdowns and doesn't have the double-pinning risk described
+above.
 
 **What `flip-block` actually does, and doesn't do:** it only tries the
 flipped position once the *initial* declared position overflows the
@@ -767,6 +1054,16 @@ reference.md for the full bisection that found this.
       constructor.
 - [ ] Tested with more than 1–2 instances of the trigger on screen at once
       (see the Chromium bug above — it doesn't show up at low counts).
+- [ ] The base (non-fallback) `.menu`/`.suggestions` rule pins only ONE
+      edge (`top: anchor(bottom)`, not also `bottom: ...`) — see "Start
+      here: the plain default" and "A bug this project actually hit."
+      Reserve dual-edge pinning for the "flip AND shrink" section, and
+      only after confirming real clipping.
+- [ ] The visual gap between anchor and menu is set via
+      `.menu:popover-open { margin-top: ...px; }`, not baked into a
+      `@position-try` block's `margin-top`/`margin-bottom` — a gap that
+      only exists inside a fallback silently disappears on the base
+      (non-flipped) position.
 - [ ] Spot-checked in Safari and Firefox, not just Chrome — this project's
       implementation has been manually confirmed working in all three.
 - [ ] If open/closed state is synced through an avosignals `Signal`
