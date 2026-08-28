@@ -118,6 +118,25 @@ server); `npm start` does **not** rebuild it, so run `npm run build`
 again after changing anything under `src/client/`. `npm run dev` rebuilds
 the client on change alongside the server, for active UI development.
 
+The **🗂 Folder View** toggle switches the same UI into a directory-style
+browsing mode, for exploring what's in the bucket by structure instead of
+narrowing a flat list. A dropdown picks between three layouts — **Folder
+tree** (the default: expand a folder to see its items), **Breadcrumb
+drill-down** (folder cards you click into, one level deep), and **Tag →
+Name** (flat and cross-folder: items group by tag regardless of which
+folder they're in, so browsing by tag isn't scoped to one folder; an item
+with multiple tags appears under every one of them, Gmail-label style, and
+each leaf shows which folder it's actually in; untagged items land in an
+"(untagged)" bucket). The last-picked mode and each mode's expand/collapse
+state persist across reloads. Folder View keeps its own folder/tag
+selection and its own open item, entirely independent of the flat Filters
+view's `activeFolders`/`activeTags`/selection — switching between the two
+never disturbs either one's state. The broader query scope (search text,
+type filter, date range, deprecated/paused visibility) is shared between
+both views. Clicking a folder or tag node opens a resizable middle pane
+listing its contents; clicking an item there, or clicking a leaf item
+directly in the tree, opens it in the detail pane on the right.
+
 ### Configuration
 
 By default the server uses the current working directory as the base for

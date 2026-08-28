@@ -96,6 +96,7 @@ export class ResultList extends LitElement {
     .name { font-weight: 600; }
     .deprecated .name { text-decoration: line-through; }
     .meta { opacity: 0.65; font-size: 11px; white-space: nowrap; }
+    .folder-path { font-size: 10.5px; opacity: 0.55; margin-top: 1px; }
     .desc { font-size: 12px; opacity: 0.8; margin-top: 3px; }
     .tags { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
     .tag { font-size: 10px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 6px; }
@@ -108,10 +109,6 @@ export class ResultList extends LitElement {
     }
     .type-badge.memory {
       border: 1px solid var(--accent); color: var(--accent); background: var(--accent-tint);
-    }
-    .folder-badge {
-      font-size: 10px; text-transform: uppercase; opacity: 0.9; border: 1px solid var(--purple);
-      color: var(--purple-fg); background: var(--purple-tint); border-radius: 4px; padding: 0 4px;
     }
     .deprecated-badge {
       font-size: 10px; text-transform: uppercase; border: 1px solid var(--danger);
@@ -176,9 +173,9 @@ export class ResultList extends LitElement {
             </span>
             <span class="meta">${formatAge(r.created_at)} · ${r.owner ?? '—'} · ${r.status}</span>
           </div>
+          ${this.showFolder && r.folder ? html`<div class="folder-path">📁 ${r.folder}</div>` : ''}
           <div class="desc">${r.description}</div>
           <div class="tags">
-            ${this.showFolder && r.folder ? html`<span class="folder-badge">📁 ${r.folder}</span>` : ''}
             ${r.deprecated ? html`<span class="deprecated-badge">deprecated</span>` : ''}
             ${r.paused ? html`<span class="paused-badge">paused</span>` : ''}
             ${r.tags.map((t) => html`<span class="tag">${t}</span>`)}

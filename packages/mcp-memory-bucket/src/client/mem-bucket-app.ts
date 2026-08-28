@@ -6,6 +6,8 @@ import './detail-panel.js';
 import './add-folder-modal.js';
 import './tag-multiselect.js';
 import './channel-view.js';
+import './folder-view.js';
+import './app-toolbar.js';
 import type { Entry, Facets, Selection, TypeFilter, FoldersResponse, Folder, ChannelSummary, ChannelDetail } from './types.js';
 import { TENANT_ID, getFolderfooConfig } from './server-config.js';
 import { parseFolderfooAddress } from './folderfoo-address.js';
@@ -40,8 +42,6 @@ function loadSplitPct(): number {
 type ThemeMode = 'system' | 'light' | 'dark';
 const THEME_STORAGE_KEY = 'mem-bucket-theme';
 const THEME_CYCLE: ThemeMode[] = ['system', 'light', 'dark'];
-const THEME_ICON: Record<ThemeMode, string> = { system: '◐', light: '☀', dark: '☾' };
-const THEME_LABEL: Record<ThemeMode, string> = { system: 'Auto', light: 'Light', dark: 'Dark' };
 
 function loadTheme(): ThemeMode {
   const raw = localStorage.getItem(THEME_STORAGE_KEY);
@@ -96,50 +96,7 @@ function loadFilterState(): Partial<FilterState> {
 export class MemBucketApp extends LitElement {
   static styles = css`
     :host { display: flex; flex-direction: column; height: 100vh; }
-    .toolbar {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-left: auto;
-      flex-shrink: 0;
-    }
-    .theme-toggle, .reindex-toggle {
-      width: 28px;
-      height: 28px;
-      border: 1px solid var(--border-strong);
-      border-radius: 50%;
-      background: var(--bg);
-      color: inherit;
-      cursor: pointer;
-      font-size: 14px;
-      line-height: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      opacity: 0.75;
-    }
-    .theme-toggle:hover, .reindex-toggle:hover { opacity: 1; background: var(--hover); }
-    .folderfoo-slot { display: contents; }
-    .reindex-toggle:disabled { cursor: default; opacity: 0.4; }
-    .reindex-toggle.spinning { animation: reindex-spin 0.8s linear infinite; }
-    @keyframes reindex-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-    .channels-toggle {
-      height: 28px;
-      padding: 0 12px;
-      border: 1px solid var(--border-strong);
-      border-radius: 14px;
-      background: var(--bg);
-      color: inherit;
-      cursor: pointer;
-      font-size: 12px;
-      line-height: 1;
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      opacity: 0.75;
-    }
-    .channels-toggle:hover { opacity: 1; background: var(--hover); }
-    .channels-toggle.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); opacity: 1; }
+    app-toolbar { margin-left: auto; flex-shrink: 0; }
     .filters {
       padding: 12px 16px;
       border-bottom: 1px solid var(--border);
@@ -362,7 +319,8 @@ export class MemBucketApp extends LitElement {
   #selectedIds = new Signal<Set<string>>(new Set());
   #theme = new Signal<ThemeMode>(loadTheme());
   #reindexing = new Signal<boolean>(false);
-  #view = new Signal<'entries' | 'channels'>('entries');
+  #view = new Signal<'entries' | 'channels' | 'folder-view'>('entries');
+  #folderViewEntries = new Signal<Entry[]>([]);
   #channels = new Signal<ChannelSummary[]>([]);
   #selectedChannel = new Signal<string | null>(null);
   #channelDetail = new Signal<ChannelDetail | null>(null);
@@ -428,6 +386,21 @@ export class MemBucketApp extends LitElement {
     for (const tag of this.#activeTags.value) params.append('tag', tag);
     for (const folder of this.#activeFolders.value) params.append('folder', folder);
     if (this.#sort.value) params.set('sort', this.#sort.value);
+    if (this.#deprecatedFilter.value === 'hide') params.set('deprecated', '0');
+    else if (this.#deprecatedFilter.value === 'only') params.set('deprecated', '1');
+    if (this.#pausedFilter.value === 'hide') params.set('paused', '0');
+    else if (this.#pausedFilter.value === 'only') params.set('paused', '1');
+    if (this.#dateFrom.value) params.set('date_from', this.#dateFrom.value);
+    if (this.#dateTo.value) params.set('date_to', this.#dateTo.value);
+    return params.toString();
+  });
+
+  // Same scope as #requestQuery minus the tag/folder params — Folder View's tree is built by
+  // aggregating this set client-side, so folder/tag membership itself must NOT be pre-filtered out.
+  #folderViewQuery = new Computed(() => {
+    const params = new URLSearchParams();
+    if (this.#typeFilter.value !== 'all') params.set('type', this.#typeFilter.value);
+    if (this.#query.value.trim()) params.set('q', this.#query.value.trim());
     if (this.#deprecatedFilter.value === 'hide') params.set('deprecated', '0');
     else if (this.#deprecatedFilter.value === 'only') params.set('deprecated', '1');
     if (this.#pausedFilter.value === 'hide') params.set('paused', '0');
@@ -564,13 +537,23 @@ export class MemBucketApp extends LitElement {
   // default) — most users run mcp-memory-bucket with no folderfoo account
   // and shouldn't see a login prompt or pay for the network calls a
   // logged-out widget still makes (GET /me, refresh scheduling).
+  // .folderfoo-slot now lives inside <app-toolbar>'s own shadow root (see app-toolbar.ts) — that
+  // element gets torn down and recreated whenever render()'s top-level branch changes (channels vs
+  // folder-view vs flat), so this looks it up fresh via a light-DOM query for <app-toolbar> (an
+  // element, not a class selector, so it crosses into its shadow root via .shadowRoot below) rather
+  // than assuming a single persistent slot the way the pre-extraction version did.
+  #findFolderfooSlot(): Element | null {
+    return this.shadowRoot?.querySelector('app-toolbar')?.shadowRoot?.querySelector('.folderfoo-slot') ?? null;
+  }
+
   async #mountFolderfooProfileCircle() {
-    if (this.shadowRoot?.querySelector('folderfoo-profile-circle')) return; // already mounted (e.g. hot reload)
+    const slot = this.#findFolderfooSlot();
+    if (!slot || slot.querySelector('folderfoo-profile-circle')) return; // no toolbar mounted yet, or already mounted
     const { folderfooMode, folderfooHost } = await getFolderfooConfig();
     if (folderfooMode === 'off' || !folderfooHost) return;
     import(/* @vite-ignore */ `${folderfooHost}/elements/folderfoo-profile-circle.js`)
       .then(async () => {
-        await this.updateComplete; // ensure the .toolbar div exists in shadowRoot
+        await this.updateComplete; // ensure app-toolbar's shadow root exists
         const el = document.createElement('folderfoo-profile-circle');
         el.setAttribute('app-name', 'Memory Bucket');
         el.setAttribute('tenant-id', TENANT_ID);
@@ -583,7 +566,7 @@ export class MemBucketApp extends LitElement {
         // folderfoo's login/file-open modals (they render relative to this
         // tiny circle instead of the real viewport).
         (el.style as CSSStyleDeclaration & { zoom?: string }).zoom = '0.875';
-        this.shadowRoot?.querySelector('.folderfoo-slot')?.appendChild(el);
+        this.#findFolderfooSlot()?.appendChild(el);
       })
       .catch((err) => {
         // Best-effort, matching every other consuming app's posture: the
@@ -677,6 +660,15 @@ export class MemBucketApp extends LitElement {
     const res = await fetch(`/api/entries?${query}`);
     this.#results.set((await res.json()) as Entry[]);
     this.renderRoot.querySelector('result-list')?.scrollTo(0, 0);
+    // Folder View's tree-source dataset shares every filter #requestQuery builds from except
+    // tag/folder (see #folderViewQuery) - keep it in sync with the same triggers that call
+    // #refetch(), but only while Folder View is actually open, to avoid a wasted fetch otherwise.
+    if (this.#view.value === 'folder-view') this.#refetchFolderViewEntries();
+  }
+
+  async #refetchFolderViewEntries() {
+    const res = await fetch(`/api/entries?${this.#folderViewQuery.value}`);
+    this.#folderViewEntries.set((await res.json()) as Entry[]);
   }
 
   async #refetchFacets() {
@@ -703,9 +695,10 @@ export class MemBucketApp extends LitElement {
     }
   }
 
-  #setView(view: 'entries' | 'channels') {
+  #setView(view: 'entries' | 'channels' | 'folder-view') {
     this.#view.set(view);
     if (view === 'channels') this.#refetchChannels();
+    else if (view === 'folder-view') this.#refetchFolderViewEntries();
   }
 
   async #refetchChannels() {
@@ -915,56 +908,19 @@ export class MemBucketApp extends LitElement {
     await this.#refetch();
   }
 
-  #renderThemeToggle() {
-    const mode = this.#theme.value;
-    return html`
-      <button
-        class="theme-toggle"
-        title=${`Theme: ${THEME_LABEL[mode]} (click to change)`}
-        aria-label="Toggle color theme"
-        @click=${() => this.#cycleTheme()}
-      >
-        ${THEME_ICON[mode]}
-      </button>
-    `;
-  }
-
-  #renderChannelsToggle() {
-    const active = this.#view.value === 'channels';
-    return html`
-      <button
-        class="channels-toggle ${active ? 'active' : ''}"
-        title="Live memory channels"
-        @click=${() => this.#setView(active ? 'entries' : 'channels')}
-      >
-        ⛓ Channels
-      </button>
-    `;
-  }
-
-  #renderReindexToggle() {
-    const reindexing = this.#reindexing.value;
-    return html`
-      <button
-        class=${`reindex-toggle${reindexing ? ' spinning' : ''}`}
-        title=${reindexing ? 'Reindexing…' : 'Rebuild cache from disk'}
-        aria-label="Rebuild cache from disk"
-        ?disabled=${reindexing}
-        @click=${() => this.#reindex()}
-      >
-        ♻
-      </button>
-    `;
-  }
-
   #renderToolbar(showReindex: boolean) {
     return html`
-      <div class="toolbar">
-        ${showReindex ? this.#renderReindexToggle() : ''}
-        ${this.#renderChannelsToggle()}
-        ${this.#renderThemeToggle()}
-        <div class="folderfoo-slot"></div>
-      </div>
+      <app-toolbar
+        .showReindex=${showReindex}
+        .reindexing=${this.#reindexing.value}
+        .channelsActive=${this.#view.value === 'channels'}
+        .folderViewActive=${this.#view.value === 'folder-view'}
+        .theme=${this.#theme.value}
+        .onReindex=${() => this.#reindex()}
+        .onToggleChannels=${() => this.#setView(this.#view.value === 'channels' ? 'entries' : 'channels')}
+        .onToggleFolderView=${() => this.#setView(this.#view.value === 'folder-view' ? 'entries' : 'folder-view')}
+        .onCycleTheme=${() => this.#cycleTheme()}
+      ></app-toolbar>
     `;
   }
 
@@ -983,6 +939,26 @@ export class MemBucketApp extends LitElement {
           .onSelect=${(name: string) => this.#selectChannel(name)}
           .onRefresh=${() => this.#refetchChannels()}
         ></channel-view>
+      `;
+    }
+
+    if (this.#view.value === 'folder-view') {
+      return html`
+        <folder-view
+          .entries=${this.#folderViewEntries.value}
+          .allFolders=${allFolders}
+          .facets=${facets}
+          .typeFilter=${this.#typeFilter.value}
+          .onTypeChange=${(t: TypeFilter) => this.#setType(t)}
+          .onChanged=${() => {
+            this.#refetch();
+            this.#refetchFacets();
+          }}
+          .onDateClick=${(d: string) => this.#setDateFilter(d)}
+          .onKeyClick=${(key: string) => this.#setSearch(key)}
+        >
+          <div slot="toolbar">${this.#renderToolbar(true)}</div>
+        </folder-view>
       `;
     }
 
