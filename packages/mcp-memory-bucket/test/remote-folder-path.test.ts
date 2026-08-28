@@ -30,9 +30,19 @@ function tmpDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-function mockFolderfoo(calls: string[]) {
+// assertRemoteFolderExists() (folderfoo-client.ts) calls GET /folders before any write to a
+// non-empty folderPath, to catch a folder deleted server-side since connect - every mock here
+// must answer it with a list containing whatever folderPath the test under it writes to.
+function mockFolderList(folders: string[]) {
+  return { ok: true, status: 200, json: async () => folders.map((path) => ({ path, createdAt: new Date().toISOString() })) } as Response;
+}
+
+function mockFolderfoo(calls: string[], folders: string[] = ['memz', 'work/qa']) {
   return async (url: string, init?: RequestInit) => {
     calls.push(url);
+    if (url.endsWith('/folders')) {
+      return mockFolderList(folders);
+    }
     if (url.includes('/save/')) {
       return { ok: true, status: 200, json: async () => ({ message: 'saved' }) } as Response;
     }
@@ -217,9 +227,12 @@ test('MemoryRepository.create for a LOCAL folder keeps the normal hyphenated id 
 // symptom that surfaced this bug (the LOCAL mirror looked edited, but each
 // edit's real tags value got buried one layer deeper instead of updating
 // what folderfoo already had).
-function mockFolderfooWithFrontmatteredContent(calls: string[], fileContent: { current: string }) {
+function mockFolderfooWithFrontmatteredContent(calls: string[], fileContent: { current: string }, folders: string[] = ['memz']) {
   return async (url: string, init?: RequestInit) => {
     calls.push(url);
+    if (url.endsWith('/folders')) {
+      return mockFolderList(folders);
+    }
     if (url.includes('/save/')) {
       fileContent.current = String(init?.body ?? '');
       return { ok: true, status: 200, json: async () => ({ message: 'saved' }) } as Response;

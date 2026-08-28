@@ -436,7 +436,6 @@ export class MemBucketApp extends LitElement {
     document.addEventListener('folderfoo-file-open', this.#boundOnFolderfooFileOpen);
     document.addEventListener('folderfoo-folder-changed', this.#boundOnFolderfooFolderChanged);
     window.addEventListener('folderfoo-auth-change', this.#boundOnFolderfooAuthChange);
-    this.#mountFolderfooProfileCircle();
     // Covers the case where the browser already holds a valid folderfoo
     // session when this page loads (e.g. the server was restarted, or this
     // is a fresh tab) - no folderfoo-auth-change event fires for "already
@@ -548,7 +547,14 @@ export class MemBucketApp extends LitElement {
 
   async #mountFolderfooProfileCircle() {
     const slot = this.#findFolderfooSlot();
-    if (!slot || slot.querySelector('folderfoo-profile-circle')) return; // no toolbar mounted yet, or already mounted
+    // Bails when there's no toolbar yet, a circle is already mounted, OR this exact slot instance
+    // was already tried (marked below) - updated() (see its call site) re-invokes this on every
+    // render, and without this marker a genuinely-unreachable folderfoo host would re-fetch the
+    // widget module on every keystroke/state change instead of failing once. The marker lives on
+    // the slot itself, so it resets automatically when <app-toolbar> (and its slot) gets torn down
+    // and recreated by a view switch, which is exactly when a retry is wanted.
+    if (!slot || slot.querySelector('folderfoo-profile-circle') || slot.hasAttribute('data-ff-attempted')) return;
+    slot.setAttribute('data-ff-attempted', '');
     const { folderfooMode, folderfooHost } = await getFolderfooConfig();
     if (folderfooMode === 'off' || !folderfooHost) return;
     import(/* @vite-ignore */ `${folderfooHost}/elements/folderfoo-profile-circle.js`)
@@ -922,6 +928,16 @@ export class MemBucketApp extends LitElement {
         .onCycleTheme=${() => this.#cycleTheme()}
       ></app-toolbar>
     `;
+  }
+
+  updated() {
+    // Runs after every render, not just the first: connectedCallback() fires before this
+    // element's own first render, so <app-toolbar> (and its .folderfoo-slot) doesn't exist in
+    // the DOM yet at that point - calling this from connectedCallback raced #findFolderfooSlot()
+    // and lost every time. updated() also re-mounts after <app-toolbar> gets torn down and
+    // recreated by a render()-top-level-branch change (channels vs folder-view vs flat); the
+    // already-mounted guard inside #mountFolderfooProfileCircle() makes repeat calls a no-op.
+    this.#mountFolderfooProfileCircle();
   }
 
   render() {

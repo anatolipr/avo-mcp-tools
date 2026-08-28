@@ -13,13 +13,20 @@ function writeConfig(baseDir: string, contents: unknown): void {
   fs.writeFileSync(path.join(baseDir, 'memory-bucket.config.json'), JSON.stringify(contents));
 }
 
+// loadConfig() now defaults to ~/.mem-mcp regardless of cwd (see config.ts's defaultBaseDir) -
+// tests must opt into an isolated tmp dir the same documented way any real caller would,
+// via --memory-dir, rather than relying on the cwd argument to double as the store location.
+function load(baseDir: string, argv: string[] = []): ReturnType<typeof loadConfig> {
+  return loadConfig(baseDir, [...argv, '--memory-dir', baseDir]);
+}
+
 test('a remote skill_sources entry resolves to a NamedFolder whose path is a local mirror dir, not the raw config value', () => {
   const baseDir = tmpBaseDir();
   writeConfig(baseDir, {
     skill_sources: [{ name: 'team-qa', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa', mode: 'dev', username: 'testuser' } }],
   });
 
-  const config = loadConfig(baseDir, []);
+  const config = load(baseDir, []);
   assert.equal(config.skillFolders.length, 1);
   assert.equal(config.skillFolders[0].name, 'team-qa');
   // The resolved path must be a real local directory under baseDir, NOT
@@ -36,7 +43,7 @@ test('a remote entry populates remoteSkillFolders/remoteMemoryFolders with its f
     memory_sources: [{ name: 'team-plans', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'plans', mode: 'dev', username: 'testuser' } }],
   });
 
-  const config = loadConfig(baseDir, []);
+  const config = load(baseDir, []);
   assert.equal(config.remoteSkillFolders.length, 1);
   assert.deepEqual(config.remoteSkillFolders[0], {
     name: 'team-qa',
@@ -56,7 +63,7 @@ test('a local (non-remote) source entry produces an empty remoteSkillFolders lis
   fs.mkdirSync(path.join(baseDir, 'skills'));
   writeConfig(baseDir, { skill_sources: ['./skills'] });
 
-  const config = loadConfig(baseDir, []);
+  const config = load(baseDir, []);
   assert.equal(config.remoteSkillFolders.length, 0);
   assert.equal(config.skillFolders[0].path, path.join(baseDir, 'skills'));
 });
@@ -68,7 +75,7 @@ test('local and remote sources coexist in the same skill_sources list', () => {
     skill_sources: ['./skills', { name: 'team-qa', remote: { server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa', mode: 'dev', username: 'testuser' } }],
   });
 
-  const config = loadConfig(baseDir, []);
+  const config = load(baseDir, []);
   assert.equal(config.skillFolders.length, 2);
   assert.equal(config.remoteSkillFolders.length, 1);
   assert.equal(config.remoteSkillFolders[0].name, 'team-qa');
@@ -83,7 +90,7 @@ test('two remote entries for the same name produce distinct mirror dirs from dis
     ],
   });
 
-  const config = loadConfig(baseDir, []);
+  const config = load(baseDir, []);
   const paths = config.skillFolders.map((f) => f.path);
   assert.equal(new Set(paths).size, 2);
 });
@@ -93,7 +100,7 @@ test('folderfooMode defaults to "off" with no host, when no flag/env var is set'
   const originalEnv = process.env.FOLDERFOO_MODE;
   delete process.env.FOLDERFOO_MODE;
   try {
-    const config = loadConfig(baseDir, []);
+    const config = load(baseDir, []);
     assert.equal(config.folderfooMode, 'off');
     assert.equal(config.folderfooHost, null);
   } finally {
@@ -103,14 +110,14 @@ test('folderfooMode defaults to "off" with no host, when no flag/env var is set'
 
 test('--folderfoo-mode dev resolves to the localhost:3000 dev host', () => {
   const baseDir = tmpBaseDir();
-  const config = loadConfig(baseDir, ['node', 'server.js', '--folderfoo-mode', 'dev']);
+  const config = load(baseDir, ['node', 'server.js', '--folderfoo-mode', 'dev']);
   assert.equal(config.folderfooMode, 'dev');
   assert.equal(config.folderfooHost, 'http://localhost:3000');
 });
 
 test('--folderfoo-mode cloud resolves to the hosted files.cuul.cc host', () => {
   const baseDir = tmpBaseDir();
-  const config = loadConfig(baseDir, ['node', 'server.js', '--folderfoo-mode', 'cloud']);
+  const config = load(baseDir, ['node', 'server.js', '--folderfoo-mode', 'cloud']);
   assert.equal(config.folderfooMode, 'cloud');
   assert.equal(config.folderfooHost, 'https://files.cuul.cc');
 });
@@ -120,7 +127,7 @@ test('FOLDERFOO_MODE env var is used when no --folderfoo-mode flag is passed', (
   const originalEnv = process.env.FOLDERFOO_MODE;
   process.env.FOLDERFOO_MODE = 'dev';
   try {
-    const config = loadConfig(baseDir, []);
+    const config = load(baseDir, []);
     assert.equal(config.folderfooMode, 'dev');
     assert.equal(config.folderfooHost, 'http://localhost:3000');
   } finally {
@@ -134,7 +141,7 @@ test('--folderfoo-mode flag takes precedence over FOLDERFOO_MODE env var', () =>
   const originalEnv = process.env.FOLDERFOO_MODE;
   process.env.FOLDERFOO_MODE = 'cloud';
   try {
-    const config = loadConfig(baseDir, ['node', 'server.js', '--folderfoo-mode', 'dev']);
+    const config = load(baseDir, ['node', 'server.js', '--folderfoo-mode', 'dev']);
     assert.equal(config.folderfooMode, 'dev');
   } finally {
     if (originalEnv === undefined) delete process.env.FOLDERFOO_MODE;
@@ -144,7 +151,7 @@ test('--folderfoo-mode flag takes precedence over FOLDERFOO_MODE env var', () =>
 
 test('an unrecognized --folderfoo-mode value falls back to "off" rather than throwing', () => {
   const baseDir = tmpBaseDir();
-  const config = loadConfig(baseDir, ['node', 'server.js', '--folderfoo-mode', 'nonsense']);
+  const config = load(baseDir, ['node', 'server.js', '--folderfoo-mode', 'nonsense']);
   assert.equal(config.folderfooMode, 'off');
   assert.equal(config.folderfooHost, null);
 });
