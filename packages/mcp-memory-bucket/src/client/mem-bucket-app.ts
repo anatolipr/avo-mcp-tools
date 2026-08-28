@@ -353,7 +353,8 @@ export class MemBucketApp extends LitElement {
   #splitPct = new Signal<number>(loadSplitPct());
   #folderfooOpenStatus = new Signal<string>(''); // transient banner for the folderfoo-file-open handler's result/miss message
   #dragging = new Signal<boolean>(false);
-  #sort = new Signal<string>(this.#initialFilters.sort ?? 'mtime_desc');
+  // '' means "no explicit user choice" — server defaults to relevance when q is set, mtime_desc otherwise.
+  #sort = new Signal<string>(this.#initialFilters.sort ?? '');
   #deprecatedFilter = new Signal<TriState>(this.#initialFilters.deprecatedFilter ?? 'all');
   #pausedFilter = new Signal<TriState>(this.#initialFilters.pausedFilter ?? 'all');
   #dateFrom = new Signal<string>(this.#initialFilters.dateFrom ?? '');
@@ -426,7 +427,7 @@ export class MemBucketApp extends LitElement {
     if (this.#query.value.trim()) params.set('q', this.#query.value.trim());
     for (const tag of this.#activeTags.value) params.append('tag', tag);
     for (const folder of this.#activeFolders.value) params.append('folder', folder);
-    if (this.#sort.value !== 'mtime_desc') params.set('sort', this.#sort.value);
+    if (this.#sort.value) params.set('sort', this.#sort.value);
     if (this.#deprecatedFilter.value === 'hide') params.set('deprecated', '0');
     else if (this.#deprecatedFilter.value === 'only') params.set('deprecated', '1');
     if (this.#pausedFilter.value === 'hide') params.set('paused', '0');
@@ -1114,7 +1115,11 @@ export class MemBucketApp extends LitElement {
               : ''}
           </div>
           <span class="filter-label">Sort:</span>
-          <select .value=${this.#sort.value} @change=${(e: Event) => this.#onSortChange(e)}>
+          <select
+            .value=${this.#sort.value || (this.#query.value.trim() ? 'relevance' : 'mtime_desc')}
+            @change=${(e: Event) => this.#onSortChange(e)}
+          >
+            ${this.#query.value.trim() ? html`<option value="relevance">Relevance</option>` : ''}
             <option value="mtime_desc">Recently touched</option>
             <option value="mtime_asc">Least recently touched</option>
             <option value="created_at_asc">Oldest first</option>

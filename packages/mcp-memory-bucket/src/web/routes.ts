@@ -80,7 +80,9 @@ function queryEntries(db: Database.Database, memoryRepo: MemoryRepository, req: 
 
   // Always compute FTS matches when q is set, even on a keyMatch — skills still need this to stay
   // filtered by q (they have no key concept, so keyMatch only bypasses filtering for memory_docs below).
-  const matchedIds: { skills: Set<string>; memory_docs: Set<string> } | null = q ? matchSearch(db, q) : null;
+  const matchedIds: { skills: Set<string>; memory_docs: Set<string>; rank: Map<string, number> } | null = q
+    ? matchSearch(db, q)
+    : null;
   if (q && !keyMatch && matchedIds && matchedIds.skills.size === 0 && matchedIds.memory_docs.size === 0) {
     return [];
   }
@@ -114,8 +116,19 @@ function queryEntries(db: Database.Database, memoryRepo: MemoryRepository, req: 
     );
   }
 
-  const sort = (req.query.sort as string | undefined) ?? 'mtime_desc';
+  // Default sort is relevance (bm25) when a search query is active — otherwise a good match with
+  // an old mtime (e.g. "grilling") can sink below unrelated recently-touched entries and look like
+  // it's missing. Falls back to mtime_desc when there's no query to rank by. An explicit `sort`
+  // param always wins over this default.
+  const sort = (req.query.sort as string | undefined) ?? (q ? 'relevance' : 'mtime_desc');
+  const rankOf = (r: EntryRow) => matchedIds?.rank.get(r._table === 'skills' ? skillKey(r.folder, r.id) : r.id);
   results.sort((a, b) => {
+    if (sort === 'relevance') {
+      const ra = rankOf(a);
+      const rb = rankOf(b);
+      if (ra !== undefined && rb !== undefined && ra !== rb) return ra - rb; // bm25: lower is better
+      return b.mtime_ms - a.mtime_ms; // tie or no-rank (e.g. keyMatch-only memory_docs): fall back to mtime
+    }
     if (sort === 'mtime_asc') return a.mtime_ms - b.mtime_ms;
     if (sort === 'name_asc') return a.name.localeCompare(b.name);
     if (sort === 'created_at_asc') {
@@ -192,7 +205,10 @@ function queryTable(
     // `id IN (...)` could match the wrong folder's same-named skill once names are folder-scoped.
     // memory_docs restricts on plain id, unchanged (its ids never collide across folders).
     if (table === 'skills') {
-      where += ` AND (folder || '${SKILL_KEY_SEP}' || id) IN (${[...restrictToIds].map(() => '?').join(', ')})`;
+      // SKILL_KEY_SEP is a NUL byte, which can't be embedded in a single-quoted SQL string literal
+      // (SQLite's tokenizer rejects it) — bind it as a parameter instead of interpolating it into the query text.
+      where += ` AND (folder || ? || id) IN (${[...restrictToIds].map(() => '?').join(', ')})`;
+      params.push(SKILL_KEY_SEP);
     } else {
       where += ` AND id IN (${[...restrictToIds].map(() => '?').join(', ')})`;
     }
@@ -313,24 +329,36 @@ function matchDateRange(
   return { skills, memory_docs };
 }
 
-/** Runs the FTS5 query once and buckets matching ids by source table. */
-function matchSearch(db: Database.Database, q: string): { skills: Set<string>; memory_docs: Set<string> } {
+/**
+ * Runs the FTS5 query once, buckets matching ids by source table, and records each match's bm25
+ * rank (lower = more relevant) keyed the same way restrictToIds is (skillKey for skills, plain id
+ * for memory_docs) — used to sort search results by relevance instead of mtime by default.
+ */
+function matchSearch(
+  db: Database.Database,
+  q: string
+): { skills: Set<string>; memory_docs: Set<string>; rank: Map<string, number> } {
   const skills = new Set<string>();
   const memory_docs = new Set<string>();
-  let rows: Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string; ref_folder: string }>;
+  const rank = new Map<string, number>();
+  let rows: Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string; ref_folder: string; score: number }>;
   try {
     rows = db
-      .prepare(`SELECT ref_table, ref_id, ref_folder FROM search_index WHERE search_index MATCH ? ORDER BY rank`)
+      .prepare(
+        `SELECT ref_table, ref_id, ref_folder, bm25(search_index) AS score FROM search_index WHERE search_index MATCH ? ORDER BY rank`
+      )
       .all(sanitizeFtsQuery(q)) as typeof rows;
   } catch {
     // Bad FTS5 query syntax (e.g. a bare quote) — treat as no matches rather than 500ing.
-    return { skills, memory_docs };
+    return { skills, memory_docs, rank };
   }
   for (const row of rows) {
-    if (row.ref_table === 'skills') skills.add(skillKey(row.ref_folder, row.ref_id));
-    else memory_docs.add(row.ref_id);
+    const key = row.ref_table === 'skills' ? skillKey(row.ref_folder, row.ref_id) : row.ref_id;
+    if (row.ref_table === 'skills') skills.add(key);
+    else memory_docs.add(key);
+    rank.set(key, row.score); // bm25 is lower-is-better; stored as-is, compared ascending below
   }
-  return { skills, memory_docs };
+  return { skills, memory_docs, rank };
 }
 
 function buildFacets(db: Database.Database, type: EntryType) {

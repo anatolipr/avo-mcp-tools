@@ -99,7 +99,16 @@ export class ResultList extends LitElement {
     .desc { font-size: 12px; opacity: 0.8; margin-top: 3px; }
     .tags { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
     .tag { font-size: 10px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 6px; }
-    .type-badge { font-size: 10px; text-transform: uppercase; opacity: 0.6; }
+    .type-badge {
+      font-size: 10px; text-transform: uppercase; font-weight: 700; flex: 0 0 auto;
+      border-radius: 4px; padding: 1px 5px; display: inline-flex; align-items: center; gap: 3px;
+    }
+    .type-badge.skill {
+      border: 1px solid var(--purple); color: var(--purple-fg); background: var(--purple-tint);
+    }
+    .type-badge.memory {
+      border: 1px solid var(--accent); color: var(--accent); background: var(--accent-tint);
+    }
     .folder-badge {
       font-size: 10px; text-transform: uppercase; opacity: 0.9; border: 1px solid var(--purple);
       color: var(--purple-fg); background: var(--purple-tint); border-radius: 4px; padding: 0 4px;
@@ -159,12 +168,16 @@ export class ResultList extends LitElement {
         />
         <div class="row-body">
           <div class="top">
-            <span class="name">${r.name}</span>
+            <span class="name">
+              <span class="type-badge ${r._table === 'skills' ? 'skill' : 'memory'}"
+                >${r._table === 'skills' ? '⚡ skill' : '📝 memory'}</span
+              >
+              ${r.name}
+            </span>
             <span class="meta">${formatAge(r.created_at)} · ${r.owner ?? '—'} · ${r.status}</span>
           </div>
           <div class="desc">${r.description}</div>
           <div class="tags">
-            <span class="type-badge">${r._table === 'skills' ? 'skill' : 'memory'}</span>
             ${this.showFolder && r.folder ? html`<span class="folder-badge">📁 ${r.folder}</span>` : ''}
             ${r.deprecated ? html`<span class="deprecated-badge">deprecated</span>` : ''}
             ${r.paused ? html`<span class="paused-badge">paused</span>` : ''}
