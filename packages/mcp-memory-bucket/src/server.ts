@@ -20,7 +20,8 @@ import { registerUiTool } from './web/ui-tool.js';
 import { registerMemoryChannelTools } from './channels/tools.js';
 import { startChannelSweep } from './channels/store.js';
 import { startRemotePolling, type RemotePollerHandle } from './remote/remote-sync.js';
-import { IdentityTracker } from './remote/identity.js';
+import { IdentityTracker, decodeUsername } from './remote/identity.js';
+import { getCredential } from './remote/credentials.js';
 
 // server.ts is rebuilt from `buildMcpServer()` on every /mcp request (see below),
 // so tool schemas (which conditionally include `folder` based on folder count) always
@@ -43,6 +44,21 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 8767;
 const config = loadConfig();
 const db = openCache(config.cacheDbPath);
 const identity = new IdentityTracker(config.folderfooMode);
+// Restore the logged-in identity from a previously saved credential so a
+// restarted process doesn't hide every remote folder (see isFolderVisible)
+// until the user re-logs-in via the web UI - the JWT itself, not the config
+// file's stored username, is the source of truth here since it's what
+// login.ts's own handler decodes to call identity.setUsername() normally.
+if (config.folderfooHost) {
+  const credential = getCredential(config.baseDir, config.folderfooHost);
+  if (credential) {
+    try {
+      identity.setUsername(decodeUsername(credential.jwt));
+    } catch {
+      // malformed/stale token - leave identity logged out, same as no credential at all
+    }
+  }
+}
 
 // Built ONCE and shared by reference with SkillRepository below — registerRemoteFolder/addFolder
 // push into this same array in place, so skillSpec.sources (used by initialScan/watchSources/
