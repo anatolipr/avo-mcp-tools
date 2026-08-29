@@ -18,10 +18,20 @@ export function readMarkdownFile<TFrontmatter>(filePath: string): ParsedMarkdown
   };
 }
 
-export function writeMarkdownFile(filePath: string, frontmatter: Record<string, unknown>, body: string): void {
+/**
+ * Pure formatting step of writeMarkdownFile, split out so a caller can compute the exact bytes a
+ * doc/skill write would produce WITHOUT touching disk — needed to push that same content to a
+ * remote (folderfoo-backed) folder before writing locally, per the "remote is the source of truth"
+ * ordering (see remote/write-order.ts): the remote call must go first, so it can't read the
+ * content back off a local file that doesn't exist yet.
+ */
+export function formatMarkdownFile(frontmatter: Record<string, unknown>, body: string): string {
   // js-yaml throws on `undefined` values rather than omitting them, so strip
   // optional-but-unset fields (e.g. skill license/compatibility) before dump.
   const cleaned = Object.fromEntries(Object.entries(frontmatter).filter(([, v]) => v !== undefined));
-  const content = matter.stringify(`${body}\n`, cleaned);
-  fs.writeFileSync(filePath, content, 'utf-8');
+  return matter.stringify(`${body}\n`, cleaned);
+}
+
+export function writeMarkdownFile(filePath: string, frontmatter: Record<string, unknown>, body: string): void {
+  fs.writeFileSync(filePath, formatMarkdownFile(frontmatter, body), 'utf-8');
 }

@@ -13,6 +13,12 @@ import { TENANT_ID, getFolderfooConfig } from './server-config.js';
 import { parseFolderfooAddress } from './folderfoo-address.js';
 import { currentIdentity, startIdentityStream } from './identity-stream.js';
 
+// Set once the folderfoo-profile-circle widget module has been dynamically imported (module
+// execution, including its customElements.define, only happens once per URL) - lets later mount
+// attempts (see #mountFolderfooProfileCircle) create the element synchronously instead of racing
+// an async import()/getFolderfooConfig() chain against a fresh SignalWatcher-driven re-render.
+let folderfooWidgetLoaded = false;
+
 const TYPE_OPTIONS: Array<{ value: TypeFilter; label: string }> = [
   { value: 'all', label: 'All' },
   { value: 'skill', label: 'Skills' },
@@ -95,8 +101,11 @@ function loadFilterState(): Partial<FilterState> {
 
 export class MemBucketApp extends LitElement {
   static styles = css`
-    :host { display: flex; flex-direction: column; height: 100vh; }
-    app-toolbar { margin-left: auto; flex-shrink: 0; }
+    :host { display: flex; flex-direction: column; height: 100vh; position: relative; }
+    /* Overlays whichever header row #renderBody() renders for the current mode (.folders-bar,
+       .toolbar-bar, or folder-view's own .mode-row) - all three share the same 10px/16px padding,
+       so this lines up with them pixel-for-pixel without needing to sit inside any of them. */
+    .header-toolbar { position: absolute; top: 10px; right: 16px; z-index: 1; }
     .filters {
       padding: 12px 16px;
       border-bottom: 1px solid var(--border);
@@ -199,12 +208,14 @@ export class MemBucketApp extends LitElement {
       left: -3px; right: -3px;
     }
     label.small { font-size: 12px; opacity: 0.7; }
+    /* padding-right reserves room for .header-toolbar (an absolutely-positioned overlay, so it
+       takes no space in this row's own flex layout) so wrapped folder chips don't run under it. */
     .folders-bar {
       display: flex;
       gap: 6px;
       align-items: center;
       flex-wrap: wrap;
-      padding: 10px 16px;
+      padding: 10px 320px 10px 16px;
       border-bottom: 1px solid var(--border);
       background: var(--bg-subtle);
     }
@@ -536,43 +547,58 @@ export class MemBucketApp extends LitElement {
   // default) — most users run mcp-memory-bucket with no folderfoo account
   // and shouldn't see a login prompt or pay for the network calls a
   // logged-out widget still makes (GET /me, refresh scheduling).
-  // .folderfoo-slot now lives inside <app-toolbar>'s own shadow root (see app-toolbar.ts) — that
-  // element gets torn down and recreated whenever render()'s top-level branch changes (channels vs
-  // folder-view vs flat), so this looks it up fresh via a light-DOM query for <app-toolbar> (an
-  // element, not a class selector, so it crosses into its shadow root via .shadowRoot below) rather
-  // than assuming a single persistent slot the way the pre-extraction version did.
+  // .folderfoo-slot lives inside <app-toolbar>'s own shadow root (see app-toolbar.ts) - a
+  // light-DOM query for <app-toolbar> (an element, not a class selector, so it crosses into its
+  // shadow root via .shadowRoot below) rather than caching the slot reference once, since
+  // app-toolbar.ts's own font-inheritance requirements (see its file-level comment) mean this
+  // stays the single source of truth for "where is the toolbar right now."
   #findFolderfooSlot(): Element | null {
     return this.shadowRoot?.querySelector('app-toolbar')?.shadowRoot?.querySelector('.folderfoo-slot') ?? null;
   }
 
+  #appendFolderfooCircle(slot: Element) {
+    const el = document.createElement('folderfoo-profile-circle');
+    el.setAttribute('app-name', 'Memory Bucket');
+    el.setAttribute('tenant-id', TENANT_ID);
+    // :host in folderfoo's shadow DOM is `all: initial`, and its .avatar
+    // is a fixed 32px sized independently of :host, so shrinking it to
+    // match the 28px theme/reindex toggles needs a scale applied as an
+    // inline style on the host element. Using `zoom` (not `transform`)
+    // here specifically: `transform` makes the host a new containing
+    // block for its `position: fixed` descendants, which breaks
+    // folderfoo's login/file-open modals (they render relative to this
+    // tiny circle instead of the real viewport).
+    (el.style as CSSStyleDeclaration & { zoom?: string }).zoom = '0.875';
+    slot.appendChild(el);
+  }
+
   async #mountFolderfooProfileCircle() {
     const slot = this.#findFolderfooSlot();
-    // Bails when there's no toolbar yet, a circle is already mounted, OR this exact slot instance
-    // was already tried (marked below) - updated() (see its call site) re-invokes this on every
-    // render, and without this marker a genuinely-unreachable folderfoo host would re-fetch the
-    // widget module on every keystroke/state change instead of failing once. The marker lives on
-    // the slot itself, so it resets automatically when <app-toolbar> (and its slot) gets torn down
-    // and recreated by a view switch, which is exactly when a retry is wanted.
-    if (!slot || slot.querySelector('folderfoo-profile-circle') || slot.hasAttribute('data-ff-attempted')) return;
+    // Bails when there's no toolbar yet or a circle is already mounted. <app-toolbar> is a single
+    // persistent element (see render()), so in practice this only does real work once - but stays
+    // defensive against being called more than once in a row (e.g. multiple renders before the
+    // async work below settles) by finding/creating the circle synchronously wherever the CURRENT
+    // slot is when its async work resolves, rather than trusting the slot instance captured here.
+    if (!slot || slot.querySelector('folderfoo-profile-circle')) return;
+    if (folderfooWidgetLoaded) {
+      // Already imported once (module execution — including customElements.define — only happens
+      // once per URL): mount synchronously, no async gap for a re-render to race past.
+      this.#appendFolderfooCircle(slot);
+      return;
+    }
+    if (slot.hasAttribute('data-ff-attempted')) return;
     slot.setAttribute('data-ff-attempted', '');
     const { folderfooMode, folderfooHost } = await getFolderfooConfig();
     if (folderfooMode === 'off' || !folderfooHost) return;
     import(/* @vite-ignore */ `${folderfooHost}/elements/folderfoo-profile-circle.js`)
       .then(async () => {
+        folderfooWidgetLoaded = true;
         await this.updateComplete; // ensure app-toolbar's shadow root exists
-        const el = document.createElement('folderfoo-profile-circle');
-        el.setAttribute('app-name', 'Memory Bucket');
-        el.setAttribute('tenant-id', TENANT_ID);
-        // :host in folderfoo's shadow DOM is `all: initial`, and its .avatar
-        // is a fixed 32px sized independently of :host, so shrinking it to
-        // match the 28px theme/reindex toggles needs a scale applied as an
-        // inline style on the host element. Using `zoom` (not `transform`)
-        // here specifically: `transform` makes the host a new containing
-        // block for its `position: fixed` descendants, which breaks
-        // folderfoo's login/file-open modals (they render relative to this
-        // tiny circle instead of the real viewport).
-        (el.style as CSSStyleDeclaration & { zoom?: string }).zoom = '0.875';
-        this.#findFolderfooSlot()?.appendChild(el);
+        // The view may have switched (tearing down this exact <app-toolbar>/slot instance) one or
+        // more times while the import above was in flight — re-look-up the CURRENTLY live slot
+        // rather than trusting the one captured at the top of this call, which may be long gone.
+        const liveSlot = this.#findFolderfooSlot();
+        if (liveSlot && !liveSlot.querySelector('folderfoo-profile-circle')) this.#appendFolderfooCircle(liveSlot);
       })
       .catch((err) => {
         // Best-effort, matching every other consuming app's posture: the
@@ -914,7 +940,14 @@ export class MemBucketApp extends LitElement {
     await this.#refetch();
   }
 
-  #renderToolbar(showReindex: boolean) {
+  // Rendered exactly once, at a fixed position in the top-level template (see render()) rather
+  // than inline inside each mode branch - so <app-toolbar> is never one of several structurally
+  // different html`` templates and Lit never tears it down/recreates it on a mode switch. That
+  // matters beyond visual flicker: the folderfoo-profile-circle widget mounted into its
+  // .folderfoo-slot (see #mountFolderfooProfileCircle) does real async work (module import,
+  // config fetch) that a same-tick teardown/recreate cycle could otherwise race and lose.
+  #renderToolbar() {
+    const showReindex = this.#view.value !== 'channels' && this.#foldersLoaded.value && this.#allFolders().length > 0;
     return html`
       <app-toolbar
         .showReindex=${showReindex}
@@ -934,19 +967,28 @@ export class MemBucketApp extends LitElement {
     // Runs after every render, not just the first: connectedCallback() fires before this
     // element's own first render, so <app-toolbar> (and its .folderfoo-slot) doesn't exist in
     // the DOM yet at that point - calling this from connectedCallback raced #findFolderfooSlot()
-    // and lost every time. updated() also re-mounts after <app-toolbar> gets torn down and
-    // recreated by a render()-top-level-branch change (channels vs folder-view vs flat); the
-    // already-mounted guard inside #mountFolderfooProfileCircle() makes repeat calls a no-op.
+    // and lost every time. <app-toolbar> is now a single persistent element (see render()) that's
+    // never torn down by a mode switch, so this is a one-time mount in practice; the
+    // already-mounted guard inside #mountFolderfooProfileCircle() just makes repeat calls harmless.
     this.#mountFolderfooProfileCircle();
   }
 
+  // <app-toolbar> lives here, outside #renderBody()'s mode branches, so it's always the same
+  // element in the same DOM position no matter which mode is active - see #renderToolbar's
+  // comment for why that matters beyond visual flicker. `.header-toolbar` positions it to line up
+  // visually with each mode's own header row (folders-bar / toolbar-bar / folder-view's mode-row),
+  // which all share the same height and padding (see their CSS).
   render() {
+    return html` <div class="header-toolbar">${this.#renderToolbar()}</div>${this.#renderBody()} `;
+  }
+
+  #renderBody() {
     const facets = this.#facets.value;
     const allFolders = this.#allFolders();
 
     if (this.#view.value === 'channels') {
       return html`
-        <div class="toolbar-bar">${this.#renderToolbar(false)}</div>
+        <div class="toolbar-bar"></div>
         <channel-view
           .channels=${this.#channels.value}
           .selected=${this.#selectedChannel.value}
@@ -972,15 +1014,13 @@ export class MemBucketApp extends LitElement {
           }}
           .onDateClick=${(d: string) => this.#setDateFilter(d)}
           .onKeyClick=${(key: string) => this.#setSearch(key)}
-        >
-          <div slot="toolbar">${this.#renderToolbar(true)}</div>
-        </folder-view>
+        ></folder-view>
       `;
     }
 
     if (this.#foldersLoaded.value && allFolders.length === 0 && !this.#showAddFolder.value) {
       return html`
-        <div class="toolbar-bar">${this.#renderToolbar(false)}</div>
+        <div class="toolbar-bar"></div>
         <div class="first-run">
           <h1>No folders configured yet</h1>
           <p>
@@ -1024,7 +1064,6 @@ export class MemBucketApp extends LitElement {
           )}
           <button class="add-folder-btn" @click=${() => this.#showAddFolder.set(true)}>+ Add folder</button>
         </div>
-        ${this.#renderToolbar(true)}
       </div>
       ${this.#folderfooOpenStatus.value
         ? html`

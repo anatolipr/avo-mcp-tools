@@ -15,21 +15,24 @@ function assertFileSizeOk(file_path: string): void {
 }
 
 export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRepository): void {
+  const folderSchema = { folder: z.string().optional().describe('which configured folder the doc lives in — required when more than one is configured') };
+
   mcp.tool(
     'attachment_add',
     'Attaches a raw file (JSON, image, XML, etc.) to a memory doc or skill. Auto-renames on filename collision.',
     {
       kind: kindSchema,
-      doc: z.string().describe('memory doc id or skill name'),
+      ...folderSchema,
+      doc: z.string().describe('memory doc filename or skill name'),
       filename: z.string(),
       file_path: z.string().describe('local filesystem path to the file to attach'),
     },
-    async ({ kind, doc, filename, file_path }: any) => {
+    async ({ kind, folder, doc, filename, file_path }: any) => {
       try {
         assertFileSizeOk(file_path);
         const data = fs.readFileSync(file_path);
-        const entry = await attachRepo.add(kind, doc, filename, data);
-        const absolute_path = await attachRepo.absolutePathFor(kind, doc, entry.filename);
+        const entry = await attachRepo.add(kind, folder, doc, filename, data);
+        const absolute_path = await attachRepo.absolutePathFor(kind, folder, doc, entry.filename);
         return { content: [{ type: 'text', text: JSON.stringify({ ...entry, absolute_path }, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -40,12 +43,12 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
   mcp.tool(
     'attachment_get',
     'Returns the on-disk path (not content) of an attachment, plus its metadata. Use Read on the returned absolute_path for the content.',
-    { kind: kindSchema, doc: z.string(), filename: z.string() },
-    async ({ kind, doc, filename }: any) => {
+    { kind: kindSchema, ...folderSchema, doc: z.string(), filename: z.string() },
+    async ({ kind, folder, doc, filename }: any) => {
       try {
-        const entry = await attachRepo.get(kind, doc, filename);
+        const entry = await attachRepo.get(kind, folder, doc, filename);
         if (!entry) throw new Error(`attachment "${filename}" not found`);
-        const absolute_path = await attachRepo.absolutePathFor(kind, doc, entry.filename);
+        const absolute_path = await attachRepo.absolutePathFor(kind, folder, doc, entry.filename);
         return { content: [{ type: 'text', text: JSON.stringify({ ...entry, absolute_path }, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -56,13 +59,13 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
   mcp.tool(
     'attachment_update',
     "Replaces an attachment's content in place.",
-    { kind: kindSchema, doc: z.string(), filename: z.string(), file_path: z.string() },
-    async ({ kind, doc, filename, file_path }: any) => {
+    { kind: kindSchema, ...folderSchema, doc: z.string(), filename: z.string(), file_path: z.string() },
+    async ({ kind, folder, doc, filename, file_path }: any) => {
       try {
         assertFileSizeOk(file_path);
         const data = fs.readFileSync(file_path);
-        const entry = await attachRepo.update(kind, doc, filename, data);
-        const absolute_path = await attachRepo.absolutePathFor(kind, doc, entry.filename);
+        const entry = await attachRepo.update(kind, folder, doc, filename, data);
+        const absolute_path = await attachRepo.absolutePathFor(kind, folder, doc, entry.filename);
         return { content: [{ type: 'text', text: JSON.stringify({ ...entry, absolute_path }, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -73,10 +76,10 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
   mcp.tool(
     'attachment_remove',
     'Deletes an attachment from a memory doc or skill.',
-    { kind: kindSchema, doc: z.string(), filename: z.string() },
-    async ({ kind, doc, filename }: any) => {
+    { kind: kindSchema, ...folderSchema, doc: z.string(), filename: z.string() },
+    async ({ kind, folder, doc, filename }: any) => {
       try {
-        await attachRepo.remove(kind, doc, filename);
+        await attachRepo.remove(kind, folder, doc, filename);
         return { content: [{ type: 'text', text: `removed "${filename}"` }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -87,14 +90,14 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
   mcp.tool(
     'attachment_list',
     'Lists all attachments on a memory doc or skill, each with its absolute on-disk path.',
-    { kind: kindSchema, doc: z.string() },
-    async ({ kind, doc }: any) => {
+    { kind: kindSchema, ...folderSchema, doc: z.string() },
+    async ({ kind, folder, doc }: any) => {
       try {
-        const entries = await attachRepo.list(kind, doc);
+        const entries = await attachRepo.list(kind, folder, doc);
         const withPaths = await Promise.all(
           entries.map(async (entry) => ({
             ...entry,
-            absolute_path: await attachRepo.absolutePathFor(kind, doc, entry.filename),
+            absolute_path: await attachRepo.absolutePathFor(kind, folder, doc, entry.filename),
           }))
         );
         return { content: [{ type: 'text', text: JSON.stringify(withPaths, null, 2) }] };
@@ -107,10 +110,10 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
   mcp.tool(
     'attachment_reconcile',
     "Compares a doc's declared attachments against what is actually on disk; reports orphans (declared but missing) and unlisted files (present but not declared). Report-only, does not repair.",
-    { kind: kindSchema, doc: z.string() },
-    async ({ kind, doc }: any) => {
+    { kind: kindSchema, ...folderSchema, doc: z.string() },
+    async ({ kind, folder, doc }: any) => {
       try {
-        const result = await attachRepo.reconcile(kind, doc);
+        const result = await attachRepo.reconcile(kind, folder, doc);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };

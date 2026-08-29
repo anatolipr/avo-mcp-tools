@@ -55,7 +55,6 @@ export type MemoryDocType =
 export type MemoryStatus = string;
 
 export interface MemoryFrontmatter {
-  id: string;
   key: string;
   key_type: MemoryKeyType;
   description: string;

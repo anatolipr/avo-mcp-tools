@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { loadConfig } from './config.js';
+import { loadConfig, type RemoteFolder } from './config.js';
 import { openCache } from './store/db.js';
 import { initialScan, watchSources, skillSyncSpec, memorySyncSpec } from './store/sync.js';
 import { SkillRepository } from './skills/repository.js';
@@ -20,7 +20,7 @@ import { registerUiTool } from './web/ui-tool.js';
 import { registerMemoryChannelTools } from './channels/tools.js';
 import { startChannelSweep } from './channels/store.js';
 import { startRemotePolling, type RemotePollerHandle } from './remote/remote-sync.js';
-import { IdentityTracker, decodeUsername } from './remote/identity.js';
+import { IdentityTracker, decodeUsername, isFolderVisible } from './remote/identity.js';
 import { getCredential } from './remote/credentials.js';
 
 // server.ts is rebuilt from `buildMcpServer()` on every /mcp request (see below),
@@ -88,16 +88,40 @@ const memoryRepo = new MemoryRepository(db, config.memoryFolders, config.remoteM
 skillRepo.setWatcher(skillWatcher);
 memoryRepo.setWatcher(memoryWatcher);
 
-const attachmentRepo = new AttachmentRepository(memoryRepo, skillRepo);
+const attachmentRepo = new AttachmentRepository(memoryRepo, skillRepo, db);
 
 // Remote sources have no filesystem to watch (chokidar doesn't apply) - a
 // fixed-interval poller stands in for watchSources above, pulling changes
 // into each remote source's local mirror directory and reusing the exact
 // same upsertFile/removeFile path a local file-watch event would.
+//
+// onSynced re-declares any attachment file that's present on disk (pulled down by this same poll)
+// but missing from its parent doc's declared list — e.g. a file restored from folderfoo's own
+// trash after an earlier attachment_remove. See AttachmentRepository.repairUnlistedInFolder's doc
+// comment for why this lives here (needs memoryRepo/skillRepo, which remote-sync.ts itself doesn't
+// depend on) rather than inside pollOne/reconcileDeletions.
+//
+// Skipped entirely for a folder connected under a DIFFERENT identity than the one currently logged
+// in (or connected while nobody was logged in) — same visibility rule memoryRepo.get()/
+// skillRepo.get() already enforce (isFolderVisible). The poller itself has no notion of "current
+// identity" and keeps polling every configured remote source regardless of who's logged in right
+// now, so without this check, repairUnlistedInFolder would sweep a currently-invisible folder's
+// docs, call skillRepo.get()/memoryRepo.get() on them, and get a spurious "not found" per doc —
+// not a real bug, just this visibility rule surfacing as a scary per-doc error instead of a no-op.
+function onAttachmentSync(table: 'skills' | 'memory_docs', folder: RemoteFolder): void {
+  if (!isFolderVisible(folder, identity.current())) return;
+  attachmentRepo.repairUnlistedInFolder(table, folder.name).catch((err) =>
+    console.error(`[memory-bucket] failed to repair attachments for folder "${folder.name}":`, err)
+  );
+}
 const remoteSkillPoller: RemotePollerHandle | undefined =
-  config.remoteSkillFolders.length > 0 ? startRemotePolling(db, skillSpec, config.remoteSkillFolders, config.baseDir) : undefined;
+  config.remoteSkillFolders.length > 0
+    ? startRemotePolling(db, skillSpec, config.remoteSkillFolders, config.baseDir, (folder) => onAttachmentSync('skills', folder))
+    : undefined;
 const remoteMemoryPoller: RemotePollerHandle | undefined =
-  config.remoteMemoryFolders.length > 0 ? startRemotePolling(db, memorySpec, config.remoteMemoryFolders, config.baseDir) : undefined;
+  config.remoteMemoryFolders.length > 0
+    ? startRemotePolling(db, memorySpec, config.remoteMemoryFolders, config.baseDir, (folder) => onAttachmentSync('memory_docs', folder))
+    : undefined;
 
 // Forces one immediate poll of every remote source at process start, instead
 // of leaving the cache to show whatever was last synced until the first
@@ -142,7 +166,7 @@ startChannelSweep((name) => console.error(`[memory-bucket] sweeping idle memory 
 
 const app = express();
 app.use(express.json());
-app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, identity, { skill: remoteSkillPoller, memory: remoteMemoryPoller }));
+app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, identity, { skill: remoteSkillPoller, memory: remoteMemoryPoller }, attachmentRepo));
 app.use(express.static(path.join(packageRoot, 'dist', 'client')));
 
 app.post('/mcp', async (req, res) => {

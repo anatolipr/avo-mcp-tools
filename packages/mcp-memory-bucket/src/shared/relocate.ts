@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { SkillRepository } from '../skills/repository.js';
 import type { MemoryRepository } from '../memory/repository.js';
 import { isValidSkillName } from '../store/skill-name.js';
+import { slugify } from '../store/slug.js';
 import type { MemoryDocType, MemoryKeyType, MemoryStatus, SkillStatus } from '../types.js';
 
 const TICKET_PATTERN = /([A-Z]{2,10}-\d+)/i;
@@ -141,15 +142,17 @@ export async function relocate(
   }
 
   // Scoped to the destination folder: a same-key/description doc in a DIFFERENT folder is not
-  // "this file already relocated" — memory_docs ids never collide (see getByKey's doc comment),
-  // so without this scoping a genuinely new file could be silently refused because an unrelated
-  // doc elsewhere happens to share the same key+description.
+  // "this file already relocated" — a doc's real identity is (folder, filename), but key+description
+  // can legitimately repeat across folders, so without this scoping a genuinely new file could be
+  // silently refused because an unrelated doc elsewhere happens to share the same key+description.
   const already = memoryRepo.getByKey(key, docType, { folder: opts.overrides?.folder }).find((d) => d.description === description);
   if (already) {
-    return { moved: false, reason: `already relocated as memory doc "${already.id}"`, id: already.id, target: 'memory' };
+    const alreadyFilename = path.basename(already.source_path);
+    return { moved: false, reason: `already relocated as memory doc "${alreadyFilename}"`, id: alreadyFilename, target: 'memory' };
   }
 
   const doc = await memoryRepo.create({
+    filename: `${slugify(key)}-${slugify(description)}`,
     key,
     key_type: keyType,
     doc_type: docType,
@@ -160,13 +163,14 @@ export async function relocate(
     folder: opts.overrides?.folder,
   });
 
+  const filename = path.basename(doc.source_path);
   // Same belt-and-suspenders re-fetch as the skill branch above.
-  if (!(await memoryRepo.get(doc.id))) {
-    throw new Error(`relocate: memory doc "${doc.id}" create() reported success but is not readable back — refusing to delete the source file`);
+  if (!(await memoryRepo.get(doc.folder, filename))) {
+    throw new Error(`relocate: memory doc "${filename}" create() reported success but is not readable back — refusing to delete the source file`);
   }
 
   if (!opts.keep_original) fs.unlinkSync(opts.path);
-  return { moved: true, id: doc.id, target: 'memory' };
+  return { moved: true, id: filename, target: 'memory' };
 }
 
 /**

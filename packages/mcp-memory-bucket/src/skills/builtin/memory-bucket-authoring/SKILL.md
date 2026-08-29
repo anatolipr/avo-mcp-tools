@@ -312,7 +312,10 @@ body: >-
     landed in. All three return snippets, not full bodies — follow up with
     `skill_get`/`memory_get` (or the bulk variants below) for the rest.
   - **`skill_get`/`memory_get`** — exact-key lookup when you already know
-    the name/key.
+    the name/key. `memory_get` also falls back to a filename-substring match
+    when no key matches — handy for a bare ticket ref (e.g. "RMXS-13") that
+    only appears in a doc's filename, not its key; the response flags this
+    with `filename_fallback: true`.
 
   ## Bulk operations
 
@@ -329,15 +332,15 @@ body: >-
 
 
   - `skill_bulk_get`/`memory_bulk_get` — fetch full bodies for a list of
-    names/ids in one call (memory's is by **id**, not key — search results
-    return ids).
+    names/(folder, filename) pairs in one call (memory's is by filename,
+    not key — search results return filenames, not keys).
   - `skill_bulk_create`/`memory_bulk_create` — create several docs in one
     call, each entry shaped like the singular `*_create` args.
   - `skill_bulk_update`/`memory_bulk_update` — apply the same change
     (add/remove tags, flip status, etc.) across many docs at once, e.g. to
     a batch found via search.
   - `skill_bulk_delete`/`memory_bulk_delete` — delete several docs by
-    name/id in one call.
+    name/filename in one call.
   - `relocate_bulk` — same idea for `relocate`, one entry per file.
 
 
@@ -553,15 +556,23 @@ description: "Bulk edit plan for product boost"
 ---
 ```
 
-Call `memory_create(key, key_type, doc_type, description, body, ...)`.
-One key commonly accumulates several docs over time — a plan, then a
-spec, then SQL from a debugging session, then a session summary — all
-retrievable together via `memory_get(key)`, or narrowed with
-`memory_get(key, doc_type)`.
+Call `memory_create(filename, key, key_type, doc_type, description, body, ...)`.
+`filename` is the doc's own on-disk identity — pick something descriptive,
+e.g. `"RMXS-14-Bulk-edit-plan.md"`; a doc-type suffix like `-PLAN`/`-SPEC`/
+`-SQL`/`-DISCOVERY`/`-SESSION-SUMMARY` helps once a key has several docs
+(`.md` is appended automatically if omitted, and a colliding filename is
+auto-suffixed, never silently overwritten). `key` is a separate grouping
+label, not the filename — one key commonly accumulates several docs over
+time — a plan, then a spec, then SQL from a debugging session, then a
+session summary — all retrievable together via `memory_get(key)`, or
+narrowed with `memory_get(key, doc_type)`.
 
 **Never infer the key from environment state** (branch name, current
 directory, etc.) — always get it from what the user actually said in
 conversation, or ask if it's genuinely unclear.
+
+Picked a bad filename? `memory_rename(folder?, filename, new_filename)`
+renames the file in place — frontmatter, body, and attachments untouched.
 
 ### Saving a session
 
@@ -601,7 +612,10 @@ given, ask for both before calling it; don't guess a key from context.
   indexed as the server's local calendar date, so "today"/"this week"
   ranges built from local time just work — no timezone conversion needed.
 - **`skill_get`/`memory_get`** — exact-key lookup when you already know
-  the name/key.
+  the name/key. `memory_get` also falls back to a filename-substring match
+  when no key matches — handy for a bare ticket ref (e.g. "RMXS-13") that
+  only appears in a doc's filename, not its key; the response flags this
+  with `filename_fallback: true`.
 
 ## Bulk operations
 

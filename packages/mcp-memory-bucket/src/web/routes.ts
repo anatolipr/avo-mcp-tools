@@ -5,7 +5,7 @@ import type { Router, Request, Response } from 'express';
 import express from 'express';
 import matter from 'gray-matter';
 import type Database from 'better-sqlite3';
-import type { BucketConfig } from '../config.js';
+import type { BucketConfig, RemoteFolder } from '../config.js';
 import {
   saveFolder,
   saveRemoteFolder,
@@ -19,19 +19,21 @@ import { stripKey, type MemoryRepository } from '../memory/repository.js';
 import { initialScan, type TableSyncSpec } from '../store/sync.js';
 import { sanitizeFtsQuery } from '../store/search.js';
 import { resolveWithinBase } from '../store/safe-path.js';
-import { attachmentsDirFor, guessMimeType } from '../attachments/storage.js';
+import { attachmentsDirFor, guessMimeType, ATTACHMENT_MAX_BYTES } from '../attachments/storage.js';
+import type { AttachmentRepository } from '../attachments/repository.js';
 import { listFolders as listFolderfooFolders } from '../remote/folderfoo-client.js';
 import { setCredential } from '../remote/credentials.js';
 import { pollOne, type RemotePollerHandle } from '../remote/remote-sync.js';
-import { decodeUsername, type IdentityTracker } from '../remote/identity.js';
+import { decodeUsername, isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 import { getChannel, listChannels } from '../channels/store.js';
 
 type EntryType = 'skill' | 'memory' | 'all';
 
 interface EntryRow {
   _table: 'skills' | 'memory_docs';
-  id: string;
-  name: string; // skill name or memory key, whichever reads better in a list
+  id: string; // skill name, or memory doc's source_path (globally unique; filename alone is only unique per-folder)
+  name: string; // skill name, or memory doc's own filename — the primary title in the UI
+  key: string | null; // memory docs only — the grouping label, shown as a secondary line under the filename
   description: string;
   tags: string[];
   status: string;
@@ -96,7 +98,20 @@ function tagWhereClause(tags: string[]): { clause: string; params: string[] } {
   return { clause: ` AND ${clauses.join(' AND ')}`, params: tags };
 }
 
-function queryEntries(db: Database.Database, memoryRepo: MemoryRepository, req: Request): EntryRow[] {
+/** Names of `repo`'s remote folders that don't match the currently logged-in identity — a remote
+ * folder connected under a DIFFERENT user (or while nobody is logged in) must never appear in list
+ * results, same as MemoryRepository/SkillRepository's own get()/search() already enforce; this is
+ * the web UI's list endpoint's equivalent, since it queries sqlite directly rather than going
+ * through those repository methods. */
+function hiddenRemoteFolderNames(repo: { listRemoteFolders(): RemoteFolder[] }, identity: IdentityTracker): string[] {
+  const current = identity.current();
+  return repo
+    .listRemoteFolders()
+    .filter((f) => !isFolderVisible(f, current))
+    .map((f) => f.name);
+}
+
+function queryEntries(db: Database.Database, skillRepo: SkillRepository, memoryRepo: MemoryRepository, identity: IdentityTracker, req: Request): EntryRow[] {
   const type = (req.query.type as EntryType) ?? 'all';
   const tags = asArray(req.query.tag);
   const statuses = asArray(req.query.status);
@@ -141,7 +156,8 @@ function queryEntries(db: Database.Database, memoryRepo: MemoryRepository, req: 
         db,
         'skills',
         { tags, statuses, owners, docTypes: [], keyTypes: [], folders, keys: [], deprecated, paused },
-        intersectIds(matchedIds?.skills, dateIds?.skills)
+        intersectIds(matchedIds?.skills, dateIds?.skills),
+        hiddenRemoteFolderNames(skillRepo, identity)
       )
     );
   }
@@ -151,7 +167,8 @@ function queryEntries(db: Database.Database, memoryRepo: MemoryRepository, req: 
         db,
         'memory_docs',
         { tags, statuses, owners: [], docTypes, keyTypes, folders, deprecated, paused, keys: keyMatch ? [keyMatch.key] : [] },
-        keyMatch ? undefined : intersectIds(matchedIds?.memory_docs, dateIds?.memory_docs)
+        keyMatch ? undefined : intersectIds(matchedIds?.memory_docs, dateIds?.memory_docs),
+        hiddenRemoteFolderNames(memoryRepo, identity)
       )
     );
   }
@@ -197,12 +214,22 @@ function queryTable(
     deprecated?: string;
     paused?: string;
   },
-  restrictToIds: Set<string> | undefined
+  restrictToIds: Set<string> | undefined,
+  hiddenFolders: string[] = []
 ): EntryRow[] {
   if (restrictToIds && restrictToIds.size === 0) return [];
 
   const params: unknown[] = [];
   let where = '1 = 1';
+
+  if (hiddenFolders.length > 0) {
+    // A remote folder connected under a DIFFERENT identity than the one currently logged in (or
+    // connected while nobody was logged in) must never surface here — mirrors the same check
+    // MemoryRepository/SkillRepository's own get()/search()/getByKey() already apply; this query
+    // bypasses those methods (raw SQL against the cache), so it needs its own copy of the filter.
+    where += ` AND folder NOT IN (${hiddenFolders.map(() => '?').join(', ')})`;
+    params.push(...hiddenFolders);
+  }
 
   const { clause: tagClause, params: tagParams } = tagWhereClause(filters.tags);
   where += tagClause;
@@ -243,14 +270,15 @@ function queryTable(
   if (restrictToIds) {
     // Skills restrict on the composite (folder, id) pair — see skillKey's comment — since a bare
     // `id IN (...)` could match the wrong folder's same-named skill once names are folder-scoped.
-    // memory_docs restricts on plain id, unchanged (its ids never collide across folders).
+    // memory_docs restricts on source_path (its real identity — a filesystem path is globally
+    // unique by construction, never collides across folders).
     if (table === 'skills') {
       // SKILL_KEY_SEP is a NUL byte, which can't be embedded in a single-quoted SQL string literal
       // (SQLite's tokenizer rejects it) — bind it as a parameter instead of interpolating it into the query text.
       where += ` AND (folder || ? || id) IN (${[...restrictToIds].map(() => '?').join(', ')})`;
       params.push(SKILL_KEY_SEP);
     } else {
-      where += ` AND id IN (${[...restrictToIds].map(() => '?').join(', ')})`;
+      where += ` AND source_path IN (${[...restrictToIds].map(() => '?').join(', ')})`;
     }
     params.push(...restrictToIds);
   }
@@ -274,6 +302,7 @@ function queryTable(
       _table: 'skills',
       id: r.id,
       name: r.id,
+      key: null,
       description: r.description,
       tags: JSON.parse(r.tags),
       status: r.status,
@@ -290,10 +319,10 @@ function queryTable(
 
   const rows = db
     .prepare(
-      `SELECT id, key, description, doc_type, key_type, status, tags, folder, mtime_ms, deprecated, paused, created_at FROM memory_docs WHERE ${where}`
+      `SELECT source_path, key, description, doc_type, key_type, status, tags, folder, mtime_ms, deprecated, paused, created_at FROM memory_docs WHERE ${where}`
     )
     .all(...params) as Array<{
-    id: string;
+    source_path: string;
     key: string;
     description: string;
     doc_type: string;
@@ -308,8 +337,9 @@ function queryTable(
   }>;
   return rows.map((r) => ({
     _table: 'memory_docs',
-    id: r.id,
-    name: r.key,
+    id: r.source_path,
+    name: path.basename(r.source_path),
+    key: r.key,
     description: r.description,
     tags: JSON.parse(r.tags),
     status: r.status,
@@ -328,7 +358,7 @@ function queryTable(
 // id-only restriction set can no longer safely identify "this one skill" for filtering (it would
 // either miss a real match or wrongly include the other folder's same-named skill). Skill entries in
 // these restriction sets are therefore composite `folder\0id` strings; memory_docs entries stay
-// plain ids, since memory_docs.id already bakes in a random UUID suffix and never collides.
+// plain ids (source_path — a real filesystem path is globally unique by construction, never collides).
 const SKILL_KEY_SEP = ' ';
 function skillKey(folder: string, id: string): string {
   return `${folder}${SKILL_KEY_SEP}${id}`;
@@ -454,8 +484,8 @@ function buildHealth(db: Database.Database) {
   const skillIds = new Set(
     (db.prepare(`SELECT id FROM skills`).all() as Array<{ id: string }>).map((r) => r.id)
   );
-  const memoryIds = new Set(
-    (db.prepare(`SELECT id FROM memory_docs`).all() as Array<{ id: string }>).map((r) => r.id)
+  const memoryKeys = new Set(
+    (db.prepare(`SELECT key FROM memory_docs`).all() as Array<{ key: string }>).map((r) => r.key)
   );
 
   const skills = db.prepare(`SELECT id, extends, trigger_phrases, mtime_ms FROM skills`).all() as Array<{
@@ -471,20 +501,23 @@ function buildHealth(db: Database.Database) {
     .filter((s) => (JSON.parse(s.trigger_phrases) as string[]).length === 0)
     .map((s) => s.id);
 
-  const memoryDocs = db.prepare(`SELECT id, related_to, status, mtime_ms FROM memory_docs`).all() as Array<{
-    id: string;
+  const memoryDocs = db.prepare(`SELECT source_path, related_to, status, mtime_ms FROM memory_docs`).all() as Array<{
+    source_path: string;
     related_to: string | null;
     status: string;
     mtime_ms: number;
   }>;
+  // related_to is a free-text `key` reference (see its docstring in memory/tools.ts), not validated
+  // on write — checked here against known keys, not against skill ids (a memory doc can't relate to
+  // a skill by key, so no skillIds fallback like the old id-based check had).
   const danglingRelatedTo = memoryDocs
-    .filter((m) => m.related_to && !memoryIds.has(m.related_to) && !skillIds.has(m.related_to))
-    .map((m) => ({ id: m.id, related_to: m.related_to }));
+    .filter((m) => m.related_to && !memoryKeys.has(m.related_to))
+    .map((m) => ({ id: m.source_path, related_to: m.related_to }));
 
   const staleCutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
   const staleActiveMemoryDocs = memoryDocs
     .filter((m) => m.status === 'active' && m.mtime_ms < staleCutoff)
-    .map((m) => m.id);
+    .map((m) => m.source_path);
 
   return { danglingExtends, danglingRelatedTo, emptyTriggerPhrases, staleActiveMemoryDocs };
 }
@@ -497,9 +530,24 @@ export function buildWebRouter(
   skillSpec: TableSyncSpec<any>,
   memorySpec: TableSyncSpec<any>,
   identity: IdentityTracker,
-  remotePollers?: { skill?: RemotePollerHandle; memory?: RemotePollerHandle }
+  remotePollers?: { skill?: RemotePollerHandle; memory?: RemotePollerHandle },
+  attachRepo?: AttachmentRepository
 ): Router {
   const router = express.Router();
+
+  // Whether the doc at `table`/`id` lives in a folder visible under the CURRENTLY logged-in
+  // identity — a remote folder connected under a different user (or connected while nobody was
+  // logged in) must never be reachable through any entries route, not just hidden from the list
+  // (see hiddenRemoteFolderNames' doc comment for the underlying rule). Returns false (not found)
+  // for a row that doesn't exist at all, same as the "not found" case callers already handle.
+  function isEntryVisible(table: 'skills' | 'memory_docs', id: string | undefined): boolean {
+    if (!id) return false;
+    const idCol = table === 'skills' ? 'id' : 'source_path';
+    const row = db.prepare(`SELECT folder FROM ${table} WHERE ${idCol} = ?`).get(id) as { folder: string } | undefined;
+    if (!row) return false;
+    const hidden = hiddenRemoteFolderNames(table === 'skills' ? skillRepo : memoryRepo, identity);
+    return !hidden.includes(row.folder);
+  }
 
   // Resyncs every remote source FIRST (force: true - always does real work,
   // including reconcileDeletions, regardless of the watermark check), so a
@@ -522,7 +570,7 @@ export function buildWebRouter(
   });
 
   router.get('/api/entries', (req: Request, res: Response) => {
-    res.json(queryEntries(db, memoryRepo, req));
+    res.json(queryEntries(db, skillRepo, memoryRepo, identity, req));
   });
 
   router.get('/api/entries/:table/:id', (req: Request, res: Response) => {
@@ -531,7 +579,14 @@ export function buildWebRouter(
       res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
       return;
     }
-    const row = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
+    if (!isEntryVisible(table, id)) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    // memory_docs has no `id` column — its real identity IS source_path (the web UI's `id` for a
+    // memory_docs row — see EntryRow/queryEntries above).
+    const idCol = table === 'skills' ? 'id' : 'source_path';
+    const row = db.prepare(`SELECT * FROM ${table} WHERE ${idCol} = ?`).get(id) as Record<string, unknown> | undefined;
     if (!row) {
       res.status(404).json({ error: 'not found' });
       return;
@@ -557,7 +612,10 @@ export function buildWebRouter(
       // file unreadable/missing — treat as having frontmatter so the UI doesn't offer to "add"
       // one for a doc it can't actually reach; the existing edit/delete-doc paths will 404 instead.
     }
-    res.json({ ...row, tags, trigger_phrases, attachments, has_frontmatter, raw_file });
+    // memory_docs rows have no `id` column of their own (see idCol above) — expose source_path as
+    // `id` so the client's EntryDetail.id is always populated, matching the list endpoint's id.
+    const responseId = table === 'skills' ? row.id : row.source_path;
+    res.json({ ...row, id: responseId, tags, trigger_phrases, attachments, has_frontmatter, raw_file });
   });
 
   // Serves a single attachment file for a doc. Unauthenticated web-facing surface, so the
@@ -573,7 +631,12 @@ export function buildWebRouter(
       res.status(400).json({ error: 'filename is required' });
       return;
     }
-    const row = db.prepare(`SELECT source_path FROM ${table} WHERE id = ?`).get(id) as
+    if (!isEntryVisible(table, id)) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    const idCol = table === 'skills' ? 'id' : 'source_path';
+    const row = db.prepare(`SELECT source_path FROM ${table} WHERE ${idCol} = ?`).get(id) as
       | { source_path: string }
       | undefined;
     if (!row) {
@@ -617,7 +680,12 @@ export function buildWebRouter(
       res.status(400).json({ error: 'filename is required' });
       return;
     }
-    const row = db.prepare(`SELECT source_path FROM ${table} WHERE id = ?`).get(id) as
+    if (!isEntryVisible(table, id)) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    const idCol = table === 'skills' ? 'id' : 'source_path';
+    const row = db.prepare(`SELECT source_path FROM ${table} WHERE ${idCol} = ?`).get(id) as
       | { source_path: string }
       | undefined;
     if (!row) {
@@ -666,6 +734,95 @@ export function buildWebRouter(
     });
   });
 
+  // Memory docs address by source_path (the web UI's `id` for a memory_docs row — see
+  // client/detail-panel.ts) since filename alone is only unique per-folder, not globally. This
+  // splits that back into the (folder, filename) pair MemoryRepository's methods take.
+  function splitMemoryId(id: string): { folder: string; filename: string } {
+    const split = memoryRepo.splitSourcePath(id);
+    if (!split) throw new Error(`"${id}" is not under any configured memory folder`);
+    return split;
+  }
+
+  // AttachmentRepository.add/remove take (kind, folder, docIdOrName) — for memory docs that's
+  // splitMemoryId's (folder, filename) pair; for skills the route's own :id IS the name, with no
+  // folder disambiguation needed here (same as the rename route above — a name collision across
+  // two configured skill folders is out of scope for this route, matching every other skill route
+  // in this file).
+  function resolveAttachmentTarget(table: 'skills' | 'memory_docs', id: string): { kind: 'skill' | 'memory'; folder: string | undefined; docIdOrName: string } {
+    if (table === 'skills') return { kind: 'skill', folder: undefined, docIdOrName: id };
+    const { folder, filename } = splitMemoryId(id);
+    return { kind: 'memory', folder, docIdOrName: filename };
+  }
+
+  // Uploads a new attachment onto a doc. Body is the raw file bytes (Content-Type is whatever the
+  // browser sent, ignored beyond routing to this handler — the stored attachment's own served
+  // Content-Type is always re-derived from its filename's extension at GET time, see guessMimeType
+  // above). The filename comes from a query param, not a JSON field, since the body itself IS the
+  // file content, not JSON — matches how the client's fetch call constructs this request (raw
+  // File/Blob as the body, filename appended to the URL).
+  router.post('/api/entries/:table/:id/attachments', express.raw({ type: '*/*', limit: ATTACHMENT_MAX_BYTES + 1024 }), async (req: Request, res: Response) => {
+    const { table, id } = req.params;
+    const filename = req.query.filename;
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    if (typeof filename !== 'string' || !filename) {
+      res.status(400).json({ error: '?filename= query param is required' });
+      return;
+    }
+    if (!isEntryVisible(table, id)) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    if (!attachRepo) {
+      res.status(501).json({ error: 'attachments are not available' });
+      return;
+    }
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      res.status(400).json({ error: 'request body must be the raw file content' });
+      return;
+    }
+    try {
+      const { kind, folder, docIdOrName } = resolveAttachmentTarget(table, id);
+      const entry = await attachRepo.add(kind, folder, docIdOrName, filename, req.body);
+      res.json(entry);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  router.delete('/api/entries/:table/:id/attachments/:filename', async (req: Request, res: Response) => {
+    const { table, id, filename } = req.params;
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!id || !filename) {
+      res.status(400).json({ error: 'id and filename are required' });
+      return;
+    }
+    if (!isEntryVisible(table, id)) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    if (!attachRepo) {
+      res.status(501).json({ error: 'attachments are not available' });
+      return;
+    }
+    try {
+      const { kind, folder, docIdOrName } = resolveAttachmentTarget(table, id);
+      await attachRepo.remove(kind, folder, docIdOrName, filename);
+      res.json({ removed: filename });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
   router.patch('/api/entries/:table/:id/deprecated', async (req: Request, res: Response) => {
     const { table, id } = req.params;
     const { deprecated } = req.body as { deprecated?: boolean };
@@ -683,7 +840,10 @@ export function buildWebRouter(
     }
     try {
       if (table === 'skills') await skillRepo.update(id, { deprecated });
-      else await memoryRepo.update(id, { deprecated });
+      else {
+        const { folder, filename } = splitMemoryId(id);
+        await memoryRepo.update(folder, filename, { deprecated });
+      }
       res.json({ id, deprecated });
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });
@@ -701,12 +861,13 @@ export function buildWebRouter(
       res.status(400).json({ error: 'body must be { ids: string[], deprecated: boolean }' });
       return;
     }
-    const results = table === 'skills' ? await skillRepo.bulkUpdate(ids, { deprecated }) : await memoryRepo.bulkUpdate(ids, { deprecated });
+    const results =
+      table === 'skills' ? await skillRepo.bulkUpdate(ids, { deprecated }) : await memoryRepo.bulkUpdate(ids.map(splitMemoryId), { deprecated });
     res.json({ results });
   });
 
   // General frontmatter edit — covers both "edit an existing doc's fields" and "add frontmatter
-  // to a bare file" (a bare memory doc already has a derived id/key from deriveFrontmatter, so
+  // to a bare file" (a bare memory doc already has a derived key from deriveFrontmatter, so
   // "add" is just this same call supplying real values). Memory `key` is editable here (update()
   // normalizes it). Skill `name` is not — SkillRepository.update() rejects it outright since
   // renaming requires a real folder move (see the rename route below).
@@ -730,7 +891,13 @@ export function buildWebRouter(
       return;
     }
     try {
-      const updated = table === 'skills' ? await skillRepo.update(id, frontmatter) : await memoryRepo.update(id, frontmatter);
+      let updated;
+      if (table === 'skills') {
+        updated = await skillRepo.update(id, frontmatter);
+      } else {
+        const { folder, filename } = splitMemoryId(id);
+        updated = await memoryRepo.update(folder, filename, frontmatter);
+      }
       res.json(updated);
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });
@@ -756,6 +923,26 @@ export function buildWebRouter(
     }
   });
 
+  router.post('/api/entries/memory_docs/:id/rename', async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { new_filename } = req.body as { new_filename?: string };
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    if (!new_filename) {
+      res.status(400).json({ error: 'body must be { new_filename: string }' });
+      return;
+    }
+    try {
+      const { folder, filename } = splitMemoryId(id);
+      const renamed = await memoryRepo.rename(folder, filename, new_filename);
+      res.json(renamed);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
   // Memory docs only — skill frontmatter (name/description) is required by the agentskills.io
   // spec, so stripping it would produce a non-conformant SKILL.md no compliant agent can load.
   router.delete('/api/entries/memory_docs/:id/frontmatter', async (req: Request, res: Response) => {
@@ -765,7 +952,8 @@ export function buildWebRouter(
       return;
     }
     try {
-      await memoryRepo.stripFrontmatter(id);
+      const { folder, filename } = splitMemoryId(id);
+      await memoryRepo.stripFrontmatter(folder, filename);
       res.json({ id, frontmatterRemoved: true });
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });
@@ -789,7 +977,8 @@ export function buildWebRouter(
       res.status(400).json({ error: 'body must be { paused: boolean }' });
       return;
     }
-    const [result] = table === 'skills' ? await skillRepo.setPaused([id], paused) : await memoryRepo.setPaused([id], paused);
+    const [result] =
+      table === 'skills' ? await skillRepo.setPaused([id], paused) : await memoryRepo.setPaused([splitMemoryId(id)], paused);
     if (!result?.ok) {
       res.status(404).json({ error: result?.error ?? 'not found' });
       return;
@@ -808,7 +997,7 @@ export function buildWebRouter(
       res.status(400).json({ error: 'body must be { ids: string[], paused: boolean }' });
       return;
     }
-    const results = table === 'skills' ? await skillRepo.setPaused(ids, paused) : await memoryRepo.setPaused(ids, paused);
+    const results = table === 'skills' ? await skillRepo.setPaused(ids, paused) : await memoryRepo.setPaused(ids.map(splitMemoryId), paused);
     res.json({ results });
   });
 
@@ -823,8 +1012,12 @@ export function buildWebRouter(
       return;
     }
     try {
-      if (table === 'skills') await skillRepo.delete(id);
-      else await memoryRepo.delete(id);
+      if (table === 'skills') {
+        await skillRepo.delete(id);
+      } else {
+        const { folder, filename } = splitMemoryId(id);
+        await memoryRepo.delete(folder, filename);
+      }
       res.json({ deleted: id });
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });
@@ -842,7 +1035,7 @@ export function buildWebRouter(
       res.status(400).json({ error: 'body must be { ids: string[] }' });
       return;
     }
-    const results = table === 'skills' ? await skillRepo.bulkDelete(ids) : await memoryRepo.bulkDelete(ids);
+    const results = table === 'skills' ? await skillRepo.bulkDelete(ids) : await memoryRepo.bulkDelete(ids.map(splitMemoryId));
     res.json({ results });
   });
 
@@ -1010,7 +1203,9 @@ export function buildWebRouter(
           table === 'skills'
             ? path.join(remote.mirrorDir, withinFolder, name, 'SKILL.md')
             : path.join(remote.mirrorDir, withinFolder, `${name}.md`);
-        const row = db.prepare(`SELECT id FROM ${table} WHERE source_path = ?`).get(sourcePath) as { id: string } | undefined;
+        // memory_docs has no `id` column — source_path IS its id (see idCol elsewhere in this file).
+        const idCol = table === 'skills' ? 'id' : 'source_path';
+        const row = db.prepare(`SELECT ${idCol} AS id FROM ${table} WHERE source_path = ?`).get(sourcePath) as { id: string } | undefined;
         if (row) {
           res.json({ table, id: row.id });
           return;

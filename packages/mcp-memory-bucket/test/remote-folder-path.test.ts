@@ -10,6 +10,9 @@ import { setCredential } from '../src/remote/credentials.js';
 import { mirrorDirFor } from '../src/config.js';
 import type { RemoteFolder } from '../src/config.js';
 import { IdentityTracker } from '../src/remote/identity.js';
+import { AttachmentRepository } from '../src/attachments/repository.js';
+import { startRemotePolling } from '../src/remote/remote-sync.js';
+import { memorySyncSpec } from '../src/store/sync.js';
 
 function loggedInIdentity(): IdentityTracker {
   const identity = new IdentityTracker('dev');
@@ -43,8 +46,27 @@ function mockFolderfoo(calls: string[], folders: string[] = ['memz', 'work/qa'])
     if (url.endsWith('/folders')) {
       return mockFolderList(folders);
     }
+    // pollOne's own two listing calls (see remote-sync.test.ts's mock) — only exercised by tests
+    // that actually call startRemotePolling/pollOne, not the repo-level tests above. Reports
+    // "nothing new" (lastChanged: 0, empty changed-since) so a poll finds no remote file changes to
+    // pull — those tests set up the local mirror state directly rather than via a simulated pull.
+    if (url.includes('/folders/last-changed')) {
+      return { ok: true, status: 200, json: async () => ({ lastChanged: 0 }) } as Response;
+    }
+    if (url.includes('/folders/changed-since')) {
+      return { ok: true, status: 200, json: async () => ({ files: [], serverTime: Date.now() }) } as Response;
+    }
     if (url.includes('/save/')) {
       return { ok: true, status: 200, json: async () => ({ message: 'saved' }) } as Response;
+    }
+    if (url.includes('/rename/')) {
+      return { ok: true, status: 200, json: async () => ({ name: 'renamed' }) } as Response;
+    }
+    if (url.includes('/trash/')) {
+      return { ok: true, status: 200, json: async () => ({ message: 'archived' }) } as Response;
+    }
+    if (/\/folders\/.+/.test(url) && init?.method === 'DELETE') {
+      return { ok: true, status: 200, json: async () => ({ message: 'trashed folder' }) } as Response;
     }
     if (url.includes('/data/')) {
       return { ok: true, status: 200, text: async () => 'live body' } as Response;
@@ -66,12 +88,12 @@ test('MemoryRepository.create against a remote folder with a non-empty folderPat
   const calls: string[] = [];
   t.mock.method(globalThis, 'fetch', mockFolderfoo(calls));
 
-  const doc = await repo.create({ key: 'ideaz', key_type: 'freeform', doc_type: 'other', description: 'ideas list', body: 'body', folder: 'memz' });
+  const doc = await repo.create({ filename: 'ideaz-ideas-list', key: 'ideaz', key_type: 'freeform', doc_type: 'other', description: 'ideas list', body: 'body', folder: 'memz' });
 
   const saveCall = calls.find((c) => c.includes('/save/'));
   assert.ok(saveCall, `expected a /save/ call, got: ${calls.join(', ')}`);
   // The 3-part unambiguous grammar (":folderPath:name") must carry "memz",
-  // not just the (empty, since this doc has no subfolder within memz) bare id.
+  // not just the (empty, since this doc has no subfolder within memz) bare filename.
   assert.ok(saveCall!.includes(encodeURIComponent('memz')), `expected the save URL to reference the remote folder "memz", got: ${saveCall}`);
   assert.ok(saveCall!.startsWith('https://folderfoo.example.com/save/:memz:'), `expected root-of-memz addressing, got: ${saveCall}`);
   assert.equal(doc.folder, 'memz');
@@ -89,11 +111,12 @@ test('MemoryRepository.get against a remote folder with a non-empty folderPath r
 
   const createCalls: string[] = [];
   t.mock.method(globalThis, 'fetch', mockFolderfoo(createCalls));
-  const doc = await repo.create({ key: 'ideaz', key_type: 'freeform', doc_type: 'other', description: 'ideas list', body: 'body', folder: 'memz' });
+  const doc = await repo.create({ filename: 'ideaz-ideas-list', key: 'ideaz', key_type: 'freeform', doc_type: 'other', description: 'ideas list', body: 'body', folder: 'memz' });
+  const filename = path.basename(doc.source_path);
 
   const getCalls: string[] = [];
   t.mock.method(globalThis, 'fetch', mockFolderfoo(getCalls));
-  const fetched = await repo.get(doc.id);
+  const fetched = await repo.get('memz', filename);
 
   const dataCall = getCalls.find((c) => c.includes('/data/'));
   assert.ok(dataCall, `expected a /data/ call, got: ${getCalls.join(', ')}`);
@@ -112,11 +135,12 @@ test('MemoryRepository.update against a remote folder with a non-empty folderPat
   repo.registerRemoteFolder(remote);
 
   t.mock.method(globalThis, 'fetch', mockFolderfoo([]));
-  const doc = await repo.create({ key: 'ideaz', key_type: 'freeform', doc_type: 'other', description: 'ideas list', body: 'body', folder: 'memz' });
+  const doc = await repo.create({ filename: 'ideaz-ideas-list', key: 'ideaz', key_type: 'freeform', doc_type: 'other', description: 'ideas list', body: 'body', folder: 'memz' });
+  const filename = path.basename(doc.source_path);
 
   const updateCalls: string[] = [];
   t.mock.method(globalThis, 'fetch', mockFolderfoo(updateCalls));
-  await repo.update(doc.id, { description: 'updated' });
+  await repo.update('memz', filename, { description: 'updated' });
 
   const saveCall = updateCalls.find((c) => c.includes('/save/'));
   assert.ok(saveCall, `expected a /save/ call, got: ${updateCalls.join(', ')}`);
@@ -151,16 +175,15 @@ test('SkillRepository.create against a remote folder with a non-empty folderPath
   );
 });
 
-// Regression coverage for a real bug: folderfoo's POST /save/:filename
-// silently strips every character outside [0-9a-zA-Z_] from the final
-// filename segment - hyphens included. MemoryRepository.create()'s
-// generated id is `${slugify(key)}-${slugify(description)}-${uuid8}`,
-// which always contains hyphens - if the id is used as-is for a REMOTE
-// doc's filename, the name mem-bucket thinks the file is called (with
-// hyphens) permanently diverges from what folderfoo actually stored it as
-// (without hyphens) the instant it's written, and every subsequent get/
-// update 404s trying to address the hyphenated name that was never real.
-test('MemoryRepository.create for a REMOTE folder generates a hyphen-free id, so the id matches what folderfoo will actually store the file as', async (t) => {
+// Regression coverage for a real bug the old id-based design had: a memory doc's remote filename
+// used to be its opaque id with the .md extension STRIPPED (to match folderfoo's old stricter
+// filename charset), while the local mirror kept the .md extension - so the doc's own remote file
+// and its attachments' remote directory (named after the local filename stem) could collide, and
+// the local "what folderfoo stored this as" name permanently diverged from the true remote name.
+// The fix removes id entirely: the doc's on-disk filename (agent-chosen, e.g. via `filename` on
+// create()) is now pushed to folderfoo VERBATIM, extension included - local and remote names are
+// always identical by construction, so there's nothing left to diverge or collide.
+test('MemoryRepository.create for a REMOTE folder pushes the file under its own filename UNCHANGED, extension included - local and remote names never diverge', async (t) => {
   const credsDir = tmpDir('mb-remote-path-creds-');
   setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
   const db = openCache(':memory:');
@@ -174,6 +197,7 @@ test('MemoryRepository.create for a REMOTE folder generates a hyphen-free id, so
   t.mock.method(globalThis, 'fetch', mockFolderfoo(calls));
 
   const doc = await repo.create({
+    filename: 'Ideaz-Placeholder-for-ideas',
     key: 'ideaz',
     key_type: 'freeform',
     doc_type: 'other',
@@ -182,25 +206,27 @@ test('MemoryRepository.create for a REMOTE folder generates a hyphen-free id, so
     folder: 'memz',
   });
 
-  assert.ok(!doc.id.includes('-'), `remote doc id must not contain hyphens (folderfoo strips them), got: ${doc.id}`);
+  const filename = path.basename(doc.source_path);
+  assert.equal(filename, 'Ideaz-Placeholder-for-ideas.md', 'the local filename keeps whatever the caller chose, .md appended');
 
   const saveCall = calls.find((c) => c.includes('/save/'));
   assert.ok(saveCall, `expected a /save/ call, got: ${calls.join(', ')}`);
-  // The address sent to folderfoo must exactly match the doc's own id -
-  // no hyphen anywhere in the outgoing filename segment.
-  assert.ok(saveCall!.endsWith(`:${doc.id}`), `expected the save URL to end with the doc's own (hyphen-free) id, got: ${saveCall}`);
-  assert.ok(!saveCall!.split(':').pop()!.includes('-'), `save URL's filename segment must not contain a hyphen, got: ${saveCall}`);
+  // The address sent to folderfoo must exactly match the doc's own local filename, extension
+  // included - no stripping, no divergence between what mem-bucket thinks the file is called and
+  // what folderfoo actually stored it as.
+  assert.ok(saveCall!.endsWith(`:${filename}`), `expected the save URL to end with the doc's own filename unchanged, got: ${saveCall}`);
 });
 
-// Same doc, but in a LOCAL (non-remote) folder - the id should keep its
-// normal, more-readable hyphenated form. Confirms the hyphen-stripping
-// fix is scoped to remote-bound docs only, not a global behavior change.
-test('MemoryRepository.create for a LOCAL folder keeps the normal hyphenated id unchanged', async () => {
+// Same doc, but in a LOCAL (non-remote) folder - filename behavior is identical either way now
+// (no id-driven divergence to guard against), confirming create() doesn't do anything
+// remote-specific to the filename itself.
+test('MemoryRepository.create for a LOCAL folder keeps the caller-chosen filename unchanged', async () => {
   const localDir = tmpDir('mb-local-');
   const db = openCache(':memory:');
   const repo = new MemoryRepository(db, [{ name: 'local', path: localDir }], [], undefined);
 
   const doc = await repo.create({
+    filename: 'Ideaz-Placeholder-for-ideas',
     key: 'ideaz',
     key_type: 'freeform',
     doc_type: 'other',
@@ -209,8 +235,7 @@ test('MemoryRepository.create for a LOCAL folder keeps the normal hyphenated id 
     folder: 'local',
   });
 
-  assert.ok(doc.id.includes('-'), `local doc id should keep its normal hyphenated form, got: ${doc.id}`);
-  assert.match(doc.id, /^ideaz-placeholder-for-ideas-to-be-added-later-[0-9a-f]{8}$/);
+  assert.equal(path.basename(doc.source_path), 'Ideaz-Placeholder-for-ideas.md');
 });
 
 // Regression coverage for a real, confirmed-in-production bug: folderfoo's
@@ -256,7 +281,8 @@ test('MemoryRepository.get strips the frontmatter block from a live-fetched remo
 
   const fileContent = { current: '' };
   t.mock.method(globalThis, 'fetch', mockFolderfooWithFrontmatteredContent([], fileContent));
-  const doc = await repo.create({ key: 'ideaz', key_type: 'freeform', doc_type: 'other', description: 'Test ideas', body: '# Test ideas\n\n- one', folder: 'memz' });
+  const doc = await repo.create({ filename: 'ideaz-test-ideas', key: 'ideaz', key_type: 'freeform', doc_type: 'other', description: 'Test ideas', body: '# Test ideas\n\n- one', folder: 'memz' });
+  const filename = path.basename(doc.source_path);
 
   // Sanity check: what folderfoo "stored" (captured from the save POST body) is a REAL markdown
   // file with a frontmatter block, not a bare body string - this is what a real folderfoo GET
@@ -264,7 +290,7 @@ test('MemoryRepository.get strips the frontmatter block from a live-fetched remo
   assert.match(fileContent.current, /^---\n/);
   assert.match(fileContent.current, /tags: \[\]/);
 
-  const fetched = await repo.get(doc.id);
+  const fetched = await repo.get('memz', filename);
   // The bug: fetched.body would be the ENTIRE fileContent.current (frontmatter block included).
   // The fix: it must be exactly the body content, frontmatter stripped.
   assert.equal(fetched?.body, '# Test ideas\n\n- one');
@@ -283,14 +309,15 @@ test('MemoryRepository.update after get() does not nest a second frontmatter blo
 
   const fileContent = { current: '' };
   t.mock.method(globalThis, 'fetch', mockFolderfooWithFrontmatteredContent([], fileContent));
-  const doc = await repo.create({ key: 'ideaz', key_type: 'freeform', doc_type: 'other', description: 'Test ideas', body: '# Test ideas', folder: 'memz' });
+  const doc = await repo.create({ filename: 'ideaz-test-ideas', key: 'ideaz', key_type: 'freeform', doc_type: 'other', description: 'Test ideas', body: '# Test ideas', folder: 'memz' });
+  const filename = path.basename(doc.source_path);
 
   // Three edits in a row, each changing tags - mirrors the real bug report exactly
   // (editing frontmatter tags via the UI, repeatedly, and the cloud copy never
   // reflecting the latest value because it kept getting buried one layer deeper).
-  await repo.update(doc.id, { tags: ['design'] });
-  await repo.update(doc.id, { tags: ['design', 'urgent'] });
-  const final = await repo.update(doc.id, { tags: ['final'] });
+  await repo.update('memz', filename, { tags: ['design'] });
+  await repo.update('memz', filename, { tags: ['design', 'urgent'] });
+  const final = await repo.update('memz', filename, { tags: ['final'] });
 
   // The body must still be exactly the original body - no accumulated nested
   // frontmatter+body copies from prior edits.
@@ -301,4 +328,259 @@ test('MemoryRepository.update after get() does not nest a second frontmatter blo
   const delimiterLines = fileContent.current.split('\n').filter((line) => line === '---').length;
   assert.equal(delimiterLines, 2, `expected exactly one frontmatter block (2 "---" lines) in the saved file, got ${delimiterLines}:\n${fileContent.current}`);
   assert.match(fileContent.current, /tags:\n\s+- final/, `expected the final tags value ["final"] to actually reach the saved file, got:\n${fileContent.current}`);
+});
+
+// Regression coverage for a real bug reported live: MemoryRepository.rename() used to push the
+// renamed doc's content to folderfoo via POST /save/:newName (a plain write under the new name)
+// and never deleted the old name, leaving a stale DUPLICATE copy behind on folderfoo forever.
+// Fixed to use folderfoo's real POST /rename/:filename endpoint (a true in-place rename, handling
+// the raw+.meta.json sidecar pair together) instead.
+test('MemoryRepository.rename against a remote folder uses folderfoo\'s real rename endpoint, not save-under-new-name (which left a stale duplicate)', async (t) => {
+  const credsDir = tmpDir('mb-remote-path-creds-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
+
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
+  repo.registerRemoteFolder(remote);
+
+  t.mock.method(globalThis, 'fetch', mockFolderfoo([]));
+  const doc = await repo.create({ filename: 'test-ideas-mem2', key: 'K1', key_type: 'freeform', doc_type: 'plan', description: 'd', body: 'b', folder: 'memz' });
+  const filename = path.basename(doc.source_path);
+
+  const calls: string[] = [];
+  t.mock.method(globalThis, 'fetch', mockFolderfoo(calls));
+  const renamed = await repo.rename('memz', filename, 'test-ideas-mem2a.md');
+
+  assert.equal(path.basename(renamed.source_path), 'test-ideas-mem2a.md');
+  const renameCall = calls.find((c) => c.includes('/rename/'));
+  assert.ok(renameCall, `expected a /rename/ call, got: ${calls.join(', ')}`);
+  assert.ok(renameCall!.endsWith(`:${filename}`), `expected the rename URL to address the OLD filename, got: ${renameCall}`);
+  assert.ok(!calls.some((c) => c.includes('/save/')), `must not write under the new name via /save/ (that's what left the stale duplicate) — calls: ${calls.join(', ')}`);
+});
+
+// Regression coverage for a real bug reported live: MemoryRepository.delete() never touched the
+// remote copy at all — the doc reappeared on the very next poll (pullFile finds it still on
+// folderfoo, since nothing ever told folderfoo it was deleted). Fixed to archive the remote copy
+// to folderfoo's trash via POST /trash/:filename BEFORE removing anything locally.
+test('MemoryRepository.delete against a remote folder archives the remote copy via /trash/, so it cannot silently reappear on the next poll', async (t) => {
+  const credsDir = tmpDir('mb-remote-path-creds-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
+
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
+  repo.registerRemoteFolder(remote);
+
+  t.mock.method(globalThis, 'fetch', mockFolderfoo([]));
+  const doc = await repo.create({ filename: 'del-test', key: 'K1', key_type: 'freeform', doc_type: 'plan', description: 'd', body: 'b', folder: 'memz' });
+  const filename = path.basename(doc.source_path);
+
+  const calls: string[] = [];
+  t.mock.method(globalThis, 'fetch', mockFolderfoo(calls));
+  await repo.delete('memz', filename);
+
+  const trashCall = calls.find((c) => c.includes('/trash/'));
+  assert.ok(trashCall, `expected a /trash/ call, got: ${calls.join(', ')}`);
+  assert.ok(trashCall!.endsWith(`:${filename}`), `expected the trash URL to address the doc's filename, got: ${trashCall}`);
+  assert.ok(!fs.existsSync(doc.source_path), 'local mirror file must be gone too');
+});
+
+// Same bug, but for removing a single ATTACHMENT rather than the whole doc: AttachmentRepository.
+// remove() only deleted the local file + frontmatter entry, leaving the attachment's remote copy
+// (under <stem>/attachments/ on folderfoo) behind forever — reported live as "I removed an
+// attachment via the UI but still see it in folderfoo". Fixed via
+// MemoryRepository.trashAttachmentIfNeeded, mirroring delete()'s own trashRemoteFile call.
+test('AttachmentRepository.remove against a remote-backed memory doc archives the attachment via /trash/', async (t) => {
+  const credsDir = tmpDir('mb-remote-path-creds-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const memoryRepo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }], [], credsDir, loggedInIdentity());
+  const attachRepo = new AttachmentRepository(memoryRepo, skillRepo);
+
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
+  memoryRepo.registerRemoteFolder(remote);
+
+  t.mock.method(globalThis, 'fetch', mockFolderfoo([]));
+  const doc = await memoryRepo.create({ filename: 'attach-del-test', key: 'K1', key_type: 'freeform', doc_type: 'plan', description: 'd', body: 'b', folder: 'memz' });
+  const filename = path.basename(doc.source_path);
+  await attachRepo.add('memory', 'memz', filename, 'notes.json', Buffer.from('{}'));
+
+  const calls: string[] = [];
+  t.mock.method(globalThis, 'fetch', mockFolderfoo(calls));
+  await attachRepo.remove('memory', 'memz', filename, 'notes.json');
+
+  const trashCall = calls.find((c) => c.includes('/trash/'));
+  assert.ok(trashCall, `expected a /trash/ call for the attachment, got: ${calls.join(', ')}`);
+  assert.ok(trashCall!.endsWith(':notes.json'), `expected the trash URL to address the attachment's filename, got: ${trashCall}`);
+
+  const updated = await memoryRepo.get('memz', filename);
+  assert.equal(updated?.attachments?.length ?? 0, 0, 'the removed attachment must no longer be declared in frontmatter');
+});
+
+// Follow-up to the /trash/ fix above: reverting a trashed attachment on folderfoo's own side does
+// NOT re-declare it on the doc (folderfoo has no concept of "this file belongs to that doc's
+// attachment list" — it only knows the file exists again). Fixed via
+// AttachmentRepository.repairUnlistedInFolder, wired as startRemotePolling's onSynced hook (see
+// server.ts) — so the next resync that pulls the restored file back into the local mirror also
+// re-declares it via the normal remote-first update() path, pushing the healed frontmatter back to
+// folderfoo too.
+test('a file that reappears in a remote-backed doc\'s attachments/ dir (e.g. restored from folderfoo trash) is re-declared on next resync', async (t) => {
+  const credsDir = tmpDir('mb-remote-path-creds-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const memoryRepo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
+  const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }], [], credsDir, loggedInIdentity());
+  const attachRepo = new AttachmentRepository(memoryRepo, skillRepo, db);
+
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
+  memoryRepo.registerRemoteFolder(remote);
+
+  t.mock.method(globalThis, 'fetch', mockFolderfoo([]));
+  const doc = await memoryRepo.create({ filename: 'attach-heal-test', key: 'K1', key_type: 'freeform', doc_type: 'plan', description: 'd', body: 'b', folder: 'memz' });
+  const filename = path.basename(doc.source_path);
+  await attachRepo.add('memory', 'memz', filename, 'notes.json', Buffer.from('{}'));
+  await attachRepo.remove('memory', 'memz', filename, 'notes.json');
+  let mid = await memoryRepo.get('memz', filename);
+  assert.equal(mid?.attachments?.length ?? 0, 0, 'sanity check: removed and no longer declared');
+
+  // Simulate "restored from folderfoo's trash, then pulled back down by a resync": write the file
+  // straight onto the local mirror's attachments/ dir, bypassing AttachmentRepository entirely —
+  // this is what pollOne's pullFile would do on finding it in a live changed-since listing.
+  const attachDir = path.join(path.dirname(doc.source_path), filename.replace(/\.md$/, ''), 'attachments');
+  fs.mkdirSync(attachDir, { recursive: true });
+  fs.writeFileSync(path.join(attachDir, 'notes.json'), '{}');
+
+  const memorySpec = memorySyncSpec([{ name: 'memz', path: mirrorDir }]);
+  const calls: string[] = [];
+  // reconcileDeletions treats anything absent from a live changed-since listing as remotely
+  // deleted — for BOTH doc files (walkMarkdownFiles) and, since the attachment-pruning fix, ATTACHMENT
+  // files too (walkAttachmentFiles). The doc's own .md file and the reappeared attachment must both
+  // be reported present, or the poll would delete them out from under this test before the heal
+  // step ever runs — realistic, since a file genuinely restored from folderfoo's trash IS back in
+  // folderfoo's live listing, which is how it gets pulled back into the local mirror at all.
+  t.mock.method(globalThis, 'fetch', async (url: string, init?: RequestInit) => {
+    calls.push(url);
+    if (url.includes('/folders/last-changed')) return { ok: true, status: 200, json: async () => ({ lastChanged: 1 }) } as Response;
+    if (url.includes('/folders/changed-since')) {
+      // mtime: 0 on both entries keeps them out of pollOne's re-pull set (getChangedSince filters
+      // strictly by mtime > since, and this test forces since=0) while still counting as "present"
+      // for reconcileDeletions' plain set-membership checks — so the doc's real local content (with
+      // its already-mutated attachments field) and the manually-written attachment file are never
+      // overwritten/deleted by this poll.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          files: [
+            { name: filename, folderPath: 'memz', mtime: 0 },
+            { name: 'notes.json', folderPath: `memz/${filename.replace(/\.md$/, '')}/attachments`, mtime: 0 },
+          ],
+          serverTime: Date.now(),
+        }),
+      } as Response;
+    }
+    return mockFolderfoo(calls)(url, init);
+  });
+  const poller = startRemotePolling(db, memorySpec, [remote], credsDir, (folder) => attachRepo.repairUnlistedInFolder('memory_docs', folder.name));
+  try {
+    await poller.resyncNow('memz');
+  } finally {
+    poller.stop();
+  }
+
+  const healed = await memoryRepo.get('memz', filename);
+  assert.deepEqual(
+    healed?.attachments?.map((a) => a.filename),
+    ['notes.json'],
+    'the reappeared file must be re-declared in the doc\'s attachments list'
+  );
+  assert.ok(
+    calls.some((c) => c.includes('/save/')),
+    `expected the healed frontmatter to be pushed back to folderfoo via /save/, got: ${calls.join(', ')}`
+  );
+});
+
+// Same bug, for SkillRepository.delete() — skills are directory-based on the remote side
+// (<remoteFolderPath>/<skillName>/SKILL.md), so the fix uses DELETE /folders/<skillDir> (trashing
+// the whole directory) rather than /trash/:filename (which addresses a single file).
+test('SkillRepository.delete against a remote folder archives the remote skill DIRECTORY via DELETE /folders/*', async (t) => {
+  const credsDir = tmpDir('mb-remote-path-creds-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const repo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }], [], credsDir, loggedInIdentity());
+
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'team-qa');
+  const remote: RemoteFolder = { name: 'team-qa', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'work/qa', mirrorDir, mode: 'dev', username: 'testuser' };
+  repo.registerRemoteFolder(remote);
+
+  t.mock.method(globalThis, 'fetch', mockFolderfoo([]));
+  await repo.create(
+    { name: 'del-test-skill', description: 'Demo. Use when testing.', owner: null, status: 'unreviewed', tags: [], trigger_phrases: [] },
+    'Body.',
+    undefined,
+    'team-qa'
+  );
+
+  const calls: string[] = [];
+  t.mock.method(globalThis, 'fetch', mockFolderfoo(calls));
+  await repo.delete('del-test-skill', 'team-qa');
+
+  assert.ok(
+    calls.some((c) => c.includes('/folders/work/qa/del-test-skill')),
+    `expected a DELETE /folders/work/qa/del-test-skill call, got: ${calls.join(', ')}`
+  );
+});
+
+// Regression coverage for the "remote is the source of truth" ordering: every create/update/rename
+// against a remote folder must call folderfoo FIRST and only touch the local mirror on success —
+// a remote failure (outage, 4xx, whatever) must leave ZERO local trace, not a local write that
+// then gets rolled back. These tests simulate an outage (every fetch call throws) and assert
+// nothing local changed at all, rather than asserting a rollback happened.
+test('MemoryRepository.create against a remote folder leaves NO local trace when the remote call fails (outage)', async (t) => {
+  const credsDir = tmpDir('mb-remote-path-creds-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
+
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
+  repo.registerRemoteFolder(remote);
+
+  t.mock.method(globalThis, 'fetch', async () => {
+    throw new Error('simulated folderfoo outage');
+  });
+
+  await assert.rejects(() =>
+    repo.create({ filename: 'outage-test', key: 'K1', key_type: 'freeform', doc_type: 'plan', description: 'd', body: 'b', folder: 'memz' })
+  );
+  assert.ok(!fs.existsSync(path.join(mirrorDir, 'outage-test.md')), 'no local .md file must exist after a failed remote create');
+});
+
+test('MemoryRepository.update against a remote folder leaves the local file UNCHANGED when the remote call fails (outage)', async (t) => {
+  const credsDir = tmpDir('mb-remote-path-creds-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
+
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  const remote: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' };
+  repo.registerRemoteFolder(remote);
+
+  t.mock.method(globalThis, 'fetch', mockFolderfoo([]));
+  const doc = await repo.create({ filename: 'update-outage', key: 'K1', key_type: 'freeform', doc_type: 'plan', description: 'original', body: 'original body', folder: 'memz' });
+  const before = fs.readFileSync(doc.source_path, 'utf-8');
+
+  t.mock.method(globalThis, 'fetch', async () => {
+    throw new Error('simulated folderfoo outage');
+  });
+  await assert.rejects(() => repo.update('memz', 'update-outage.md', { description: 'CHANGED DURING OUTAGE' }));
+
+  const after = fs.readFileSync(doc.source_path, 'utf-8');
+  assert.equal(before, after, 'local file must be byte-for-byte unchanged after a failed remote update');
 });

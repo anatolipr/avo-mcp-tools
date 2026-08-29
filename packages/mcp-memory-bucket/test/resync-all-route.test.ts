@@ -67,7 +67,7 @@ test('POST /api/remote-folders/resync-all: force-resyncs a memory remote source 
   // Seed the mirror with a file already indexed, as if a prior poll had pulled it.
   fs.mkdirSync(mirrorDir, { recursive: true });
   const filePath = path.join(mirrorDir, 'doomed.md');
-  fs.writeFileSync(filePath, '---\nid: doomed\nkey: doomed\ndescription: D\n---\nbody');
+  fs.writeFileSync(filePath, '---\nkey: doomed\ndescription: D\n---\nbody');
   const memorySpec = memorySyncSpec([{ name: 'memz', path: mirrorDir }]);
   const { initialScan } = await import('../src/store/sync.js');
   initialScan(db, memorySpec);
@@ -96,7 +96,7 @@ test('POST /api/remote-folders/resync-all: force-resyncs a memory remote source 
     assert.equal(data.resynced, true);
 
     assert.ok(!fs.existsSync(filePath), 'the stale mirror file must be gone after a forced resync-all');
-    const row = db.prepare(`SELECT * FROM memory_docs WHERE id = ?`).get('doomed');
+    const row = db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(filePath);
     assert.equal(row, undefined);
   } finally {
     memoryPoller.stop();

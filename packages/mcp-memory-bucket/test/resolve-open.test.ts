@@ -56,7 +56,7 @@ test('POST /api/folderfoo/resolve-open: finds a memory doc opened from the root 
   // Write the mirror file directly + index it (no live network call needed for this test).
   fs.mkdirSync(mirrorDir, { recursive: true });
   const filePath = path.join(mirrorDir, 'ideaz-ideas-list-abc123.md');
-  fs.writeFileSync(filePath, '---\nid: ideaz-ideas-list-abc123\nkey: IDEAZ\ndescription: Ideas\n---\nBody.\n');
+  fs.writeFileSync(filePath, '---\nkey: IDEAZ\ndescription: Ideas\n---\nBody.\n');
   const spec = memorySyncSpec([{ name: 'memz', path: mirrorDir }]);
   const { initialScan } = await import('../src/store/sync.js');
   initialScan(db, spec);
@@ -73,7 +73,7 @@ test('POST /api/folderfoo/resolve-open: finds a memory doc opened from the root 
     assert.equal(res.status, 200);
     const data = await res.json();
     assert.equal(data.table, 'memory_docs');
-    assert.equal(data.id, 'ideaz-ideas-list-abc123');
+    assert.equal(data.id, filePath);
   } finally {
     server.close();
   }
@@ -90,7 +90,8 @@ test('POST /api/folderfoo/resolve-open: finds a doc opened from a subfolder nest
   memoryRepo.registerRemoteFolder(remote);
 
   fs.mkdirSync(path.join(mirrorDir, 'sub'), { recursive: true });
-  fs.writeFileSync(path.join(mirrorDir, 'sub', 'nested-doc.md'), '---\nid: nested-doc\nkey: NESTED\ndescription: Nested\n---\nBody.\n');
+  const nestedFilePath = path.join(mirrorDir, 'sub', 'nested-doc.md');
+  fs.writeFileSync(nestedFilePath, '---\nkey: NESTED\ndescription: Nested\n---\nBody.\n');
   const spec = memorySyncSpec([{ name: 'memz', path: mirrorDir }]);
   const { initialScan } = await import('../src/store/sync.js');
   initialScan(db, spec);
@@ -108,7 +109,7 @@ test('POST /api/folderfoo/resolve-open: finds a doc opened from a subfolder nest
     });
     assert.equal(res.status, 200);
     const data = await res.json();
-    assert.equal(data.id, 'nested-doc');
+    assert.equal(data.id, nestedFilePath);
   } finally {
     server.close();
   }

@@ -228,6 +228,98 @@ export async function writeFile(server: string, baseDir: string, tenantId: strin
 }
 
 /**
+ * Renames one file in place via POST /rename/:filename — a true filesystem rename on folderfoo's
+ * side (handles the raw+.meta.json sidecar pair together, touches tags/search-index/watermark),
+ * not a write-under-the-new-name-and-leave-the-old-one-behind. Used by MemoryRepository.rename()/
+ * SkillRepository.rename() so a doc/skill renamed through this tool doesn't leave an orphaned
+ * duplicate under its old name on folderfoo — the same on-disk `newPath.md`/`newDir/SKILL.md`
+ * write those callers already do locally, now also propagated as a real rename remotely, instead
+ * of write-new (create) + never delete-old.
+ */
+export async function renameFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string, newName: string): Promise<void> {
+  await withAuth(
+    server,
+    baseDir,
+    (jwt) =>
+      fetch(`${server}/rename/${filenameParam(folderPath, name)}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'application/json' },
+        body: JSON.stringify({ newName }),
+      }),
+    async () => undefined
+  );
+}
+
+/**
+ * Archives (soft-deletes) one file to the user's folderfoo trash via POST /trash/:filename —
+ * removes it from the folder's live listing (so a future poll's changed-since/reconcileDeletions
+ * no longer sees it there) without a hard, unrecoverable delete on folderfoo's own side. Used by
+ * MemoryRepository.delete()/SkillRepository.delete() so deleting a doc through this tool actually
+ * removes the remote copy too, instead of only the local mirror + cache row — previously the
+ * remote file was never touched at all, so the NEXT poll would pull it right back in, making a
+ * "deleted" doc silently reappear.
+ */
+export async function trashFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string): Promise<void> {
+  await withAuth(
+    server,
+    baseDir,
+    (jwt) =>
+      fetch(`${server}/trash/${filenameParam(folderPath, name)}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId },
+      }),
+    async () => undefined
+  );
+}
+
+/**
+ * Archives (soft-deletes) a whole folder subtree to the user's folderfoo trash via
+ * DELETE /folders/<folderPath> — used by SkillRepository.delete(), since a skill's remote content
+ * lives inside a directory named after the skill (<remoteFolderPath>/<skillName>/SKILL.md +
+ * any attachments alongside it), not a single filename trashFile can address. `folderPath` is the
+ * full tenant-relative path to trash (e.g. "memz/my-skill"), NOT query-encoded — this route takes
+ * it as a wildcard path segment, unlike every other folderPath-bearing endpoint in this client
+ * (which use a `?folderPath=` query param), because folderfoo's own route is DELETE /folders/*.
+ */
+export async function trashFolder(server: string, baseDir: string, tenantId: string, folderPath: string): Promise<void> {
+  await withAuth(
+    server,
+    baseDir,
+    (jwt) =>
+      fetch(`${server}/folders/${folderPath.split('/').map(encodeURIComponent).join('/')}`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId },
+      }),
+    async () => undefined
+  );
+}
+
+/**
+ * Renames/moves a whole folder subtree via POST /folders/rename — a true directory rename on
+ * folderfoo's side (fs.renameSync, plus rewriting any shares nested inside it), not a
+ * write-under-the-new-path-and-leave-the-old-one-behind. Used by SkillRepository.rename(), since a
+ * skill's remote content lives inside a directory named after the skill
+ * (<remoteFolderPath>/<skillName>/SKILL.md + any attachments alongside it) — renaming the skill
+ * means renaming that whole directory, which trashFile/renameFile (single-filename operations)
+ * can't address. `folderPath`/`newFolderPath` are full tenant-relative paths (e.g.
+ * "memz/old-skill-name" / "memz/new-skill-name"), sent as JSON body fields per folderfoo's own
+ * route (unlike the wildcard-path DELETE /folders/* trashFolder uses).
+ */
+export async function renameFolder(server: string, baseDir: string, tenantId: string, folderPath: string, newFolderPath: string): Promise<void> {
+  await withAuth(
+    server,
+    baseDir,
+    (jwt) =>
+      fetch(`${server}/folders/rename`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'application/json' },
+        body: JSON.stringify({ folderPath, newFolderPath }),
+      }),
+    async () => undefined
+  );
+}
+
+/**
  * Writes one file's raw BINARY content via POST /save/:filename — the attachment-file counterpart
  * to writeFile's markdown-string upload. Same endpoint, same auth/retry wrapper, just a Buffer body
  * and the attachment's own mime type instead of a fixed text/markdown content-type.

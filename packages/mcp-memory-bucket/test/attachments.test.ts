@@ -32,18 +32,16 @@ test('attachmentsDirFor: skill doc uses <skillDir>/attachments', () => {
   assert.equal(attachmentsDirFor(sourcePath, 'skill'), path.join('/base/my-skill', 'attachments'));
 });
 
-test('attachmentsDirFor: memory doc uses <memoryFolder>/<id>/attachments', () => {
+test('attachmentsDirFor: memory doc uses <memoryFolder>/<filename>/attachments', () => {
   const sourcePath = '/base/abc123.md';
   assert.equal(attachmentsDirFor(sourcePath, 'memory'), path.join('/base', 'abc123', 'attachments'));
 });
 
-test('writeAttachmentFile: writes file and returns entry with computed size/mime', () => {
+test('writeAttachmentFile: writes file and returns entry metadata', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-test-'));
   const entry = writeAttachmentFile(dir, 'foo.json', Buffer.from('{"a":1}'));
   assert.equal(entry.filename, 'foo.json');
   assert.equal(entry.path, path.join('attachments', 'foo.json'));
-  assert.equal(entry.mime_type, 'application/json');
-  assert.equal(entry.size, Buffer.byteLength('{"a":1}'));
   assert.ok(fs.existsSync(path.join(dir, 'foo.json')));
 });
 
@@ -69,64 +67,138 @@ test('writeAttachmentFile: rejects path-traversal attempts', () => {
 
 test('AttachmentRepository.add: creates file and updates doc frontmatter', async () => {
   const { memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-1', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-1', key: 'TEST-1', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any); // skillRepo unused in this test
-  const entry = await attachRepo.add('memory', doc.id, 'data.json', Buffer.from('{}'));
+  const entry = await attachRepo.add('memory', 'mem', filename, 'data.json', Buffer.from('{}'));
   assert.equal(entry.filename, 'data.json');
-  const updated = (await memoryRepo.get(doc.id))!;
+  const updated = (await memoryRepo.get('mem', filename))!;
   assert.deepEqual(updated.attachments, [entry]);
 });
 
 test('AttachmentRepository.list: returns frontmatter-declared attachments', async () => {
   const { memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-2', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-2', key: 'TEST-2', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'a.json', Buffer.from('{}'));
-  await attachRepo.add('memory', doc.id, 'b.json', Buffer.from('{}'));
-  assert.equal((await attachRepo.list('memory', doc.id)).length, 2);
+  await attachRepo.add('memory', 'mem', filename, 'a.json', Buffer.from('{}'));
+  await attachRepo.add('memory', 'mem', filename, 'b.json', Buffer.from('{}'));
+  assert.equal((await attachRepo.list('memory', 'mem', filename)).length, 2);
 });
 
-test('AttachmentRepository.update: replaces content and re-detects mime', async () => {
+test('AttachmentRepository.update: replaces content in place', async () => {
   const { memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-3', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-3', key: 'TEST-3', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'data.json', Buffer.from('{"v":1}'));
-  const updated = await attachRepo.update('memory', doc.id, 'data.json', Buffer.from('{"v":2}'));
-  assert.equal(updated.size, Buffer.byteLength('{"v":2}'));
-  const dir = attachmentsDirFor((await memoryRepo.get(doc.id))!.source_path, 'memory');
+  await attachRepo.add('memory', 'mem', filename, 'data.json', Buffer.from('{"v":1}'));
+  const updated = await attachRepo.update('memory', 'mem', filename, 'data.json', Buffer.from('{"v":2}'));
+  assert.equal(updated.filename, 'data.json');
+  const dir = attachmentsDirFor((await memoryRepo.get('mem', filename))!.source_path, 'memory');
   assert.equal(fs.readFileSync(path.join(dir, 'data.json'), 'utf-8'), '{"v":2}');
 });
 
 test('AttachmentRepository.remove: deletes file and frontmatter entry', async () => {
   const { memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-4', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-4', key: 'TEST-4', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'data.json', Buffer.from('{}'));
-  await attachRepo.remove('memory', doc.id, 'data.json');
-  assert.equal((await memoryRepo.get(doc.id))!.attachments?.length, 0);
+  await attachRepo.add('memory', 'mem', filename, 'data.json', Buffer.from('{}'));
+  await attachRepo.remove('memory', 'mem', filename, 'data.json');
+  assert.equal((await memoryRepo.get('mem', filename))!.attachments?.length, 0);
 });
 
 test('AttachmentRepository.reconcile: flags orphans and unlisted files', async () => {
   const { memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-5', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-5', key: 'TEST-5', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'tracked.json', Buffer.from('{}'));
-  const dir = attachmentsDirFor((await memoryRepo.get(doc.id))!.source_path, 'memory');
+  await attachRepo.add('memory', 'mem', filename, 'tracked.json', Buffer.from('{}'));
+  const dir = attachmentsDirFor((await memoryRepo.get('mem', filename))!.source_path, 'memory');
   fs.rmSync(path.join(dir, 'tracked.json'));
   fs.writeFileSync(path.join(dir, 'stray.json'), '{}');
-  const result = await attachRepo.reconcile('memory', doc.id);
+  const result = await attachRepo.reconcile('memory', 'mem', filename);
   assert.deepEqual(result.orphans, ['tracked.json']);
   assert.deepEqual(result.unlisted, ['stray.json']);
 });
 
+test('AttachmentRepository.reconcileToDisk: drops orphans and adds unlisted files in one pass', async () => {
+  const { memoryRepo } = setupMemoryRepo();
+  const doc = await memoryRepo.create({ filename: 'test-5b', key: 'TEST-5B', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
+  const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
+  await attachRepo.add('memory', 'mem', filename, 'tracked.json', Buffer.from('{}'));
+  const dir = attachmentsDirFor((await memoryRepo.get('mem', filename))!.source_path, 'memory');
+  fs.rmSync(path.join(dir, 'tracked.json'));
+  fs.writeFileSync(path.join(dir, 'stray.json'), '{}');
+
+  const result = await attachRepo.reconcileToDisk('memory', 'mem', filename);
+  assert.deepEqual(result.removed, ['tracked.json']);
+  assert.deepEqual(result.added.map((a) => a.filename), ['stray.json']);
+
+  const updated = await memoryRepo.get('mem', filename);
+  assert.deepEqual(updated?.attachments?.map((a) => a.filename), ['stray.json'], 'declared list must exactly match disk after reconcileToDisk');
+});
+
+test('AttachmentRepository.reconcileToDisk: no-op (no update() call) when declared already matches disk', async () => {
+  const { memoryRepo } = setupMemoryRepo();
+  const doc = await memoryRepo.create({ filename: 'test-5c', key: 'TEST-5C', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
+  const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
+  await attachRepo.add('memory', 'mem', filename, 'tracked.json', Buffer.from('{}'));
+
+  const result = await attachRepo.reconcileToDisk('memory', 'mem', filename);
+  assert.deepEqual(result, { added: [], removed: [] });
+});
+
+// Regression coverage for a real bug: repairUnlistedInFolder resolved a memory doc's identity via
+// path.basename(row.source_path) — just the bare filename, dropping any subfolder. For a doc
+// living in a subfolder of the configured folder (e.g. "sub/DOC.md"), that reconstructs the WRONG
+// (nonexistent) path at the folder root and 404s in getDoc, logged as "failed to repair
+// attachments... not found" for every such doc on every resync. Fixed to use
+// memoryRepo.splitSourcePath() (the same helper the web UI's splitMemoryId route handler already
+// uses for this identical problem), which correctly preserves the subfolder.
+test('AttachmentRepository.repairUnlistedInFolder: resolves a memory doc living in a SUBFOLDER of the configured folder', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-repo-test-'));
+  const db = openCache(':memory:');
+  const memoryRepo = new MemoryRepository(db, [{ name: 'mem', path: dir }]);
+  const { initialScan, memorySyncSpec } = await import('../src/store/sync.js');
+
+  const doc = await memoryRepo.create({
+    filename: 'sub-doc',
+    key: 'SUB-1',
+    key_type: 'ticket',
+    doc_type: 'other',
+    description: 'd',
+    body: 'b',
+    subfolder: 'sub',
+  });
+  assert.ok(doc.source_path.includes(`${path.sep}sub${path.sep}`), 'sanity check: doc really is in a subfolder');
+  initialScan(db, memorySyncSpec([{ name: 'mem', path: dir }]));
+
+  // Drop a file straight onto disk under the doc's attachments/ dir, bypassing AttachmentRepository
+  // entirely — same as a file reappearing via an external sync, which is what repairUnlistedInFolder
+  // exists to catch.
+  const attachDir = attachmentsDirFor(doc.source_path, 'memory');
+  fs.mkdirSync(attachDir, { recursive: true });
+  fs.writeFileSync(path.join(attachDir, 'notes.json'), '{}');
+
+  const attachRepo = new AttachmentRepository(memoryRepo, undefined as any, db);
+  await attachRepo.repairUnlistedInFolder('memory_docs', 'mem');
+
+  const updated = await memoryRepo.get('mem', path.relative(dir, doc.source_path));
+  assert.deepEqual(updated?.attachments?.map((a) => a.filename), ['notes.json'], 'the subfolder doc must be correctly resolved and healed, not 404');
+});
+
 test('MemoryRepository.delete: cascades to attachments directory', async () => {
   const { memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-6', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-6', key: 'TEST-6', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'data.json', Buffer.from('{}'));
-  const dir = attachmentsDirFor((await memoryRepo.get(doc.id))!.source_path, 'memory');
+  await attachRepo.add('memory', 'mem', filename, 'data.json', Buffer.from('{}'));
+  const dir = attachmentsDirFor((await memoryRepo.get('mem', filename))!.source_path, 'memory');
   assert.ok(fs.existsSync(dir));
-  await memoryRepo.delete(doc.id);
+  await memoryRepo.delete('mem', filename);
   assert.ok(!fs.existsSync(dir));
 });
 
@@ -154,11 +226,12 @@ test('registerAttachmentTools: registers all six attachment tools', () => {
 
 test('AttachmentRepository.absolutePathFor: joins the attachments dir with the filename', async () => {
   const { memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-7', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-7', key: 'TEST-7', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'data.json', Buffer.from('{}'));
-  const dir = attachmentsDirFor((await memoryRepo.get(doc.id))!.source_path, 'memory');
-  const absolutePath = await attachRepo.absolutePathFor('memory', doc.id, 'data.json');
+  await attachRepo.add('memory', 'mem', filename, 'data.json', Buffer.from('{}'));
+  const dir = attachmentsDirFor((await memoryRepo.get('mem', filename))!.source_path, 'memory');
+  const absolutePath = await attachRepo.absolutePathFor('memory', 'mem', filename, 'data.json');
   assert.equal(absolutePath, path.join(dir, 'data.json'));
   assert.ok(path.isAbsolute(absolutePath));
   assert.ok(fs.existsSync(absolutePath));
@@ -173,14 +246,15 @@ function collectTools(attachRepo: AttachmentRepository) {
 
 test('attachment_add tool: response absolute_path is absolute and resolves to the written file', async () => {
   const { dir, memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-8', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-8', key: 'TEST-8', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
   const handlers = collectTools(attachRepo);
 
   const srcFile = path.join(dir, 'source.json');
   fs.writeFileSync(srcFile, '{"v":1}');
 
-  const result = await handlers.attachment_add({ kind: 'memory', doc: doc.id, filename: 'data.json', file_path: srcFile });
+  const result = await handlers.attachment_add({ kind: 'memory', folder: 'mem', doc: filename, filename: 'data.json', file_path: srcFile });
   const entry = JSON.parse(result.content[0].text);
   assert.ok(path.isAbsolute(entry.absolute_path));
   assert.ok(fs.existsSync(entry.absolute_path));
@@ -189,14 +263,15 @@ test('attachment_add tool: response absolute_path is absolute and resolves to th
 
 test('attachment_get tool: response absolute_path matches the known attachments dir and resolves on disk', async () => {
   const { dir, memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-9', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-9', key: 'TEST-9', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'data.json', Buffer.from('{"v":1}'));
+  await attachRepo.add('memory', 'mem', filename, 'data.json', Buffer.from('{"v":1}'));
   const handlers = collectTools(attachRepo);
 
-  const result = await handlers.attachment_get({ kind: 'memory', doc: doc.id, filename: 'data.json' });
+  const result = await handlers.attachment_get({ kind: 'memory', folder: 'mem', doc: filename, filename: 'data.json' });
   const entry = JSON.parse(result.content[0].text);
-  const expectedDir = attachmentsDirFor((await memoryRepo.get(doc.id))!.source_path, 'memory');
+  const expectedDir = attachmentsDirFor((await memoryRepo.get('mem', filename))!.source_path, 'memory');
   assert.equal(entry.absolute_path, path.join(expectedDir, 'data.json'));
   assert.ok(path.isAbsolute(entry.absolute_path));
   assert.ok(fs.existsSync(entry.absolute_path));
@@ -205,14 +280,15 @@ test('attachment_get tool: response absolute_path matches the known attachments 
 
 test('attachment_update tool: response absolute_path resolves to the updated file', async () => {
   const { dir, memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-10', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-10', key: 'TEST-10', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'data.json', Buffer.from('{"v":1}'));
+  await attachRepo.add('memory', 'mem', filename, 'data.json', Buffer.from('{"v":1}'));
   const handlers = collectTools(attachRepo);
 
   const srcFile = path.join(dir, 'updated.json');
   fs.writeFileSync(srcFile, '{"v":2}');
-  const result = await handlers.attachment_update({ kind: 'memory', doc: doc.id, filename: 'data.json', file_path: srcFile });
+  const result = await handlers.attachment_update({ kind: 'memory', folder: 'mem', doc: filename, filename: 'data.json', file_path: srcFile });
   const entry = JSON.parse(result.content[0].text);
   assert.ok(path.isAbsolute(entry.absolute_path));
   assert.equal(fs.readFileSync(entry.absolute_path, 'utf-8'), '{"v":2}');
@@ -220,13 +296,14 @@ test('attachment_update tool: response absolute_path resolves to the updated fil
 
 test('attachment_list tool: every entry includes a resolvable absolute_path', async () => {
   const { memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-11', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-11', key: 'TEST-11', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'a.json', Buffer.from('{}'));
-  await attachRepo.add('memory', doc.id, 'b.json', Buffer.from('{}'));
+  await attachRepo.add('memory', 'mem', filename, 'a.json', Buffer.from('{}'));
+  await attachRepo.add('memory', 'mem', filename, 'b.json', Buffer.from('{}'));
   const handlers = collectTools(attachRepo);
 
-  const result = await handlers.attachment_list({ kind: 'memory', doc: doc.id });
+  const result = await handlers.attachment_list({ kind: 'memory', folder: 'mem', doc: filename });
   const entries = JSON.parse(result.content[0].text);
   assert.equal(entries.length, 2);
   for (const entry of entries) {
@@ -239,64 +316,68 @@ test('attachment_list tool: every entry includes a resolvable absolute_path', as
 
 test('AttachmentRepository.remove: throws on path-traversal filename and does not delete outside files', async () => {
   const { dir, memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-12', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-12', key: 'TEST-12', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'data.json', Buffer.from('{}'));
+  await attachRepo.add('memory', 'mem', filename, 'data.json', Buffer.from('{}'));
 
   // A real file outside the attachments dir, at the same relative depth a
-  // '../../evil.txt' traversal from <memFolder>/<id>/attachments would reach.
+  // '../../evil.txt' traversal from <memFolder>/<filename>/attachments would reach.
   const victim = path.join(dir, 'VICTIM.txt');
   fs.writeFileSync(victim, 'do not delete me');
 
-  await assert.rejects(() => attachRepo.remove('memory', doc.id, '../../VICTIM.txt'), /escapes/);
+  await assert.rejects(() => attachRepo.remove('memory', 'mem', filename, '../../VICTIM.txt'), /escapes/);
   assert.ok(fs.existsSync(victim), 'victim file outside the attachments dir must survive');
   // The legitimate attachment must be untouched too.
-  assert.equal((await memoryRepo.get(doc.id))!.attachments?.length, 1);
+  assert.equal((await memoryRepo.get('mem', filename))!.attachments?.length, 1);
 });
 
 test('AttachmentRepository.update: throws on path-traversal filename and does not delete outside files', async () => {
   const { dir, memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-13', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-13', key: 'TEST-13', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
 
   // Directly inject a malicious declared filename into the doc's attachments list — this is the
   // shape update()'s "existing entry" lookup needs to proceed past its not-found guard and reach
   // the vulnerable rmSync call, mirroring how an already-declared attachment with a traversal-y
   // name (e.g. synced in from disk, or added before this fix existed) could be updated.
-  await memoryRepo.update(doc.id, {
-    attachments: [{ filename: '../../VICTIM2.txt', path: 'attachments/VICTIM2.txt', mime_type: 'text/plain', size: 0, added_at: new Date().toISOString() }],
+  await memoryRepo.update('mem', filename, {
+    attachments: [{ filename: '../../VICTIM2.txt', path: 'attachments/VICTIM2.txt', added_at: new Date().toISOString() }],
   } as any);
 
   const victim = path.join(dir, 'VICTIM2.txt');
   fs.writeFileSync(victim, 'do not delete me');
 
-  await assert.rejects(() => attachRepo.update('memory', doc.id, '../../VICTIM2.txt', Buffer.from('new')), /escapes/);
+  await assert.rejects(() => attachRepo.update('memory', 'mem', filename, '../../VICTIM2.txt', Buffer.from('new')), /escapes/);
   assert.ok(fs.existsSync(victim), 'victim file outside the attachments dir must survive');
 });
 
-// --- I2: memory doc delete removes the <id>/ wrapper directory, not just attachments/ ---
+// --- I2: memory doc delete removes the wrapper directory, not just attachments/ ---
 
-test('MemoryRepository.delete: removes the <id>/ wrapper directory entirely, not just attachments/', async () => {
+test('MemoryRepository.delete: removes the wrapper directory entirely, not just attachments/', async () => {
   const { memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-14', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-14', key: 'TEST-14', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'data.json', Buffer.from('{}'));
+  await attachRepo.add('memory', 'mem', filename, 'data.json', Buffer.from('{}'));
 
-  const attachmentsDir = attachmentsDirFor((await memoryRepo.get(doc.id))!.source_path, 'memory');
-  const idDir = path.dirname(attachmentsDir);
-  assert.ok(fs.existsSync(idDir));
+  const attachmentsDir = attachmentsDirFor((await memoryRepo.get('mem', filename))!.source_path, 'memory');
+  const wrapperDir = path.dirname(attachmentsDir);
+  assert.ok(fs.existsSync(wrapperDir));
 
-  await memoryRepo.delete(doc.id);
+  await memoryRepo.delete('mem', filename);
 
   assert.ok(!fs.existsSync(attachmentsDir));
-  assert.ok(!fs.existsSync(idDir), '<id>/ wrapper directory must not be left behind');
+  assert.ok(!fs.existsSync(wrapperDir), 'wrapper directory must not be left behind');
 });
 
 // --- I3: attachment_add/update stat-check before reading full file bytes ---
 
 test('attachment_add tool: rejects an oversized file via stat check without reading its bytes', async () => {
   const { dir, memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-15', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-15', key: 'TEST-15', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
   const handlers = collectTools(attachRepo);
 
@@ -315,7 +396,7 @@ test('attachment_add tool: rejects an oversized file via stat check without read
     return originalReadFileSync.apply(fs, args as any);
   };
   try {
-    const result = await handlers.attachment_add({ kind: 'memory', doc: doc.id, filename: 'huge.bin', file_path: bigFile });
+    const result = await handlers.attachment_add({ kind: 'memory', folder: 'mem', doc: filename, filename: 'huge.bin', file_path: bigFile });
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /exceeds/);
     assert.equal(readFileSyncCalled, false, 'readFileSync must not be called once the stat check rejects the file');
@@ -326,9 +407,10 @@ test('attachment_add tool: rejects an oversized file via stat check without read
 
 test('attachment_update tool: rejects an oversized file via stat check without reading its bytes', async () => {
   const { dir, memoryRepo } = setupMemoryRepo();
-  const doc = await memoryRepo.create({ key: 'TEST-16', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const doc = await memoryRepo.create({ filename: 'test-16', key: 'TEST-16', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
-  await attachRepo.add('memory', doc.id, 'data.json', Buffer.from('{}'));
+  await attachRepo.add('memory', 'mem', filename, 'data.json', Buffer.from('{}'));
   const handlers = collectTools(attachRepo);
 
   const bigFile = path.join(dir, 'huge2.bin');
@@ -343,7 +425,7 @@ test('attachment_update tool: rejects an oversized file via stat check without r
     return originalReadFileSync.apply(fs, args as any);
   };
   try {
-    const result = await handlers.attachment_update({ kind: 'memory', doc: doc.id, filename: 'data.json', file_path: bigFile });
+    const result = await handlers.attachment_update({ kind: 'memory', folder: 'mem', doc: filename, filename: 'data.json', file_path: bigFile });
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /exceeds/);
     assert.equal(readFileSyncCalled, false, 'readFileSync must not be called once the stat check rejects the file');
@@ -362,10 +444,10 @@ test('AttachmentRepository: skill-kind add/list/cascade-delete end-to-end', asyn
   );
   const attachRepo = new AttachmentRepository(undefined as any, skillRepo);
 
-  const entry = await attachRepo.add('skill', skill.name, 'notes.txt', Buffer.from('hello'));
+  const entry = await attachRepo.add('skill', skill.folder, skill.name, 'notes.txt', Buffer.from('hello'));
   assert.equal(entry.filename, 'notes.txt');
 
-  const listed = await attachRepo.list('skill', skill.name);
+  const listed = await attachRepo.list('skill', skill.folder, skill.name);
   assert.equal(listed.length, 1);
   assert.equal(listed[0]!.filename, 'notes.txt');
 

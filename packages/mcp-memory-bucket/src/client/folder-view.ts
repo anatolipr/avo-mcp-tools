@@ -101,8 +101,11 @@ export class FolderView extends LitElement {
 
   static styles = css`
     :host { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+    /* padding-right reserves room for mem-bucket-app's absolutely-positioned .header-toolbar
+       overlay (rendered outside this element entirely - see its own comment), which lines up with
+       this row's top-right corner via matching padding. */
     .mode-row {
-      display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+      display: flex; align-items: center; gap: 8px; padding: 10px 320px 10px 16px;
       border-bottom: 1px solid var(--border); background: var(--bg-subtle);
     }
     .mode-row .filter-label { font-size: 12px; opacity: 0.6; font-weight: 600; }
@@ -435,7 +438,6 @@ export class FolderView extends LitElement {
             `
           )}
         </div>
-        <slot name="toolbar"></slot>
       </div>
       <div class="body-region">
         <div

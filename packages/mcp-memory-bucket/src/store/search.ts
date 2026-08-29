@@ -135,12 +135,13 @@ export function searchByDate(
 
   return rows.map((row) => {
     // Scoped by ref_folder for skills (compound key: a bare `id` can match two different
-    // folders' same-named skills — see doc_dates'/search_index's ref_folder column). memory_docs
-    // ids never collide, so ref_folder is always '' there and the extra condition is a no-op.
+    // folders' same-named skills — see doc_dates'/search_index's ref_folder column). memory_docs'
+    // ref_id is source_path (globally unique by construction), so ref_folder is always '' there
+    // and the extra condition is a no-op.
     const bodyRow = (
       row.ref_table === 'skills'
         ? db.prepare(`SELECT body FROM skills WHERE id = ? AND folder = ?`).get(row.ref_id, row.ref_folder)
-        : db.prepare(`SELECT body FROM memory_docs WHERE id = ?`).get(row.ref_id)
+        : db.prepare(`SELECT body FROM memory_docs WHERE source_path = ?`).get(row.ref_id)
     ) as { body: string } | undefined;
     return {
       ref_table: row.ref_table,
@@ -178,7 +179,7 @@ export function searchCombined(db: Database.Database, query: string, limit = 20,
                 -bm25(search_index) AS score
          FROM search_index
          LEFT JOIN skills s ON search_index.ref_table = 'skills' AND s.id = search_index.ref_id AND s.folder = search_index.ref_folder
-         LEFT JOIN memory_docs m ON search_index.ref_table = 'memory_docs' AND m.id = search_index.ref_id
+         LEFT JOIN memory_docs m ON search_index.ref_table = 'memory_docs' AND m.source_path = search_index.ref_id
          WHERE search_index MATCH ?
          ORDER BY bm25(search_index)
          LIMIT ? OFFSET ?`

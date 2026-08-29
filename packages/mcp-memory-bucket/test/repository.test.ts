@@ -67,6 +67,7 @@ test('memory create with subfolder param + getByKey exact match', async () => {
   const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const doc = await repo.create({
+    filename: 'rmxs-14',
     key: 'rmxs-14',
     key_type: 'ticket',
     doc_type: 'plan',
@@ -97,6 +98,7 @@ test('resolveWithinBase rejects folder traversal', async () => {
 
   await assert.rejects(() =>
     repo.create({
+      filename: 'escape-1',
       key: 'ESCAPE-1',
       key_type: 'ticket',
       doc_type: 'other',
@@ -222,20 +224,22 @@ test('memory search finds body text via FTS5 and bulkUpdate flips status across 
   const db = openCache(':memory:');
   const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
-  const doc1 = await repo.create({ key: 'RMXS-1', key_type: 'ticket', doc_type: 'plan', description: 'first plan', body: 'Migrate the widget schema.' });
-  const doc2 = await repo.create({ key: 'RMXS-2', key_type: 'ticket', doc_type: 'plan', description: 'second plan', body: 'Totally unrelated notes.' });
+  const doc1 = await repo.create({ filename: 'rmxs-1', key: 'RMXS-1', key_type: 'ticket', doc_type: 'plan', description: 'first plan', body: 'Migrate the widget schema.' });
+  const doc2 = await repo.create({ filename: 'rmxs-2', key: 'RMXS-2', key_type: 'ticket', doc_type: 'plan', description: 'second plan', body: 'Totally unrelated notes.' });
+  const filename1 = path.basename(doc1.source_path);
+  const filename2 = path.basename(doc2.source_path);
 
   const hits = repo.search('migrate');
   assert.equal(hits.length, 1);
-  assert.equal(hits[0]?.id, doc1.id);
+  assert.equal(hits[0]?.filename, filename1);
 
-  const results = await repo.bulkUpdate([doc1.id, doc2.id, 'missing-id'], { status: 'shipped' });
+  const results = await repo.bulkUpdate([{ filename: filename1 }, { filename: filename2 }, { filename: 'missing.md' }], { status: 'shipped' });
   assert.deepEqual(
     results.map((r) => r.ok),
     [true, true, false]
   );
-  assert.equal((await repo.get(doc1.id))?.status, 'shipped');
-  assert.equal((await repo.get(doc2.id))?.status, 'shipped');
+  assert.equal((await repo.get(undefined, filename1))?.status, 'shipped');
+  assert.equal((await repo.get(undefined, filename2))?.status, 'shipped');
 
   db.close();
   fs.rmSync(memDir, { recursive: true, force: true });
@@ -247,6 +251,7 @@ test('memory doc key is searchable via FTS even when the key never appears in de
   const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   await repo.create({
+    filename: 'rmxs-15',
     key: 'RMXS-15',
     key_type: 'ticket',
     doc_type: 'plan',
@@ -268,6 +273,7 @@ test('bare hyphenated key search does not silently return zero results', async (
   const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   await repo.create({
+    filename: 'rmxs-15',
     key: 'RMXS-15',
     key_type: 'ticket',
     doc_type: 'plan',
@@ -317,7 +323,7 @@ test('bucket_search finds hits across both skills and memory docs, ranked togeth
   const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   await skillRepo.create({ name: 'widget-skill', description: 'Widget skill.', tags: [], trigger_phrases: [] }, 'A widget pattern.');
-  await memoryRepo.create({ key: 'RMXS-9', key_type: 'ticket', doc_type: 'plan', description: 'widget plan', body: 'A widget migration plan.' });
+  await memoryRepo.create({ filename: 'rmxs-9', key: 'RMXS-9', key_type: 'ticket', doc_type: 'plan', description: 'widget plan', body: 'A widget migration plan.' });
 
   const hits = searchCombined(db, 'widget');
   assert.deepEqual(
@@ -385,27 +391,27 @@ test('memory bulkGet/bulkCreate/bulkDelete: partial failures do not abort the ba
   const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const createResults = await repo.bulkCreate([
-    { key: 'RMXS-10', key_type: 'ticket', doc_type: 'plan', description: 'plan a', body: 'Body a.' },
-    { key: 'RMXS-11', key_type: 'ticket', doc_type: 'plan', description: 'plan b', body: 'Body b.', subfolder: '../../etc' }, // traversal fails
-    { key: 'RMXS-12', key_type: 'ticket', doc_type: 'plan', description: 'plan c', body: 'Body c.' },
+    { filename: 'rmxs-10', key: 'RMXS-10', key_type: 'ticket', doc_type: 'plan', description: 'plan a', body: 'Body a.' },
+    { filename: 'rmxs-11', key: 'RMXS-11', key_type: 'ticket', doc_type: 'plan', description: 'plan b', body: 'Body b.', subfolder: '../../etc' }, // traversal fails
+    { filename: 'rmxs-12', key: 'RMXS-12', key_type: 'ticket', doc_type: 'plan', description: 'plan c', body: 'Body c.' },
   ]);
   assert.deepEqual(
     createResults.map((r) => r.ok),
     [true, false, true]
   );
-  const id1 = createResults[0]!.id!;
-  const id3 = createResults[2]!.id!;
+  const filename1 = createResults[0]!.filename!;
+  const filename3 = createResults[2]!.filename!;
 
-  const fetched = await repo.bulkGet([id1, id3, 'missing-id']);
-  assert.deepEqual(fetched.map((d) => d.id).sort(), [id1, id3].sort());
+  const fetched = await repo.bulkGet([{ filename: filename1 }, { filename: filename3 }, { filename: 'missing.md' }]);
+  assert.deepEqual(fetched.map((d) => path.basename(d.source_path)).sort(), [filename1, filename3].sort());
 
-  const deleteResults = await repo.bulkDelete([id1, 'missing-id', id3]);
+  const deleteResults = await repo.bulkDelete([{ filename: filename1 }, { filename: 'missing.md' }, { filename: filename3 }]);
   assert.deepEqual(
     deleteResults.map((r) => r.ok),
     [true, false, true]
   );
-  assert.equal(await repo.get(id1), null);
-  assert.equal(await repo.get(id3), null);
+  assert.equal(await repo.get(undefined, filename1), null);
+  assert.equal(await repo.get(undefined, filename3), null);
 
   db.close();
   fs.rmSync(memDir, { recursive: true, force: true });
@@ -519,16 +525,18 @@ test('memory bulkUpdate flips deprecated across a batch, partial failure does no
   const db = openCache(':memory:');
   const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
-  const doc1 = await repo.create({ key: 'RMXS-20', key_type: 'ticket', doc_type: 'plan', description: 'a', body: 'Body a.' });
-  const doc2 = await repo.create({ key: 'RMXS-21', key_type: 'ticket', doc_type: 'plan', description: 'b', body: 'Body b.' });
+  const doc1 = await repo.create({ filename: 'rmxs-20', key: 'RMXS-20', key_type: 'ticket', doc_type: 'plan', description: 'a', body: 'Body a.' });
+  const doc2 = await repo.create({ filename: 'rmxs-21', key: 'RMXS-21', key_type: 'ticket', doc_type: 'plan', description: 'b', body: 'Body b.' });
+  const filename1 = path.basename(doc1.source_path);
+  const filename2 = path.basename(doc2.source_path);
 
-  const results = await repo.bulkUpdate([doc1.id, doc2.id, 'missing-id'], { deprecated: true });
+  const results = await repo.bulkUpdate([{ filename: filename1 }, { filename: filename2 }, { filename: 'missing.md' }], { deprecated: true });
   assert.deepEqual(
     results.map((r) => r.ok),
     [true, true, false]
   );
-  assert.equal((await repo.get(doc1.id))?.deprecated, true);
-  assert.equal((await repo.get(doc2.id))?.deprecated, true);
+  assert.equal((await repo.get(undefined, filename1))?.deprecated, true);
+  assert.equal((await repo.get(undefined, filename2))?.deprecated, true);
 
   db.close();
   fs.rmSync(memDir, { recursive: true, force: true });
@@ -552,6 +560,19 @@ test('ensureColumns migration adds deprecated/created_at columns to a pre-existi
       doc_type TEXT NOT NULL, tags TEXT NOT NULL, status TEXT NOT NULL, related_to TEXT,
       source_path TEXT NOT NULL UNIQUE, folder TEXT NOT NULL DEFAULT '',
       body TEXT NOT NULL, mtime_ms INTEGER NOT NULL
+    );
+    -- search_index/doc_dates also predate this schema snapshot (both existed before
+    -- deprecated/created_at/paused were added — see git history) — included here so
+    -- ensureMemoryDocsSourcePathKey's migration-time DELETE FROM search_index/doc_dates
+    -- (fired because this memory_docs still has the old bare "id" primary key) has real
+    -- tables to operate on, matching what an actual legacy cache file would contain.
+    CREATE VIRTUAL TABLE search_index USING fts5(
+      ref_table UNINDEXED, ref_id UNINDEXED, ref_folder UNINDEXED,
+      description, body, tags, key, tokenize = 'porter unicode61'
+    );
+    CREATE TABLE doc_dates (
+      ref_table TEXT NOT NULL, ref_id TEXT NOT NULL, ref_folder TEXT NOT NULL DEFAULT '',
+      date TEXT NOT NULL
     );
   `);
   preMigration.close();
@@ -644,33 +665,34 @@ test('memory setPaused hides docs from getByKey/search by default, never writes 
   const db = openCache(':memory:');
   const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
-  const doc = await repo.create({ key: 'RMXS-30', key_type: 'ticket', doc_type: 'plan', description: 'pausable plan', body: 'Plan body.' });
+  const doc = await repo.create({ filename: 'rmxs-30', key: 'RMXS-30', key_type: 'ticket', doc_type: 'plan', description: 'pausable plan', body: 'Plan body.' });
   assert.equal(doc.paused, false);
+  const filename = path.basename(doc.source_path);
 
-  const results = await repo.setPaused([doc.id, 'missing-id'], true);
+  const results = await repo.setPaused([{ filename }, { filename: 'missing.md' }], true);
   assert.deepEqual(
     results.map((r) => r.ok),
     [true, false]
   );
-  assert.equal((await repo.get(doc.id))?.paused, true);
+  assert.equal((await repo.get(undefined, filename))?.paused, true);
 
   assert.equal(repo.getByKey('RMXS-30').length, 0);
   assert.equal(repo.getByKey('RMXS-30', undefined, { includePaused: true }).length, 1);
-  assert.equal(repo.search('pausable').some((h) => h.id === doc.id), false);
-  assert.equal(repo.search('pausable', { includePaused: true }).some((h) => h.id === doc.id), true);
-  assert.ok(await repo.get(doc.id)); // always fetchable directly by id
+  assert.equal(repo.search('pausable').some((h) => h.filename === filename), false);
+  assert.equal(repo.search('pausable', { includePaused: true }).some((h) => h.filename === filename), true);
+  assert.ok(await repo.get(undefined, filename)); // always fetchable directly by (folder, filename)
 
   const raw = fs.readFileSync(doc.source_path, 'utf-8');
   assert.doesNotMatch(raw, /paused/);
 
-  const updated = await repo.update(doc.id, { description: 'updated pausable plan' });
+  const updated = await repo.update(undefined, filename, { description: 'updated pausable plan' });
   assert.equal(updated.paused, true);
   const rawAfterUpdate = fs.readFileSync(doc.source_path, 'utf-8');
   assert.doesNotMatch(rawAfterUpdate, /paused/);
 
-  const resumed = await repo.setPaused([doc.id], false);
+  const resumed = await repo.setPaused([{ filename }], false);
   assert.equal(resumed[0]?.ok, true);
-  assert.equal((await repo.get(doc.id))?.paused, false);
+  assert.equal((await repo.get(undefined, filename))?.paused, false);
   assert.equal(repo.getByKey('RMXS-30').length, 1);
 
   db.close();
@@ -690,7 +712,7 @@ test('relocate preserves created_at on the resulting doc', async () => {
 
   const result = await relocate({ path: srcFile, target: 'memory' }, skillRepo, memoryRepo);
   assert.equal(result.moved, true);
-  const doc = await memoryRepo.get(result.id!);
+  const doc = await memoryRepo.get(undefined, result.id!);
   assert.ok(doc?.created_at && !Number.isNaN(Date.parse(doc.created_at)));
 
   db.close();
@@ -715,6 +737,7 @@ test('searchByDate finds memory docs and skills by dates mentioned in their body
   const skillRepo = new SkillRepository(db, [{ name: 'builtin', path: '/nonexistent' }, { name: 'folder', path: skillDir }]);
 
   await memoryRepo.create({
+    filename: 'date-test',
     key: 'date-test',
     key_type: 'freeform',
     doc_type: 'session-summary',
@@ -722,6 +745,7 @@ test('searchByDate finds memory docs and skills by dates mentioned in their body
     body: 'Started work on 2026-08-10, wrapped up on 2026-08-12 after review.',
   });
   await memoryRepo.create({
+    filename: 'no-date-test',
     key: 'no-date-test',
     key_type: 'freeform',
     doc_type: 'session-summary',
@@ -769,6 +793,7 @@ test('searchByDate also matches on created_at when no date is mentioned in the b
   const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const doc = await memoryRepo.create({
+    filename: 'created-at-only',
     key: 'created-at-only',
     key_type: 'freeform',
     doc_type: 'session-summary',
@@ -779,7 +804,7 @@ test('searchByDate also matches on created_at when no date is mentioned in the b
 
   const hits = searchByDate(db, createdDate, createdDate);
   assert.equal(hits.length, 1);
-  assert.equal(hits[0]?.ref_id, doc.id);
+  assert.equal(hits[0]?.ref_id, doc.source_path);
   assert.equal(hits[0]?.matched_date, createdDate);
   assert.ok(hits[0]?.snippet.includes('matched via created_at'));
 
@@ -797,6 +822,7 @@ test('wiping all cache tables and re-running initialScan fully restores state fr
   const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   await memoryRepo.create({
+    filename: 'rebuild-test',
     key: 'rebuild-test',
     key_type: 'freeform',
     doc_type: 'session-summary',
@@ -834,6 +860,7 @@ test('searchByDate reflects doc_dates cleanup after deletion', async () => {
   const memoryRepo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const doc = await memoryRepo.create({
+    filename: 'delete-test',
     key: 'delete-test',
     key_type: 'freeform',
     doc_type: 'session-summary',
@@ -842,7 +869,7 @@ test('searchByDate reflects doc_dates cleanup after deletion', async () => {
   });
   assert.equal(searchByDate(db, '2026-05-01', '2026-05-01').length, 1);
 
-  await memoryRepo.delete(doc.id);
+  await memoryRepo.delete(undefined, path.basename(doc.source_path));
   assert.equal(searchByDate(db, '2026-05-01', '2026-05-01').length, 0);
 
   db.close();
@@ -953,6 +980,7 @@ test('memory stripFrontmatter leaves a bare file; deriveFrontmatter re-seeds key
   const repo = new MemoryRepository(db, folders);
 
   const doc = await repo.create({
+    filename: 'strip-test-doc',
     key: 'strip-test',
     key_type: 'freeform',
     doc_type: 'other',
@@ -961,23 +989,24 @@ test('memory stripFrontmatter leaves a bare file; deriveFrontmatter re-seeds key
   });
   assert.equal(repo.getByKey('strip-test').length, 1);
   assert.equal(doc.key, 'STRIP-TEST');
+  const filename = path.basename(doc.source_path);
 
-  await repo.stripFrontmatter(doc.id);
+  await repo.stripFrontmatter(undefined, filename);
   const raw = fs.readFileSync(doc.source_path, 'utf-8');
   assert.equal(raw.includes('---'), false);
   assert.equal(raw.trim(), 'Body content survives stripping.');
 
   // stripFrontmatter's own upsertFile call re-derives frontmatter from the filename right away
-  // (deriveFrontmatter's fallback) — since the file is still named `<id>.md` (never renamed),
-  // the id round-trips to the same value, but `key`/`doc_type`/`status` are reset to fallback
+  // (deriveFrontmatter's fallback) — since the file is still named the same (never renamed), the
+  // source_path round-trips to the same value, but `key`/`doc_type`/`status` are reset to fallback
   // defaults (the original key/doc_type only existed in the now-deleted frontmatter block).
-  const rows = db.prepare(`SELECT id, key, doc_type FROM memory_docs`).all() as Array<{
-    id: string;
+  const rows = db.prepare(`SELECT source_path, key, doc_type FROM memory_docs`).all() as Array<{
+    source_path: string;
     key: string;
     doc_type: string;
   }>;
   assert.equal(rows.length, 1);
-  assert.equal(rows[0]!.id, doc.id);
+  assert.equal(rows[0]!.source_path, doc.source_path);
   assert.notEqual(rows[0]!.key, 'STRIP-TEST');
   assert.equal(rows[0]!.doc_type, 'other');
 
@@ -992,14 +1021,16 @@ test('memory update() can change key in place, normalized', async () => {
   const repo = new MemoryRepository(db, folders);
 
   const doc = await repo.create({
+    filename: 'old-key',
     key: 'old-key',
     key_type: 'freeform',
     doc_type: 'other',
     description: 'Key change target',
     body: 'Body.',
   });
+  const filename = path.basename(doc.source_path);
 
-  const updated = await repo.update(doc.id, { key: 'new key' });
+  const updated = await repo.update(undefined, filename, { key: 'new key' });
   assert.equal(updated.key, 'NEW-KEY');
   assert.equal(repo.getByKey('old-key').length, 0);
   assert.equal(repo.getByKey('new key').length, 1);
@@ -1042,16 +1073,18 @@ test('memory update() with body_edits patches in place without a full body repla
   const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
   const doc = await repo.create({
+    filename: 'patch-target',
     key: 'patch-target',
     key_type: 'freeform',
     doc_type: 'other',
     description: 'Body edit target',
     body: 'line one\nline two\nline three\n',
   });
+  const filename = path.basename(doc.source_path);
 
-  const updated = await repo.update(doc.id, {}, undefined, [{ find: 'line two', replace: 'LINE TWO' }]);
+  const updated = await repo.update(undefined, filename, {}, undefined, [{ find: 'line two', replace: 'LINE TWO' }]);
   assert.equal(updated.body, 'line one\nLINE TWO\nline three');
-  assert.equal((await repo.get(doc.id))?.body, 'line one\nLINE TWO\nline three');
+  assert.equal((await repo.get(undefined, filename))?.body, 'line one\nLINE TWO\nline three');
 
   db.close();
   fs.rmSync(memDir, { recursive: true, force: true });
@@ -1062,8 +1095,8 @@ test('suggestKeys finds a punctuation-drifted match (RMXS15 vs RMXS-15)', async 
   const db = openCache(':memory:');
   const repo = new MemoryRepository(db, [{ name: 'folder', path: memDir }]);
 
-  await repo.create({ key: 'RMXS-15', key_type: 'ticket', doc_type: 'plan', description: 'a', body: 'a' });
-  await repo.create({ key: 'RMXS-14', key_type: 'ticket', doc_type: 'plan', description: 'b', body: 'b' });
+  await repo.create({ filename: 'rmxs-15', key: 'RMXS-15', key_type: 'ticket', doc_type: 'plan', description: 'a', body: 'a' });
+  await repo.create({ filename: 'rmxs-14', key: 'RMXS-14', key_type: 'ticket', doc_type: 'plan', description: 'b', body: 'b' });
 
   const hits = repo.suggestKeys('RMXS15'); // no hyphen — should still find RMXS-15
   assert.equal(hits[0]!.key, 'RMXS-15');

@@ -2,9 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import type { TableSyncSpec } from '../store/sync.js';
-import { upsertFile, removeFile, walkMarkdownFiles } from '../store/sync.js';
+import { upsertFile, removeFile, walkMarkdownFiles, walkAttachmentFiles } from '../store/sync.js';
 import type { RemoteFolder } from '../config.js';
 import { getLastChanged, getChangedSince, readFile, FolderfooAuthError } from './folderfoo-client.js';
+import { isUnderAttachmentsDir } from '../attachments/storage.js';
 
 // Fixed for every remote source in v1 - no per-source tuning knob, per the
 // settled design (Q15 in the grilling session).
@@ -94,14 +95,88 @@ async function reconcileDeletions<TFrontmatter>(
   if (!fs.existsSync(folder.mirrorDir)) return;
   for (const mirrorFilePath of walkMarkdownFiles(folder.mirrorDir)) {
     const relPath = path.relative(folder.mirrorDir, mirrorFilePath);
-    // remoteFiles' entries are keyed by folderfoo's own filename grammar
-    // (no .md suffix - folderfoo doesn't know about markdown, it stores
-    // opaque names), while the mirror stores real .md files so upsertFile/
-    // matchesFile work unchanged - strip the extension before comparing.
-    const relPathNoExt = relPath.endsWith('.md') ? relPath.slice(0, -3) : relPath;
-    if (!remoteRelPaths.has(relPathNoExt)) {
+    // remoteFiles' entries are keyed by folderfoo's own filename grammar, which may differ from
+    // the local mirror's filename (see spec.remoteFilename's doc comment — skills push under the
+    // fixed name "SKILL", memory docs push under their own filename unchanged).
+    const dir = path.dirname(relPath);
+    const baseName = path.basename(relPath);
+    const expectedRemoteName = spec.remoteFilename.toRemote(baseName);
+    // Also accept the LEGACY extensionless form (baseName with its .md suffix stripped) — a memory
+    // doc pushed before the extension-preserving fix still sits on folderfoo under that bare name
+    // and always will, until it's renamed/re-saved. Without this, a correctly-pulled local mirror
+    // file for such a doc looks "no longer present remotely" (its exact new-convention name was
+    // never actually on folderfoo to begin with) and gets wrongly deleted here.
+    const legacyRemoteName = baseName.endsWith('.md') ? baseName.slice(0, -3) : baseName;
+    const candidates = [expectedRemoteName, legacyRemoteName];
+    const stillPresentRemotely = candidates.some((name) => remoteRelPaths.has(dir === '.' ? name : path.join(dir, name)));
+    if (!stillPresentRemotely) {
       fs.unlinkSync(mirrorFilePath);
       removeFile(db, spec.table, mirrorFilePath);
+    }
+  }
+
+  // Prunes a stale ATTACHMENT file from the local mirror once it's gone from folderfoo's own
+  // listing (e.g. trashed and never restored) — walkMarkdownFiles above deliberately can't see
+  // these paths at all (that's what keeps attachments from being indexed as standalone docs), so
+  // they'd otherwise never be detected as deleted and would sit in the mirror forever, making
+  // AttachmentRepository.reconcileToDisk (which trusts the local mirror as truth) keep declaring
+  // them as still-present on the parent doc. Unlike doc files above, an attachment is pushed under
+  // its own literal filename with no remoteFilename translation/legacy-name fallback (see
+  // pushAttachmentIfNeeded/writeBinaryFile) — a plain relative-path membership check is enough.
+  for (const mirrorFilePath of walkAttachmentFiles(folder.mirrorDir)) {
+    const relPath = path.relative(folder.mirrorDir, mirrorFilePath);
+    if (!remoteRelPaths.has(relPath)) fs.unlinkSync(mirrorFilePath);
+  }
+
+  if (spec.table === 'memory_docs') {
+    reconcileOrphanedAttachmentWrappers(folder.mirrorDir);
+    reconcileMisindexedAttachmentRows(db, folder.mirrorDir);
+  }
+}
+
+/**
+ * One-time cleanup for rows indexed by a since-fixed pullFile bug: before pullFile checked
+ * isUnderAttachmentsDir, an attachment saved with a .md extension (e.g. "attachment-1.md") was
+ * pulled down and inserted into memory_docs as an ordinary standalone doc. Those mirror files
+ * physically live under an attachments/ dir, so walkMarkdownFiles (used just above) never visits
+ * them and the normal deletion-reconciliation loop can't clean up their stale rows. Sweep
+ * memory_docs directly for any source_path already under this folder's mirror that falls inside an
+ * attachments/ segment, and evict it — the mirror file itself is left alone (it's still a real,
+ * live attachment on disk) since only its wrongful top-level index row needs to go.
+ */
+function reconcileMisindexedAttachmentRows(db: Database.Database, mirrorDir: string): void {
+  const rows = db.prepare(`SELECT source_path FROM memory_docs WHERE source_path LIKE ?`).all(`${mirrorDir}${path.sep}%`) as Array<{
+    source_path: string;
+  }>;
+  for (const { source_path: sourcePath } of rows) {
+    const relPath = path.relative(mirrorDir, sourcePath);
+    if (isUnderAttachmentsDir(relPath)) removeFile(db, 'memory_docs', sourcePath);
+  }
+}
+
+/**
+ * Sweeps a memory-doc mirror tree for a sibling <stem>/attachments/ wrapper directory (see
+ * attachmentsDirFor) whose <stem>.md file no longer exists — left behind whenever a doc's .md file
+ * is deleted out from under its wrapper WITHOUT going through MemoryRepository.delete() (which
+ * already cleans this up for an in-tool delete), e.g. the .md deletion loop above reconciling a
+ * remote deletion/rename, or a doc removed directly on folderfoo before this cleanup existed.
+ * Catches every existing orphan on each pass, not just ones deleted in THIS run — a wrapper left
+ * over from a much earlier reconcileDeletions run (before this sweep existed) gets cleaned up too.
+ */
+function reconcileOrphanedAttachmentWrappers(dir: string): void {
+  if (!fs.existsSync(dir)) return;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === 'attachments') continue;
+    const wrapperDir = path.join(dir, entry.name);
+    // A wrapper dir looks like <parentDir>/<stem>/attachments/... alongside a sibling
+    // <parentDir>/<stem>.md — recurse into subfolders too (a memory doc can live in a subfolder of
+    // the connected remote source), then check THIS directory itself: it's an orphan if it holds
+    // an attachments/ subfolder but has no matching <stem>.md sibling anymore.
+    reconcileOrphanedAttachmentWrappers(wrapperDir);
+    const hasAttachmentsSubdir = fs.existsSync(path.join(wrapperDir, 'attachments'));
+    const hasMatchingDoc = fs.existsSync(`${wrapperDir}.md`);
+    if (hasAttachmentsSubdir && !hasMatchingDoc) {
+      fs.rmSync(wrapperDir, { recursive: true, force: true });
     }
   }
 }
@@ -120,8 +195,9 @@ async function pullFile<TFrontmatter>(
   // converted to mirror-relative before joining onto folder.mirrorDir.
   const content = await readFile(folder.server, credentialsBaseDir, folder.tenantId, changedFile.folderPath, changedFile.name);
   const mirrorRelativeDir = toMirrorRelativeDir(folder.folderPath, changedFile.folderPath);
-  const relPath = mirrorRelativeDir ? path.join(mirrorRelativeDir, changedFile.name) : changedFile.name;
-  const mirrorPath = path.join(folder.mirrorDir, `${relPath}.md`);
+  const localFilename = spec.remoteFilename.toLocal(changedFile.name);
+  const relPath = mirrorRelativeDir ? path.join(mirrorRelativeDir, localFilename) : localFilename;
+  const mirrorPath = path.join(folder.mirrorDir, relPath);
   fs.mkdirSync(path.dirname(mirrorPath), { recursive: true });
   fs.writeFileSync(mirrorPath, content);
   // Preserves the remote mtime on the mirror file so upsertFile's own
@@ -130,7 +206,7 @@ async function pullFile<TFrontmatter>(
   // always reporting "just now" and getting needlessly reprocessed.
   const mtimeDate = new Date(changedFile.mtime);
   fs.utimesSync(mirrorPath, mtimeDate, mtimeDate);
-  if (spec.matchesFile(mirrorPath)) upsertFile(db, spec, mirrorPath);
+  if (!isUnderAttachmentsDir(relPath) && spec.matchesFile(mirrorPath)) upsertFile(db, spec, mirrorPath);
 }
 
 /**
@@ -157,7 +233,14 @@ export async function pollOne<TFrontmatter>(
     // re-verify against the live state, not trust the cheap check alone.
     if (!options.force && lastChanged <= localWatermark) return; // cheap path: nothing changed since our last sync, no listing call
 
-    const changed = await getChangedSince(folder.server, credentialsBaseDir, folder.tenantId, folder.folderPath, localWatermark);
+    // force must query since=0, not localWatermark - getChangedSince filters strictly by
+    // mtime > since, so a file whose mtime happens to equal (or predate) the local watermark -
+    // e.g. a rename/move on folderfoo that doesn't bump mtime, or a file that was wrongly deleted
+    // locally by a prior reconcileDeletions bug while the watermark stayed put - would otherwise
+    // be silently invisible to EVERY future poll, forced or not, forever. A real "force resync"
+    // has to mean "re-verify everything against the live listing," matching what
+    // reconcileDeletions already does unconditionally below.
+    const changed = await getChangedSince(folder.server, credentialsBaseDir, folder.tenantId, folder.folderPath, options.force ? 0 : localWatermark);
     for (const file of changed) {
       await pullFile(db, spec, folder, credentialsBaseDir, file);
     }
@@ -197,15 +280,24 @@ export function startRemotePolling<TFrontmatter>(
   db: Database.Database,
   spec: TableSyncSpec<TFrontmatter>,
   remoteFolders: RemoteFolder[],
-  credentialsBaseDir: string
+  credentialsBaseDir: string,
+  // Called after every successful pollOne for a folder (interval tick, resyncNow, or resyncAll) —
+  // NOT called on a failed poll, since nothing changed to reconcile against. Lets a caller layered
+  // above this module (server.ts, once MemoryRepository/SkillRepository/AttachmentRepository all
+  // exist) run its own post-sync work without remote-sync.ts needing to depend on those repos
+  // itself — see healAttachmentsAfterSync's doc comment for what server.ts actually wires in here.
+  onSynced?: (folder: RemoteFolder) => void | Promise<void>
 ): RemotePollerHandle {
   const byName = new Map(remoteFolders.map((f) => [f.name, f]));
 
+  async function pollAndNotify(folder: RemoteFolder, options?: { force?: boolean }): Promise<void> {
+    await pollOne(db, spec, folder, credentialsBaseDir, options);
+    await onSynced?.(folder);
+  }
+
   const interval = setInterval(() => {
     for (const folder of remoteFolders) {
-      pollOne(db, spec, folder, credentialsBaseDir).catch((err) =>
-        console.error(`[memory-bucket] remote poll failed for ${folder.name}:`, err)
-      );
+      pollAndNotify(folder).catch((err) => console.error(`[memory-bucket] remote poll failed for ${folder.name}:`, err));
     }
   }, POLL_INTERVAL_MS);
   // Node's default keep-alive behavior would hold the process open just for
@@ -217,11 +309,11 @@ export function startRemotePolling<TFrontmatter>(
     resyncNow: async (folderName: string) => {
       const folder = byName.get(folderName);
       if (!folder) throw new Error(`no remote source configured with name "${folderName}"`);
-      await pollOne(db, spec, folder, credentialsBaseDir, { force: true });
+      await pollAndNotify(folder, { force: true });
     },
     resyncAll: async () => {
       for (const folder of remoteFolders) {
-        await pollOne(db, spec, folder, credentialsBaseDir, { force: true });
+        await pollAndNotify(folder, { force: true });
       }
     },
   };

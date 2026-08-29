@@ -186,7 +186,7 @@ test('registerRemoteFolder followed by pollOne pulls remote content into the new
   t.mock.method(
     globalThis,
     'fetch',
-    mockFolderfoo({ lastChanged: 100, files: [{ name: 'roadmap', folderPath: 'plans', mtime: 100, content: '---\nid: roadmap\nkey: roadmap\ndescription: The roadmap\n---\nBody.' }] })
+    mockFolderfoo({ lastChanged: 100, files: [{ name: 'roadmap.md', folderPath: 'plans', mtime: 100, content: '---\nkey: roadmap\ndescription: The roadmap\n---\nBody.' }] })
   );
 
   // Mirrors what the POST /api/remote-folders route does right after
@@ -194,7 +194,7 @@ test('registerRemoteFolder followed by pollOne pulls remote content into the new
   // waiting for the first interval tick.
   await pollOne(db, memorySyncSpec(repo.listFolders()), remote, credsDir);
 
-  const row = db.prepare(`SELECT description FROM memory_docs WHERE id = ?`).get('roadmap') as { description: string } | undefined;
+  const row = db.prepare(`SELECT description FROM memory_docs WHERE source_path = ?`).get(path.join(mirrorDir, 'roadmap.md')) as { description: string } | undefined;
   assert.equal(row?.description, 'The roadmap');
 });
 

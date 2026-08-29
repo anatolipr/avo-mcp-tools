@@ -26,15 +26,15 @@ function groupByKey(results: Entry[]): EntryGroup[] {
   const groups = new Map<string, Entry[]>();
   const ungrouped: Entry[] = [];
   for (const r of results) {
-    if (r._table !== 'memory_docs') {
+    if (r._table !== 'memory_docs' || !r.key) {
       ungrouped.push(r);
       continue;
     }
-    if (!groups.has(r.name)) {
-      groups.set(r.name, []);
-      order.push(r.name);
+    if (!groups.has(r.key)) {
+      groups.set(r.key, []);
+      order.push(r.key);
     }
-    groups.get(r.name)!.push(r);
+    groups.get(r.key)!.push(r);
   }
   const grouped: EntryGroup[] = order.map((key) => ({ key, items: groups.get(key)! }));
   if (ungrouped.length > 0) grouped.push({ key: null, items: ungrouped });
@@ -97,6 +97,7 @@ export class ResultList extends LitElement {
     .deprecated .name { text-decoration: line-through; }
     .meta { opacity: 0.65; font-size: 11px; white-space: nowrap; }
     .folder-path { font-size: 10.5px; opacity: 0.55; margin-top: 1px; }
+    .key-line { font-size: 10.5px; opacity: 0.6; margin-top: 1px; }
     .desc { font-size: 12px; opacity: 0.8; margin-top: 3px; }
     .tags { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
     .tag { font-size: 10px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 6px; }
@@ -173,6 +174,7 @@ export class ResultList extends LitElement {
             </span>
             <span class="meta">${formatAge(r.created_at)} · ${r.owner ?? '—'} · ${r.status}</span>
           </div>
+          ${r._table === 'memory_docs' && r.key ? html`<div class="key-line">🔑 ${r.key}</div>` : ''}
           ${this.showFolder && r.folder ? html`<div class="folder-path">📁 ${r.folder}</div>` : ''}
           <div class="desc">${r.description}</div>
           <div class="tags">

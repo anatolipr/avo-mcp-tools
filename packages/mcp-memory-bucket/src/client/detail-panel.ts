@@ -8,6 +8,17 @@ import type { EntryDetail, Selection, Facets, ClientAttachmentEntry } from './ty
 
 const VIEW_MODE_KEY = 'mem-bucket-detail-view-mode';
 
+// Attachment frontmatter deliberately omits mime_type (see attachments/types.ts) so it stays cheap
+// to hand-author — the server already re-derives it from the extension at serve time
+// (guessMimeType in web/routes.ts). This is that same extension-based decision, client-side, for
+// choosing <img> vs <iframe> in the inline attachment viewer.
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
+function isImageFilename(filename: string): boolean {
+  const dot = filename.lastIndexOf('.');
+  if (dot === -1) return false;
+  return IMAGE_EXTENSIONS.has(filename.slice(dot).toLowerCase());
+}
+
 /**
  * Converts a UTC ISO timestamp to the calendar date it falls on in the browser's local timezone
  * — mirrors the server's toLocalDate (src/store/date-extract.ts), which is what actually populates
@@ -128,6 +139,7 @@ export class DetailPanel extends LitElement {
       text-align: left;
     }
     .title-link:hover { opacity: 0.8; }
+    .key-subtitle { display: block; font-size: 12px; opacity: 0.65; margin-top: 2px; font-weight: 400; }
     .key-link {
       background: none; border: none; padding: 0; margin: 0; font: inherit;
       color: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
@@ -209,6 +221,32 @@ export class DetailPanel extends LitElement {
       opacity: 0.55;
       font-weight: 600;
     }
+    .attachment-add {
+      position: relative;
+      display: inline-block;
+      margin-top: 6px;
+      font-weight: 500;
+      opacity: 0.85;
+      cursor: pointer;
+    }
+    .attachment-add:hover { opacity: 1; }
+    .attachment-add input[type='file'] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+    .attachment-remove {
+      opacity: 0.55;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1;
+      padding: 0 0 0 4px;
+      color: inherit;
+    }
+    .attachment-remove:hover { opacity: 1; color: var(--danger); }
     .attachments-section ul {
       list-style: none;
       margin: 0;
@@ -217,7 +255,6 @@ export class DetailPanel extends LitElement {
       flex-direction: column;
       gap: 4px;
     }
-    .attachment-meta { opacity: 0.55; font-size: 11px; }
     .attachment-download {
       opacity: 0.55;
       text-decoration: none;
@@ -516,6 +553,39 @@ export class DetailPanel extends LitElement {
     this.onChanged?.();
   }
 
+  async #addAttachment(file: File) {
+    const { table, id } = this.selected!;
+    const data = await file.arrayBuffer();
+    const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/attachments?filename=${encodeURIComponent(file.name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: data,
+    });
+    if (!res.ok) {
+      const { error } = await res.json().catch(() => ({ error: `upload failed (${res.status})` }));
+      window.alert(error);
+      return;
+    }
+    await this.#load();
+    this.onChanged?.();
+  }
+
+  #onAttachmentFileChosen(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ''; // reset so choosing the same filename again still fires 'change'
+    if (file) this.#addAttachment(file);
+  }
+
+  async #removeAttachment(filename: string) {
+    if (!window.confirm(`Remove attachment "${filename}"? This can't be undone.`)) return;
+    const { table, id } = this.selected!;
+    await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/attachments/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    if (this._viewingAttachment?.filename === filename) this._viewingAttachment = null;
+    await this.#load();
+    this.onChanged?.();
+  }
+
   async #deleteDoc() {
     if (!window.confirm("Delete this doc? This can't be undone.")) return;
     const { table, id } = this.selected!;
@@ -631,30 +701,44 @@ export class DetailPanel extends LitElement {
   }
 
   #startRename() {
-    if (!this._doc) return;
-    this._renameValue = this._doc.name ?? '';
+    if (!this._doc || !this.selected) return;
+    const isSkill = this.selected.table === 'skills';
+    this._renameValue = isSkill ? (this._doc.name ?? '') : (this._doc.source_path.split('/').pop() ?? '');
     this._renaming = true;
   }
 
   async #confirmRename() {
-    if (!this._doc || !this._renameValue.trim()) return;
-    const newName = this._renameValue.trim();
-    if (newName === this._doc.name) {
+    if (!this._doc || !this.selected || !this._renameValue.trim()) return;
+    const isSkill = this.selected.table === 'skills';
+    const newValue = this._renameValue.trim();
+    const currentValue = isSkill ? this._doc.name : this._doc.source_path.split('/').pop();
+    if (newValue === currentValue) {
       this._renaming = false;
       return;
     }
-    const res = await fetch(`/api/entries/skills/${encodeURIComponent(this._doc.name!)}/rename`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ new_name: newName }),
-    });
+    const res = isSkill
+      ? await fetch(`/api/entries/skills/${encodeURIComponent(this._doc.name!)}/rename`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ new_name: newValue }),
+        })
+      : await fetch(`/api/entries/memory_docs/${encodeURIComponent(this.selected.id)}/rename`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ new_filename: newValue }),
+        });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       window.alert(`Rename failed: ${body.error ?? res.statusText}`);
       return;
     }
     this._renaming = false;
-    this.selected = { table: 'skills', id: newName };
+    if (isSkill) {
+      this.selected = { table: 'skills', id: newValue };
+    } else {
+      const renamed = (await res.json()) as { source_path: string };
+      this.selected = { table: 'memory_docs', id: renamed.source_path };
+    }
     await this.#load();
     this.onChanged?.();
   }
@@ -795,15 +879,17 @@ export class DetailPanel extends LitElement {
 
   #renderTitleRow(d: EntryDetail, isSkill: boolean) {
     const key = isSkill ? undefined : d.key;
+    // Skills' primary identity is `name`; memory docs' is their own filename (source_path's
+    // basename) — `key` is a secondary grouping label shown underneath, not the title.
+    const title = isSkill ? (d.name ?? d.id) : (d.source_path ? d.source_path.split('/').pop() : d.id);
     return html`
       <div class="title-row">
-        <h2>
-          ${key
-            ? html`<button class="title-link" title="Search for key '${key}'" @click=${() => this.onKeyClick?.(key)}>
-                ${d.name ?? key ?? d.id}
-              </button>`
-            : (d.name ?? d.key ?? d.id)}
-        </h2>
+        <div>
+          <h2>${title}</h2>
+          ${key ? html`<button class="title-link key-subtitle" title="Search for key '${key}'" @click=${() => this.onKeyClick?.(key)}>
+                🔑 ${key}
+              </button>` : ''}
+        </div>
         <button class="pill folder-pill" title="Filter by folder '${d.folder}'" @click=${() => this.onFolderClick?.(d.folder)}>
           📁 ${d.folder}
         </button>
@@ -910,36 +996,43 @@ export class DetailPanel extends LitElement {
   }
 
   #renderAttachments(d: EntryDetail, table: 'skills' | 'memory_docs') {
-    if (!d.attachments?.length) return nothing;
     return html`
       <div class="attachments-section">
         <h4>Attachments</h4>
-        <ul>
-          ${d.attachments.map(
-            (a) => html`
-              <li>
-                <a
-                  href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}/view"
-                  target="_blank"
-                  rel="noopener"
-                  @click=${(e: MouseEvent) => {
-                    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-                    e.preventDefault();
-                    this._viewingAttachment = a;
-                  }}
-                  >${a.filename}</a
-                >
-                <span class="attachment-meta">(${a.mime_type}, ${a.size} bytes)</span>
-                <a
-                  class="attachment-download"
-                  href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}"
-                  title="Download"
-                  >⇩</a
-                >
-              </li>
+        ${d.attachments?.length
+          ? html`
+              <ul>
+                ${d.attachments.map(
+                  (a) => html`
+                    <li>
+                      <a
+                        href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}/view"
+                        target="_blank"
+                        rel="noopener"
+                        @click=${(e: MouseEvent) => {
+                          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                          e.preventDefault();
+                          this._viewingAttachment = a;
+                        }}
+                        >${a.filename}</a
+                      >
+                      <a
+                        class="attachment-download"
+                        href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}"
+                        title="Download"
+                        >⇩</a
+                      >
+                      <button class="attachment-remove" title="Remove" @click=${() => this.#removeAttachment(a.filename)}>×</button>
+                    </li>
+                  `
+                )}
+              </ul>
             `
-          )}
-        </ul>
+          : nothing}
+        <label class="attachment-add">
+          + Add
+          <input type="file" @change=${(e: Event) => this.#onAttachmentFileChosen(e)} />
+        </label>
       </div>
     `;
   }
@@ -966,7 +1059,7 @@ export class DetailPanel extends LitElement {
         <span class="attachment-view-title" title=${a.filename}>${a.filename}</span>
         <a class="attachment-view-download" href=${downloadUrl} title="Download ${a.filename}">⇩ Download</a>
       </div>
-      ${a.mime_type.startsWith('image/')
+      ${isImageFilename(a.filename)
         ? html`<img class="attachment-image" src=${viewUrl} alt=${a.filename} />`
         : html`<iframe class="attachment-frame" src=${viewUrl} title=${a.filename}></iframe>`}
     `;
@@ -996,7 +1089,7 @@ export class DetailPanel extends LitElement {
                 ? html`<button class="primary" @click=${() => this.#startAddFrontmatter()}>Add frontmatter</button>`
                 : html`
                     <button @click=${() => this.#startEdit()}>Edit</button>
-                    ${isSkill ? html`<button @click=${() => this.#startRename()}>Rename</button>` : nothing}
+                    <button @click=${() => this.#startRename()}>Rename</button>
                     <button @click=${() => this.#toggleDeprecated()}>${d.deprecated ? 'Un-deprecate' : 'Mark deprecated'}</button>
                     <button @click=${() => this.#togglePaused()}>${d.paused ? 'Resume' : 'Pause'}</button>
                     ${isSkill

@@ -9,6 +9,7 @@ import { slugify } from './slug.js';
 import { normalizeKey } from '../types.js';
 import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
 import type { NamedFolder } from '../config.js';
+import { reconcileRenamedAttachmentsDir, isUnderAttachmentsDir } from '../attachments/storage.js';
 
 export interface TableSyncSpec<TFrontmatter> {
   table: 'skills' | 'memory_docs';
@@ -16,7 +17,7 @@ export interface TableSyncSpec<TFrontmatter> {
   /** Which files under `sources` count as this table's docs — skills only match SKILL.md, memory matches any .md. */
   matchesFile: (filePath: string) => boolean;
   columns: string[]; // column names in insert order, excluding body/mtime_ms/source_path/folder
-  getId: (fm: TFrontmatter) => string | undefined;
+  getId: (fm: TFrontmatter, filePath: string) => string | undefined;
   // `mtimeMs` (last-modified time, see readMarkdownFile) is used as a created_at fallback for
   // docs/skills that predate that frontmatter field. Deliberately mtime, not birthtime: birthtime
   // can be preserved across `cp`/duplicate operations (some tools/filesystems copy it from the
@@ -30,13 +31,32 @@ export interface TableSyncSpec<TFrontmatter> {
    * meaningful, so a skill missing them is a real authoring error, not a file to paper over.
    */
   deriveFrontmatter?: (fm: TFrontmatter, filePath: string, mtimeMs: number) => TFrontmatter;
+  /**
+   * Maps a local mirror filename (the last path segment, e.g. "IRT-123-Fix.md" or "SKILL.md") to
+   * the name folderfoo stores it under remotely, and back. Skills always push under the fixed name
+   * "SKILL" (see SkillRepository.pushToRemoteIfNeeded) regardless of the local "SKILL.md" filename.
+   * Memory docs push under their own filename UNCHANGED, .md extension included (see
+   * MemoryRepository.create's comment on why the extension is preserved — this is what keeps a
+   * doc's own remote file and its attachments' remote directory from colliding). Used by
+   * pullFile/reconcileDeletions in remote/remote-sync.ts to translate between the two naming
+   * schemes without hardcoding either table's convention in that shared code.
+   */
+  remoteFilename: { toRemote: (localFilename: string) => string; toLocal: (remoteName: string) => string };
+  /**
+   * Optional post-index hook, called after upsertFile successfully indexes a file — used by memory
+   * docs to reconcile an EXTERNAL (filesystem-level, outside memory_rename) rename's orphaned
+   * attachments wrapper directory (see attachments/storage.ts's reconcileRenamedAttachmentsDir).
+   * Skills omit this: their attachments already live inside the skill's own directory, not a
+   * sibling named after the file, so an external rename can't orphan them the same way.
+   */
+  onIndexed?: (fm: TFrontmatter, filePath: string) => void;
 }
 
 // `paused` is deliberately absent from both lists: it's a local-only cache column (see
 // SkillRepository/MemoryRepository#setPaused) that never round-trips through frontmatter, so a
 // file add/change/rescan must never overwrite it via the INSERT/ON CONFLICT UPDATE below.
 const skillColumns = ['id', 'description', 'owner', 'status', 'tags', 'trigger_phrases', 'extends', 'deprecated', 'created_at', 'attachments'];
-const memoryColumns = ['id', 'key', 'key_type', 'description', 'doc_type', 'tags', 'status', 'related_to', 'deprecated', 'created_at', 'attachments'];
+const memoryColumns = ['key', 'key_type', 'description', 'doc_type', 'tags', 'status', 'related_to', 'deprecated', 'created_at', 'attachments'];
 
 export function skillSyncSpec(sources: NamedFolder[]): TableSyncSpec<SkillFrontmatter> {
   return {
@@ -45,6 +65,7 @@ export function skillSyncSpec(sources: NamedFolder[]): TableSyncSpec<SkillFrontm
     matchesFile: (filePath) => path.basename(filePath) === 'SKILL.md',
     columns: skillColumns,
     getId: (fm) => fm.name,
+    remoteFilename: { toRemote: () => 'SKILL', toLocal: () => 'SKILL.md' },
     toRow: (fm, _sourcePath, mtimeMs) => ({
       id: fm.name,
       description: fm.description,
@@ -66,14 +87,26 @@ export function memorySyncSpec(sources: NamedFolder[]): TableSyncSpec<MemoryFron
     sources,
     matchesFile: (filePath) => filePath.endsWith('.md'),
     columns: memoryColumns,
-    getId: (fm) => fm.id,
+    getId: (_fm, filePath) => filePath,
+    remoteFilename: {
+      toRemote: (localFilename) => localFilename,
+      // Tolerates LEGACY remote files pushed before memory docs kept their .md extension on the
+      // remote side (the opaque-id era — see MemoryRepository.create's comment on why the
+      // extension is preserved now). Those files are still sitting on folderfoo under a bare,
+      // extensionless name (e.g. "abc123", not "abc123.md") and will stay that way until someone
+      // renames/re-saves them — pullFile must still recognize them as memory docs and give them a
+      // `.md` mirror filename, or they're silently skipped by matchesFile forever, and
+      // reconcileDeletions (which compares local .md names against exactly what's on the remote
+      // listing) would incorrectly delete a correctly-pulled local copy that has no exact remote
+      // match under the new naming.
+      toLocal: (remoteName) => (remoteName.endsWith('.md') ? remoteName : `${remoteName}.md`),
+    },
+    onIndexed: (fm, filePath) => reconcileRenamedAttachmentsDir(filePath, fm.attachments?.length ?? 0),
     deriveFrontmatter: (fm, filePath, mtimeMs) => {
       const basename = path.basename(filePath, '.md');
-      const fallbackId = slugify(basename) || 'untitled';
       return {
         ...fm,
-        id: fm.id ?? fallbackId,
-        key: fm.key ?? normalizeKey(fallbackId),
+        key: fm.key ?? normalizeKey(slugify(basename) || 'untitled'),
         key_type: fm.key_type ?? 'freeform',
         description: fm.description ?? basename,
         doc_type: fm.doc_type ?? 'other',
@@ -84,7 +117,6 @@ export function memorySyncSpec(sources: NamedFolder[]): TableSyncSpec<MemoryFron
       };
     },
     toRow: (fm) => ({
-      id: fm.id,
       key: fm.key,
       key_type: fm.key_type ?? 'freeform',
       description: fm.description,
@@ -134,7 +166,7 @@ export function upsertFile<TFrontmatter>(
     ? spec.deriveFrontmatter(parsed.frontmatter, filePath, parsed.mtimeMs)
     : parsed.frontmatter;
 
-  const id = spec.getId(frontmatter);
+  const id = spec.getId(frontmatter, filePath);
   if (!id) {
     console.error(`[memory-bucket] skipping ${filePath}: missing required id field in frontmatter`);
     return;
@@ -145,41 +177,40 @@ export function upsertFile<TFrontmatter>(
 
   // `skills` keys on (folder, id): name is unique PER FOLDER, not globally (see skill_get's
   // folder param) — two different folders each having a same-named skill is legitimate, so the
-  // collision guard and upsert conflict target both scope by folder too. `memory_docs` keeps a
-  // bare `id` PRIMARY KEY: its id already bakes in a random UUID suffix (memory/repository.ts's
-  // create()), so a genuine id collision there is a practically-impossible coincidence, not the
-  // everyday case skills hits from two folders sharing a human-chosen name.
+  // collision guard and upsert conflict target both scope by folder too. `memory_docs` has no
+  // separate id column at all — its id IS filePath (source_path), the table's actual PRIMARY KEY,
+  // so a "different file claiming the same id" collision is structurally impossible for it; only
+  // skills needs the guard below.
   const scopedById = spec.table === 'skills';
 
-  // id/name is (part of) the table's real PRIMARY KEY (the sole addressing handle across the
-  // whole public API - skill_get(name, folder?), memory_get(id), etc.), so a DIFFERENT file
-  // claiming the same id (within the same folder, for skills) is a genuine collision, not a
-  // re-scan of the same file. The ON CONFLICT below would otherwise silently overwrite whichever
-  // row synced first - the first-synced item's row (and its full content) simply vanishes from
-  // the cache with no error and no way to address it. Refuse the overwrite and warn loudly
-  // instead: the first-synced item keeps working, the colliding one is visibly excluded rather
-  // than invisibly clobbering it.
-  const existingById = (
-    scopedById
-      ? db.prepare(`SELECT source_path FROM ${spec.table} WHERE folder = ? AND id = ?`).get(folder, id)
-      : db.prepare(`SELECT source_path FROM ${spec.table} WHERE id = ?`).get(id)
-  ) as { source_path: string } | undefined;
-  if (existingById && existingById.source_path !== filePath) {
-    console.error(
-      `[memory-bucket] SKIPPED indexing ${filePath}: id "${id}"${scopedById ? ` in folder "${folder}"` : ''} already used by ${existingById.source_path} — ` +
-        `${scopedById ? 'names must be unique within a folder' : 'ids must be unique across every configured folder'}. Rename one of these two files (or its frontmatter id/name) to resolve the collision.`
-    );
-    return;
+  if (scopedById) {
+    // id/name is (part of) the table's real PRIMARY KEY (the sole addressing handle across the
+    // whole public API - skill_get(name, folder?)), so a DIFFERENT file claiming the same id
+    // (within the same folder) is a genuine collision, not a re-scan of the same file. The ON
+    // CONFLICT below would otherwise silently overwrite whichever row synced first - the
+    // first-synced item's row (and its full content) simply vanishes from the cache with no error
+    // and no way to address it. Refuse the overwrite and warn loudly instead: the first-synced item
+    // keeps working, the colliding one is visibly excluded rather than invisibly clobbering it.
+    const existingById = db.prepare(`SELECT source_path FROM ${spec.table} WHERE folder = ? AND id = ?`).get(folder, id) as
+      | { source_path: string }
+      | undefined;
+    if (existingById && existingById.source_path !== filePath) {
+      console.error(
+        `[memory-bucket] SKIPPED indexing ${filePath}: id "${id}" in folder "${folder}" already used by ${existingById.source_path} — ` +
+          `names must be unique within a folder. Rename one of these two files (or its frontmatter name) to resolve the collision.`
+      );
+      return;
+    }
   }
 
   const cols = [...spec.columns, 'source_path', 'folder', 'body', 'mtime_ms'];
   const values = [...spec.columns.map((c) => row[c]), filePath, folder, parsed.body, parsed.mtimeMs];
   const placeholders = cols.map(() => '?').join(', ');
   const updateClause = cols
-    .filter((c) => c !== 'id' && c !== 'folder')
+    .filter((c) => c !== 'id' && c !== 'source_path' && c !== 'folder')
     .map((c) => `${c} = excluded.${c}`)
     .join(', ');
-  const conflictTarget = scopedById ? 'folder, id' : 'id';
+  const conflictTarget = scopedById ? 'folder, id' : 'source_path';
 
   db.prepare(
     `INSERT INTO ${spec.table} (${cols.join(', ')}) VALUES (${placeholders})
@@ -189,13 +220,22 @@ export function upsertFile<TFrontmatter>(
   // ref_folder scopes these two tables' delete-then-reinsert the same way the skills upsert above
   // does: two skills in different folders can now legitimately share an `id`, so ref_id alone is
   // no longer enough to identify "this file's" search_index/doc_dates rows without also clobbering
-  // the other folder's same-named skill's rows. memory_docs ids never collide (see scopedById's
-  // comment above), so '' (unscoped) is safe there.
+  // the other folder's same-named skill's rows. memory_docs' id is filePath (globally unique by
+  // construction), so '' (unscoped) is safe there.
   const refFolder = scopedById ? folder : '';
   db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(spec.table, id, refFolder);
   db.prepare(
-    `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key) VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(spec.table, id, refFolder, String(row.description ?? ''), parsed.body, flattenTags(String(row.tags ?? '[]')), String(row.key ?? ''));
+    `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key, filename) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    spec.table,
+    id,
+    refFolder,
+    String(row.description ?? ''),
+    parsed.body,
+    flattenTags(String(row.tags ?? '[]')),
+    String(row.key ?? ''),
+    path.basename(filePath)
+  );
 
   db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(spec.table, id, refFolder);
   const dates = new Set(extractDates(parsed.body));
@@ -207,17 +247,21 @@ export function upsertFile<TFrontmatter>(
     const insertDate = db.prepare(`INSERT INTO doc_dates (ref_table, ref_id, ref_folder, date) VALUES (?, ?, ?, ?)`);
     for (const date of dates) insertDate.run(spec.table, id, refFolder, date);
   }
+
+  spec.onIndexed?.(frontmatter, filePath);
 }
 
 export function removeFile(db: Database.Database, table: 'skills' | 'memory_docs', filePath: string): void {
-  const existing = db.prepare(`SELECT id, folder FROM ${table} WHERE source_path = ?`).get(filePath) as
+  const idCol = table === 'skills' ? 'id' : 'source_path';
+  const existing = db.prepare(`SELECT ${idCol} AS id, folder FROM ${table} WHERE source_path = ?`).get(filePath) as
     | { id: string; folder: string }
     | undefined;
   db.prepare(`DELETE FROM ${table} WHERE source_path = ?`).run(filePath);
   if (existing) {
     // Scoped by folder for the same reason upsertFile's ref_folder is (skills' compound key means
-    // ref_id alone can match another folder's same-named skill) - memory_docs ids never collide so
-    // its rows are always stored/looked-up with ref_folder='', matching backfillSearchIndex.
+    // ref_id alone can match another folder's same-named skill) - memory_docs' id is filePath
+    // (globally unique by construction), so its rows are always stored/looked-up with
+    // ref_folder='', matching backfillSearchIndex.
     const refFolder = table === 'skills' ? existing.folder : '';
     db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(table, existing.id, refFolder);
     db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(table, existing.id, refFolder);
@@ -258,7 +302,8 @@ export function scanSingleFolder<TFrontmatter>(
 
 /** Drops all cached rows (and search index entries) belonging to a removed folder. Never touches files on disk. */
 export function unregisterFolder(db: Database.Database, table: 'skills' | 'memory_docs', folderName: string): void {
-  const rows = db.prepare(`SELECT id FROM ${table} WHERE folder = ?`).all(folderName) as Array<{ id: string }>;
+  const idCol = table === 'skills' ? 'id' : 'source_path';
+  const rows = db.prepare(`SELECT ${idCol} AS id FROM ${table} WHERE folder = ?`).all(folderName) as Array<{ id: string }>;
   db.prepare(`DELETE FROM ${table} WHERE folder = ?`).run(folderName);
   for (const row of rows) {
     db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(table, row.id);
@@ -266,12 +311,38 @@ export function unregisterFolder(db: Database.Database, table: 'skills' | 'memor
 }
 
 export function* walkMarkdownFiles(dir: string): Generator<string> {
+  // A directory listed here can vanish before this generator actually resumes into it — e.g.
+  // upsertFile's onIndexed hook (see memorySyncSpec) can synchronously rename away another doc's
+  // now-orphaned attachments wrapper directory while reconciling an external rename, mid-walk of
+  // the SAME initialScan/scanSingleFolder call that's iterating this directory's siblings. Treat a
+  // directory that's disappeared by the time we get to it as simply empty, not an error.
+  if (!fs.existsSync(dir)) return;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name === 'attachments') continue;
+      if (isUnderAttachmentsDir(entry.name)) continue;
       yield* walkMarkdownFiles(full);
     } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      yield full;
+    }
+  }
+}
+
+/**
+ * The inverse of walkMarkdownFiles: yields every file (any extension, not just .md — an attachment
+ * can be anything) that DOES live under an `attachments/` directory, anywhere under `dir`. Used by
+ * remote-sync.ts's reconcileDeletions to prune stale attachment files from the local mirror once
+ * they're gone from folderfoo's own listing — walkMarkdownFiles deliberately can't see these paths
+ * at all (that's what keeps attachments from being indexed as standalone docs), so pruning them
+ * needs its own dedicated walk.
+ */
+export function* walkAttachmentFiles(dir: string): Generator<string> {
+  if (!fs.existsSync(dir)) return;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      yield* walkAttachmentFiles(full);
+    } else if (entry.isFile() && isUnderAttachmentsDir(full)) {
       yield full;
     }
   }
@@ -280,7 +351,7 @@ export function* walkMarkdownFiles(dir: string): Generator<string> {
 export function watchSources<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): FSWatcher {
   const watcher = chokidar.watch(
     spec.sources.map((f) => f.path),
-    { ignoreInitial: true, persistent: true, depth: 10, ignored: /(^|[/\\])attachments([/\\]|$)/ }
+    { ignoreInitial: true, persistent: true, depth: 10, ignored: (filePath) => isUnderAttachmentsDir(filePath) }
   );
 
   watcher

@@ -5,15 +5,14 @@
 export interface ClientAttachmentEntry {
   filename: string;
   path: string; // relative to the doc's directory, e.g. "attachments/foo.json"
-  mime_type: string;
-  size: number;
   added_at: string; // ISO date string
 }
 
 export interface Entry {
   _table: 'skills' | 'memory_docs';
   id: string;
-  name: string;
+  name: string; // skill name, or memory doc's own filename — the primary title
+  key: string | null; // memory docs only — the grouping label, shown as a secondary line
   description: string;
   tags: string[];
   status: string;

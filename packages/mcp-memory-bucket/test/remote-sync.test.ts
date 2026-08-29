@@ -59,7 +59,7 @@ test('pollOne: skips the listing call entirely when last-changed has not moved p
   let calls = 0;
   t.mock.method(globalThis, 'fetch', async (url: string) => {
     calls++;
-    return mockFolderfoo({ lastChanged: 100, files: [{ name: 'notes', folderPath: 'plans', mtime: 100, content: '---\nkey: notes\n---\nbody' }] })(url);
+    return mockFolderfoo({ lastChanged: 100, files: [{ name: 'notes.md', folderPath: 'plans', mtime: 100, content: '---\nkey: notes\n---\nbody' }] })(url);
   });
   await pollOne(db, spec, folder, credsDir);
   assert.ok(calls > 0);
@@ -89,7 +89,7 @@ test('pollOne: pulls a changed file into the mirror and upserts it into the cach
     'fetch',
     mockFolderfoo({
       lastChanged: 500,
-      files: [{ name: 'roadmap', folderPath: 'plans', mtime: 500, content: '---\nid: roadmap\nkey: roadmap\ndescription: The roadmap\n---\nRoadmap body.' }],
+      files: [{ name: 'roadmap.md', folderPath: 'plans', mtime: 500, content: '---\nkey: roadmap\ndescription: The roadmap\n---\nRoadmap body.' }],
     })
   );
 
@@ -102,7 +102,7 @@ test('pollOne: pulls a changed file into the mirror and upserts it into the cach
   assert.ok(fs.existsSync(mirrorFile));
   assert.match(fs.readFileSync(mirrorFile, 'utf-8'), /Roadmap body\./);
 
-  const row = db.prepare(`SELECT * FROM memory_docs WHERE id = ?`).get('roadmap') as { description: string } | undefined;
+  const row = db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(mirrorFile) as { description: string } | undefined;
   assert.equal(row?.description, 'The roadmap');
 });
 
@@ -120,7 +120,7 @@ test('pollOne: reconciles a remote deletion by removing the mirror file and its 
     'fetch',
     mockFolderfoo({
       lastChanged: 100,
-      files: [{ name: 'todo', folderPath: 'plans', mtime: 100, content: '---\nid: todo\nkey: todo\ndescription: A todo\n---\nbody' }],
+      files: [{ name: 'todo.md', folderPath: 'plans', mtime: 100, content: '---\nkey: todo\ndescription: A todo\n---\nbody' }],
     })
   );
   await pollOne(db, spec, folder, credsDir);
@@ -133,7 +133,7 @@ test('pollOne: reconciles a remote deletion by removing the mirror file and its 
   await pollOne(db, spec, folder, credsDir);
 
   assert.ok(!fs.existsSync(mirrorFile));
-  const row = db.prepare(`SELECT * FROM memory_docs WHERE id = ?`).get('todo');
+  const row = db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(mirrorFile);
   assert.equal(row, undefined);
 });
 
@@ -158,7 +158,7 @@ test('startRemotePolling: resyncNow triggers an immediate poll for the named sou
   t.mock.method(
     globalThis,
     'fetch',
-    mockFolderfoo({ lastChanged: 42, files: [{ name: 'x', folderPath: 'plans', mtime: 42, content: '---\nid: x\nkey: x\ndescription: X\n---\nbody' }] })
+    mockFolderfoo({ lastChanged: 42, files: [{ name: 'x.md', folderPath: 'plans', mtime: 42, content: '---\nkey: x\ndescription: X\n---\nbody' }] })
   );
 
   const handle = startRemotePolling(db, spec, [folder], credsDir);
@@ -193,7 +193,7 @@ test('pollOne with force:true runs reconcileDeletions even when last-changed equ
   t.mock.method(
     globalThis,
     'fetch',
-    mockFolderfoo({ lastChanged: 100, files: [{ name: 'doomed', folderPath: 'plans', mtime: 100, content: '---\nid: doomed\nkey: doomed\ndescription: D\n---\nbody' }] })
+    mockFolderfoo({ lastChanged: 100, files: [{ name: 'doomed.md', folderPath: 'plans', mtime: 100, content: '---\nkey: doomed\ndescription: D\n---\nbody' }] })
   );
   await pollOne(db, spec, folder, credsDir);
   const mirrorFile = path.join(mirrorDir, 'doomed.md');
@@ -212,7 +212,7 @@ test('pollOne with force:true runs reconcileDeletions even when last-changed equ
 
   await pollOne(db, spec, folder, credsDir, { force: true });
   assert.ok(!fs.existsSync(mirrorFile), 'force:true must reconcile the deletion even though last-changed did not advance');
-  const row = db.prepare(`SELECT * FROM memory_docs WHERE id = ?`).get('doomed');
+  const row = db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(mirrorFile);
   assert.equal(row, undefined);
 });
 
@@ -273,7 +273,7 @@ test('pollOne: a file nested inside a subfolder of the connected remote folder m
     mockFolderfoo({
       lastChanged: 100,
       // folderfoo's own convention: nested file's folderPath is "plans/q3" (absolute from tenant root), not "q3".
-      files: [{ name: 'roadmap', folderPath: 'plans/q3', mtime: 100, content: '---\nid: roadmap\nkey: roadmap\ndescription: Q3 roadmap\n---\nBody.' }],
+      files: [{ name: 'roadmap.md', folderPath: 'plans/q3', mtime: 100, content: '---\nkey: roadmap\ndescription: Q3 roadmap\n---\nBody.' }],
     })
   );
   await pollOne(db, spec, folder, credsDir);
@@ -283,7 +283,7 @@ test('pollOne: a file nested inside a subfolder of the connected remote folder m
   assert.ok(fs.existsSync(correctPath), `expected the mirror file at ${correctPath}`);
   assert.ok(!fs.existsSync(buggyDoubledPath), `must NOT double-nest under the connected folder's own name (${buggyDoubledPath})`);
 
-  const row = db.prepare(`SELECT * FROM memory_docs WHERE id = ?`).get('roadmap') as { description: string; source_path: string } | undefined;
+  const row = db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(correctPath) as { description: string; source_path: string } | undefined;
   assert.equal(row?.description, 'Q3 roadmap');
   assert.equal(row?.source_path, correctPath);
 });
@@ -305,7 +305,7 @@ test('pollOne: reconcileDeletions does not delete a still-present nested file du
     'fetch',
     mockFolderfoo({
       lastChanged: 100,
-      files: [{ name: 'nested-doc', folderPath: 'plans/q3', mtime: 100, content: '---\nid: nested-doc\nkey: nested-doc\ndescription: N\n---\nBody.' }],
+      files: [{ name: 'nested-doc.md', folderPath: 'plans/q3', mtime: 100, content: '---\nkey: nested-doc\ndescription: N\n---\nBody.' }],
     })
   );
   await pollOne(db, spec, folder, credsDir);
@@ -320,12 +320,159 @@ test('pollOne: reconcileDeletions does not delete a still-present nested file du
     'fetch',
     mockFolderfoo({
       lastChanged: 200,
-      files: [{ name: 'nested-doc', folderPath: 'plans/q3', mtime: 100, content: '---\nid: nested-doc\nkey: nested-doc\ndescription: N\n---\nBody.' }],
+      files: [{ name: 'nested-doc.md', folderPath: 'plans/q3', mtime: 100, content: '---\nkey: nested-doc\ndescription: N\n---\nBody.' }],
     })
   );
   await pollOne(db, spec, folder, credsDir);
 
   assert.ok(fs.existsSync(mirrorFile), 'the still-present nested file must survive reconcileDeletions');
-  const row = db.prepare(`SELECT * FROM memory_docs WHERE id = ?`).get('nested-doc');
+  const row = db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(mirrorFile);
   assert.ok(row, 'the cache row for the still-present nested file must survive reconcileDeletions');
+});
+
+// Regression coverage for a real bug: an attachment saved with a .md extension (e.g.
+// "attachment-1.md") lives on folderfoo at "<stem>/attachments/attachment-1.md" - a real file,
+// indistinguishable from a memory doc by matchesFile (any .md). pullFile mirrored it to disk AND
+// indexed it into memory_docs as a standalone doc, so it showed up as a top-level item in the UI
+// (surfaced by the window-focus handler's forced resync, which is the only path that re-walks the
+// full remote listing). walkMarkdownFiles/chokidar already exclude attachments/ on the LOCAL
+// scan/watch paths; pullFile now applies the same exclusion before indexing.
+test('pollOne: does not index an attachment file (nested under attachments/) as a standalone memory doc', async (t) => {
+  const credsDir = tmpDir('mb-remote-sync-creds-');
+  const mirrorDir = tmpDir('mb-remote-sync-mirror-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const spec = memorySyncSpec([{ name: 'team-qa', path: mirrorDir }]);
+  const folder = makeFolder(mirrorDir); // folder.folderPath === 'plans'
+
+  t.mock.method(
+    globalThis,
+    'fetch',
+    mockFolderfoo({
+      lastChanged: 100,
+      files: [
+        { name: 'TODO-PERSONAL-copy2.md', folderPath: 'plans', mtime: 100, content: '---\nkey: todo\ndescription: Todo\n---\nbody' },
+        {
+          name: 'attachment-1.md',
+          folderPath: 'plans/TODO-PERSONAL-copy2/attachments',
+          mtime: 100,
+          content: '# Some attachment content',
+        },
+      ],
+    })
+  );
+  await pollOne(db, spec, folder, credsDir);
+
+  // The attachment is still mirrored to disk (it's a real, live attachment)...
+  const attachmentMirrorFile = path.join(mirrorDir, 'TODO-PERSONAL-copy2', 'attachments', 'attachment-1.md');
+  assert.ok(fs.existsSync(attachmentMirrorFile));
+
+  // ...but must NOT be indexed as a standalone memory_docs row.
+  const attachmentRow = db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(attachmentMirrorFile);
+  assert.equal(attachmentRow, undefined, 'an attachment file must never be indexed as a top-level memory doc');
+
+  // The real memory doc is indexed as usual.
+  const docRow = db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(path.join(mirrorDir, 'TODO-PERSONAL-copy2.md'));
+  assert.ok(docRow);
+});
+
+// Regression coverage for a real bug reported live: a doc's attachments/ dir in the local mirror
+// accumulated every attachment ever pulled down, even ones long since deleted from folderfoo — the
+// UI kept showing 5 declared attachments for a doc that genuinely only had 2 files left on
+// folderfoo. Root cause: reconcileDeletions' remote-vs-local diff only ever walked
+// walkMarkdownFiles (which deliberately EXCLUDES attachments/ so they're never indexed as docs), so
+// a stale attachment file was never detected as "gone remotely" and never pruned from the mirror —
+// combined with AttachmentRepository.reconcileToDisk trusting the mirror as truth, the stale files
+// kept getting re-declared in frontmatter forever. Fixed via a second, attachment-specific walk
+// (walkAttachmentFiles) that prunes any local attachments/ file no longer in folderfoo's listing.
+test('pollOne: prunes a stale attachment file from the mirror once it is gone from folderfoo\'s own listing', async (t) => {
+  const credsDir = tmpDir('mb-remote-sync-creds-');
+  const mirrorDir = tmpDir('mb-remote-sync-mirror-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const spec = memorySyncSpec([{ name: 'team-qa', path: mirrorDir }]);
+  const folder = makeFolder(mirrorDir); // folder.folderPath === 'plans'
+
+  // First poll: doc plus two attachments, all present remotely — both get pulled into the mirror.
+  t.mock.method(
+    globalThis,
+    'fetch',
+    mockFolderfoo({
+      lastChanged: 100,
+      files: [
+        { name: 'TODO-PERSONAL-copy2.md', folderPath: 'plans', mtime: 100, content: '---\nkey: todo\ndescription: Todo\n---\nbody' },
+        { name: 'attachment.md', folderPath: 'plans/TODO-PERSONAL-copy2/attachments', mtime: 100, content: 'one' },
+        { name: 'attachment2.md', folderPath: 'plans/TODO-PERSONAL-copy2/attachments', mtime: 100, content: 'two' },
+      ],
+    })
+  );
+  await pollOne(db, spec, folder, credsDir);
+  const attachDir = path.join(mirrorDir, 'TODO-PERSONAL-copy2', 'attachments');
+  assert.ok(fs.existsSync(path.join(attachDir, 'attachment.md')));
+  assert.ok(fs.existsSync(path.join(attachDir, 'attachment2.md')));
+
+  // Second poll (forced): folderfoo now only reports attachment.md — attachment2.md was
+  // trashed/removed on the folderfoo side and never restored.
+  t.mock.method(
+    globalThis,
+    'fetch',
+    mockFolderfoo({
+      lastChanged: 200,
+      files: [
+        { name: 'TODO-PERSONAL-copy2.md', folderPath: 'plans', mtime: 100, content: '---\nkey: todo\ndescription: Todo\n---\nbody' },
+        { name: 'attachment.md', folderPath: 'plans/TODO-PERSONAL-copy2/attachments', mtime: 100, content: 'one' },
+      ],
+    })
+  );
+  await pollOne(db, spec, folder, credsDir, { force: true });
+
+  assert.ok(fs.existsSync(path.join(attachDir, 'attachment.md')), 'the still-present attachment must survive');
+  assert.ok(!fs.existsSync(path.join(attachDir, 'attachment2.md')), 'the remotely-deleted attachment must be pruned from the mirror');
+});
+
+// Same bug, but covering cleanup of a row that was ALREADY wrongly indexed before this fix (e.g. by
+// a prior pollOne run against unpatched code) - reconcileDeletions must sweep it out on the next
+// forced resync, since walkMarkdownFiles skips attachments/ and would otherwise never revisit it.
+test('pollOne: force resync evicts a pre-existing misindexed attachment row from memory_docs', async (t) => {
+  const credsDir = tmpDir('mb-remote-sync-creds-');
+  const mirrorDir = tmpDir('mb-remote-sync-mirror-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const spec = memorySyncSpec([{ name: 'team-qa', path: mirrorDir }]);
+  const folder = makeFolder(mirrorDir);
+
+  // Simulate the pre-fix bug directly: write the parent doc plus its attachment mirror file, and
+  // insert a stray memory_docs row for the attachment, bypassing pullFile entirely.
+  const docMirrorFile = path.join(mirrorDir, 'TODO-PERSONAL-copy2.md');
+  fs.writeFileSync(docMirrorFile, '---\nkey: todo\ndescription: Todo\n---\nbody');
+  const attachmentMirrorFile = path.join(mirrorDir, 'TODO-PERSONAL-copy2', 'attachments', 'attachment-1.md');
+  fs.mkdirSync(path.dirname(attachmentMirrorFile), { recursive: true });
+  fs.writeFileSync(attachmentMirrorFile, '# Some attachment content');
+  db.prepare(
+    `INSERT INTO memory_docs (source_path, folder, key, key_type, description, doc_type, tags, status, body, mtime_ms)
+     VALUES (?, ?, ?, 'freeform', 'stray attachment row', 'other', '[]', 'active', ?, ?)`
+  ).run(attachmentMirrorFile, 'team-qa', 'attachment-1', '# Some attachment content', Date.now());
+  assert.ok(db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(attachmentMirrorFile));
+
+  t.mock.method(
+    globalThis,
+    'fetch',
+    mockFolderfoo({
+      lastChanged: 100,
+      // Attachment file is listed too (still genuinely present remotely) - this test is only
+      // about the misindexed DB ROW getting cleaned up, not about attachment pruning (covered
+      // separately below), so the mock must report it present or reconcileDeletions' own
+      // (correct, separate) attachment-pruning sweep would delete the mirror file too.
+      files: [
+        { name: 'TODO-PERSONAL-copy2.md', folderPath: 'plans', mtime: 100, content: '---\nkey: todo\ndescription: Todo\n---\nbody' },
+        { name: 'attachment-1.md', folderPath: 'plans/TODO-PERSONAL-copy2/attachments', mtime: 100, content: '# Some attachment content' },
+      ],
+    })
+  );
+  await pollOne(db, spec, folder, credsDir, { force: true });
+
+  const row = db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(attachmentMirrorFile);
+  assert.equal(row, undefined, 'a pre-existing misindexed attachment row must be evicted by a forced resync');
+  // The mirror file itself is untouched - it's still a real, live attachment on disk.
+  assert.ok(fs.existsSync(attachmentMirrorFile));
 });

@@ -3,7 +3,7 @@ import path from 'node:path';
 import type Database from 'better-sqlite3';
 import type { FSWatcher } from 'chokidar';
 import matter from 'gray-matter';
-import { writeMarkdownFile } from '../store/markdown-file.js';
+import { writeMarkdownFile, formatMarkdownFile } from '../store/markdown-file.js';
 import { assertValidSkillName } from '../store/skill-name.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, skillSyncSpec, type TableSyncSpec } from '../store/sync.js';
@@ -12,8 +12,9 @@ import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
 import { rebaseFolderPath } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
-import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, joinRemoteFolderPath, assertRemoteFolderExists } from '../remote/folderfoo-client.js';
+import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, trashFile as trashRemoteFile, trashFolder as trashRemoteFolder, renameFolder as renameRemoteFolder, joinRemoteFolderPath, assertRemoteFolderExists } from '../remote/folderfoo-client.js';
 import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
+import { writeRemoteThenLocal } from '../remote/write-order.js';
 
 interface SkillRow {
   id: string;
@@ -95,39 +96,58 @@ export class SkillRepository {
   }
 
   /**
-   * Pushes the just-written SKILL.md at filePath to folderfoo, if targetFolderName resolves to a
-   * remote source. No-op for a local folder. See get()'s comment on the folderPath/name split for
-   * a skill's directory-per-skill layout.
+   * Pushes SKILL.md content to folderfoo at `filePath`'s eventual location, if targetFolderName
+   * resolves to a remote source. No-op for a local folder. See get()'s comment on the
+   * folderPath/name split for a skill's directory-per-skill layout.
+   *
+   * Takes `fileContents` directly rather than reading it off `filePath` — per the "remote is the
+   * source of truth" ordering (remote/write-order.ts), this runs BEFORE the local SKILL.md write,
+   * so the file may not exist on disk yet when this is called; callers already have the formatted
+   * content in memory (create()/update()/rename() all build it via formatMarkdownFile before
+   * touching disk either way).
    *
    * Confirms the remote folder still exists before writing: folderfoo's own save endpoint would
    * otherwise silently recreate a deleted folder rather than failing (see assertRemoteFolderExists's
    * doc comment) — this turns that into a loud, specific RemoteFolderGoneError instead.
    */
-  private async pushToRemoteIfNeeded(targetFolderName: string, filePath: string): Promise<void> {
+  private async pushToRemoteIfNeeded(targetFolderName: string, filePath: string, fileContents: string): Promise<void> {
     const remote = this.remoteFor(targetFolderName);
     if (!remote || !this.credentialsBaseDir) return;
     await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, targetFolderName);
     const skillDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(filePath)));
-    const fileContents = fs.readFileSync(filePath, 'utf-8');
     await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath, 'SKILL', fileContents);
   }
 
   /**
-   * Pushes one attachment file's raw binary content to folderfoo, if `folderName` resolves to a
-   * remote source — the attachment counterpart to pushToRemoteIfNeeded. Unlike SKILL.md (always
-   * pushed under the fixed name 'SKILL'), an attachment is pushed under its own actual filename,
-   * since folderfoo needs to store each attachment as a distinct file. No-op for a local folder,
-   * same as pushToRemoteIfNeeded. Called by AttachmentRepository after it writes an attachment to
-   * the local mirror — callers must roll back the local write on a thrown error here, exactly like
-   * create()/update() already roll back SKILL.md on a failed push.
+   * Pushes one attachment's raw binary content to folderfoo, if `folderName` resolves to a remote
+   * source — the attachment counterpart to pushToRemoteIfNeeded. Unlike SKILL.md (always pushed
+   * under the fixed name 'SKILL'), an attachment is pushed under its own actual filename, since
+   * folderfoo needs to store each attachment as a distinct file. No-op for a local folder. Takes
+   * `data` directly rather than reading it off `attachmentFilePath` — called by AttachmentRepository
+   * BEFORE the local attachment file is written, per the "remote is the source of truth" ordering
+   * (remote/write-order.ts), so there is nothing on disk yet to read back.
    */
-  async pushAttachmentIfNeeded(folderName: string, attachmentFilePath: string, mimeType: string): Promise<void> {
+  async pushAttachmentIfNeeded(folderName: string, attachmentFilePath: string, data: Buffer, mimeType: string): Promise<void> {
     const remote = this.remoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
     await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
-    const data = fs.readFileSync(attachmentFilePath);
     await writeRemoteBinaryFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath), data, mimeType);
+  }
+
+  /**
+   * Trashes one attachment's remote copy on folderfoo, if `folderName` resolves to a remote source
+   * — the single-file counterpart to delete()'s trashRemoteFolder call (which trashes the whole
+   * skill directory, not appropriate for removing just one attachment out of it). No-op for a
+   * local folder. Without this, AttachmentRepository.remove() only deleted the local file +
+   * frontmatter entry, leaving the remote copy behind forever.
+   */
+  async trashAttachmentIfNeeded(folderName: string, attachmentFilePath: string): Promise<void> {
+    const remote = this.remoteFor(folderName);
+    if (!remote || !this.credentialsBaseDir) return;
+    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName);
+    const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
+    await trashRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath));
   }
 
   /** Attaches the live chokidar watcher so addFolder/removeFolder can mutate it without a restart. */
@@ -428,7 +448,6 @@ export class SkillRepository {
     if (fs.existsSync(skillDir)) {
       throw new Error(`skill directory already exists at ${skillDir}`);
     }
-    fs.mkdirSync(skillDir, { recursive: true });
     const filePath = path.join(skillDir, 'SKILL.md');
 
     const fm: SkillFrontmatter = {
@@ -448,18 +467,16 @@ export class SkillRepository {
       source_path: filePath,
       folder: targetFolder.name,
     };
-    writeMarkdownFile(filePath, stripSourcePath(fm), body);
-    try {
-      // Live/synchronous per the settled design — a folderfoo rejection here throws before upsertFile
-      // indexes the mirror as if the skill were successfully saved remotely.
-      await this.pushToRemoteIfNeeded(targetFolder.name, filePath);
-    } catch (err) {
-      // Remote push failed after the local mirror was already written — remove the orphaned local
-      // dir synchronously rather than leaving it for the next poll tick's reconcileDeletions to
-      // eventually clean up, so a failed create leaves zero trace immediately.
-      fs.rmSync(skillDir, { recursive: true, force: true });
-      throw err;
-    }
+    const fileContents = formatMarkdownFile(stripSourcePath(fm), body);
+
+    // Remote-first — see MemoryRepository.create()'s comment on why (remote/write-order.ts).
+    await writeRemoteThenLocal(
+      () => this.pushToRemoteIfNeeded(targetFolder.name, filePath, fileContents),
+      () => {
+        fs.mkdirSync(skillDir, { recursive: true });
+        fs.writeFileSync(filePath, fileContents, 'utf-8');
+      }
+    );
     upsertFile(this.db, this.syncSpec, filePath);
     return { ...fm, body, paused: false };
   }
@@ -532,8 +549,13 @@ export class SkillRepository {
       },
     };
     const newBody = bodyEdits ? applyBodyEdits(existing.body, bodyEdits).body : (body ?? existing.body);
-    writeMarkdownFile(existing.source_path, stripSourcePath(merged), newBody);
-    await this.pushToRemoteIfNeeded(existing.folder, existing.source_path);
+    const fileContents = formatMarkdownFile(stripSourcePath(merged), newBody);
+
+    // Remote-first — see MemoryRepository.create()'s comment on why (remote/write-order.ts).
+    await writeRemoteThenLocal(
+      () => this.pushToRemoteIfNeeded(existing.folder, existing.source_path, fileContents),
+      () => fs.writeFileSync(existing.source_path, fileContents, 'utf-8')
+    );
     upsertFile(this.db, this.syncSpec, existing.source_path);
     return { ...merged, body: newBody, paused: existingPaused };
   }
@@ -542,12 +564,9 @@ export class SkillRepository {
    * Renames a skill: moves <sourceDir>/[subfolder/]<oldName>/ to .../<newName>/ (keeping any
    * scripts/references/assets alongside SKILL.md) and updates the `name` frontmatter field to match.
    *
-   * Remote-folder note: pushes the renamed skill's content to folderfoo at its NEW path (a plain
-   * write, via pushToRemoteIfNeeded), but does not delete the OLD path on folderfoo — a true
-   * remote rename would need a folderfoo folder-rename call scoped to one skill's directory, which
-   * is out of scope for this pass (the settled design's write scope covers create/update/
-   * attachment writes, not rename). Renaming a remote-sourced skill currently leaves a stale copy
-   * under the old name on folderfoo; flagged here rather than silently incomplete.
+   * Remote-folder note: uses folderfoo's real POST /folders/rename endpoint — a true directory
+   * rename, not a write-under-the-new-path. No stale copy is left behind under the old name.
+   * Remote-first — see MemoryRepository.create()'s comment on why (remote/write-order.ts).
    */
   async rename(name: string, newName: string, folder?: string): Promise<SkillDoc> {
     assertValidSkillName(newName);
@@ -565,15 +584,31 @@ export class SkillRepository {
     if (fs.existsSync(newDir)) {
       throw new Error(`skill directory already exists at ${newDir}`);
     }
-    fs.renameSync(oldDir, newDir);
     const newFilePath = path.join(newDir, 'SKILL.md');
 
     // Rename changes the skill's id, so it becomes a fresh cache row — paused (local-only,
     // keyed by id) does not carry over, same as it wouldn't survive deleting the cache file.
     const { paused: _existingPaused, ...existingForFile } = existing;
     const merged: SkillFrontmatter = { ...existingForFile, name: newName };
-    writeMarkdownFile(newFilePath, stripSourcePath(merged), existing.body);
-    await this.pushToRemoteIfNeeded(existing.folder, newFilePath);
+    const fileContents = formatMarkdownFile(stripSourcePath(merged), existing.body);
+
+    const remote = this.remoteFor(existing.folder);
+    await writeRemoteThenLocal(
+      async () => {
+        if (!remote || !this.credentialsBaseDir) return;
+        await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder);
+        const oldDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, oldDir));
+        const newDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, newDir));
+        await renameRemoteFolder(remote.server, this.credentialsBaseDir, remote.tenantId, oldDirRelPath, newDirRelPath);
+      },
+      () => {
+        fs.renameSync(oldDir, newDir);
+        // The rename above already moved SKILL.md verbatim (old name/frontmatter) along with the
+        // directory — overwrite it with the new frontmatter (updated `name`) now that it's at its
+        // final path.
+        fs.writeFileSync(newFilePath, fileContents, 'utf-8');
+      }
+    );
     removeFile(this.db, 'skills', existing.source_path);
     upsertFile(this.db, this.syncSpec, newFilePath);
     return { ...merged, body: existing.body, paused: false };
@@ -666,12 +701,23 @@ export class SkillRepository {
     return results;
   }
 
-  /** Removes the whole skill directory, including any scripts/references/assets alongside SKILL.md. Remote-folder note: does not delete the corresponding content on folderfoo — deletion isn't in the settled design's remote write scope (create/update/attachment writes only), same gap flagged on rename(). */
+  /**
+   * Removes the whole skill directory, including any scripts/references/assets alongside SKILL.md.
+   * Remote-folder note: archives the corresponding remote directory to folderfoo's trash FIRST
+   * (via DELETE /folders/<skillDir>), before touching anything local — otherwise a deleted-locally-
+   * but-still-present-remotely skill gets silently pulled right back in on the next poll.
+   */
   async delete(name: string, folder?: string): Promise<void> {
     const existing = await this.get(name, folder);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
     if (this.isBuiltin(existing)) throw new Error(`skill "${name}" is builtin and cannot be deleted`);
     const skillDir = path.dirname(existing.source_path);
+    const remote = this.remoteFor(existing.folder);
+    if (remote && this.credentialsBaseDir) {
+      await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder);
+      const skillDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, skillDir));
+      await trashRemoteFolder(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath);
+    }
     fs.rmSync(skillDir, { recursive: true, force: true });
     removeFile(this.db, 'skills', existing.source_path);
   }

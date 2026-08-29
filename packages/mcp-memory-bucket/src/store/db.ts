@@ -5,6 +5,7 @@ export function openCache(dbPath: string): Database.Database {
   db.pragma('journal_mode = WAL');
 
   ensureSkillsCompoundKey(db);
+  ensureMemoryDocsSourcePathKey(db);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS skills (
@@ -27,7 +28,6 @@ export function openCache(dbPath: string): Database.Database {
     );
 
     CREATE TABLE IF NOT EXISTS memory_docs (
-      id TEXT PRIMARY KEY,
       key TEXT NOT NULL,
       key_type TEXT NOT NULL,
       description TEXT NOT NULL,
@@ -35,7 +35,7 @@ export function openCache(dbPath: string): Database.Database {
       tags TEXT NOT NULL,             -- JSON array
       status TEXT NOT NULL,
       related_to TEXT,
-      source_path TEXT NOT NULL UNIQUE,
+      source_path TEXT NOT NULL PRIMARY KEY, -- filename is the doc's real identity; no separate id
       folder TEXT NOT NULL DEFAULT '',  -- name of the configured folder this file lives under
       deprecated INTEGER NOT NULL DEFAULT 0,
       paused INTEGER NOT NULL DEFAULT 0, -- local-only: never synced from/to the doc's markdown file, cache-file scoped
@@ -55,6 +55,7 @@ export function openCache(dbPath: string): Database.Database {
       body,
       tags,
       key,
+      filename,
       tokenize = 'porter unicode61'
     );
 
@@ -91,19 +92,22 @@ export function openCache(dbPath: string): Database.Database {
 }
 
 /**
- * search_index is an FTS5 virtual table — existing cache files created before the `key` or
- * `ref_folder` column existed need it added. `ref_folder` was added alongside skills' compound
- * (folder, id) key (see ensureSkillsCompoundKey's doc comment): once two different folders can
- * legitimately have a skill sharing the same `id`, ref_id alone no longer uniquely identifies a
- * search_index row, so ref_folder joins ref_table/ref_id as part of every lookup/delete on this
- * table. FTS5 doesn't support ALTER TABLE ADD COLUMN reliably across versions, and search_index is
- * a disposable cache (rebuilt from skills/memory_docs, not the source of truth), so the simplest
+ * search_index is an FTS5 virtual table — existing cache files created before the `key`,
+ * `ref_folder`, or `filename` column existed need it added. `ref_folder` was added alongside
+ * skills' compound (folder, id) key (see ensureSkillsCompoundKey's doc comment): once two
+ * different folders can legitimately have a skill sharing the same `id`, ref_id alone no longer
+ * uniquely identifies a search_index row, so ref_folder joins ref_table/ref_id as part of every
+ * lookup/delete on this table. `filename` lets memory_search/bucket_search and the web UI's search
+ * box match a memory doc's own on-disk name (e.g. a ticket ref like "RMXS-13" embedded in the
+ * filename), not just its description/body/tags/key — see the filename-as-primary-citizen design.
+ * FTS5 doesn't support ALTER TABLE ADD COLUMN reliably across versions, and search_index is a
+ * disposable cache (rebuilt from skills/memory_docs, not the source of truth), so the simplest
  * safe migration is: drop and recreate with the new schema, then let backfillSearchIndex repopulate
  * everything.
  */
 function ensureSearchIndexHasKeyColumn(db: Database.Database): void {
   const cols = db.prepare(`PRAGMA table_info(search_index)`).all() as Array<{ name: string }>;
-  if (cols.length === 0 || (cols.some((c) => c.name === 'key') && cols.some((c) => c.name === 'ref_folder'))) return; // fresh table, or already migrated
+  if (cols.length === 0 || (cols.some((c) => c.name === 'key') && cols.some((c) => c.name === 'ref_folder') && cols.some((c) => c.name === 'filename'))) return; // fresh table, or already migrated
   db.exec(`DROP TABLE search_index`);
   db.exec(`
     CREATE VIRTUAL TABLE search_index USING fts5(
@@ -114,6 +118,7 @@ function ensureSearchIndexHasKeyColumn(db: Database.Database): void {
       body,
       tags,
       key,
+      filename,
       tokenize = 'porter unicode61'
     );
   `);
@@ -147,6 +152,24 @@ function ensureSkillsCompoundKey(db: Database.Database): void {
   db.exec(`DROP TABLE skills`);
 }
 
+/**
+ * Migration for cache files created before `memory_docs` dropped its synthetic `id` column in
+ * favor of `source_path` (the filename) as the real primary key — see the filename-as-primary-
+ * citizen design. Same precedent/rationale as ensureSkillsCompoundKey: memory_docs is a disposable
+ * cache fully rebuilt from the .md files on disk, so the simplest safe migration is drop-and-let-
+ * the-scan-repopulate rather than a data-preserving ALTER. Also purges this table's now-stale
+ * search_index/doc_dates rows (their ref_id held the old id, not source_path) so upsertFile
+ * repopulates them cleanly during the rescan instead of leaving orphaned rows keyed by a value
+ * nothing will ever look up again.
+ */
+function ensureMemoryDocsSourcePathKey(db: Database.Database): void {
+  const cols = db.prepare(`PRAGMA table_info(memory_docs)`).all() as Array<{ name: string; pk: number }>;
+  if (cols.length === 0 || cols.some((c) => c.name === 'source_path' && c.pk > 0)) return; // fresh table, or already migrated
+  db.exec(`DROP TABLE memory_docs`);
+  db.exec(`DELETE FROM search_index WHERE ref_table = 'memory_docs'`);
+  db.exec(`DELETE FROM doc_dates WHERE ref_table = 'memory_docs'`);
+}
+
 /** Migration for cache files created before a given column existed. Safe to call every startup. */
 function ensureColumns(
   db: Database.Database,
@@ -171,7 +194,7 @@ function backfillSearchIndex(db: Database.Database): void {
     body: string;
     tags: string;
   }>;
-  const memoryRows = db.prepare(`SELECT id, key, description, body, tags FROM memory_docs`).all() as Array<{
+  const memoryRows = db.prepare(`SELECT source_path AS id, key, description, body, tags FROM memory_docs`).all() as Array<{
     id: string;
     key: string;
     description: string;
@@ -181,14 +204,15 @@ function backfillSearchIndex(db: Database.Database): void {
   if (skillRows.length === 0 && memoryRows.length === 0) return;
 
   const insert = db.prepare(
-    `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key, filename) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const insertAll = db.transaction(() => {
     for (const row of skillRows) {
-      insert.run('skills', row.id, row.folder, row.description, row.body, flattenTags(row.tags), '');
+      insert.run('skills', row.id, row.folder, row.description, row.body, flattenTags(row.tags), '', '');
     }
     for (const row of memoryRows) {
-      insert.run('memory_docs', row.id, '', row.description, row.body, flattenTags(row.tags), row.key);
+      // row.id is source_path (see the SELECT above) — filename is its basename.
+      insert.run('memory_docs', row.id, '', row.description, row.body, flattenTags(row.tags), row.key, row.id.split('/').pop() ?? row.id);
     }
   });
   insertAll();
