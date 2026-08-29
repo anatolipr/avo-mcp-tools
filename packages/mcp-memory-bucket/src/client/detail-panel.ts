@@ -4,7 +4,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import './tag-multiselect.js';
 import './status-select.js';
 import './help-tooltip.js';
-import type { EntryDetail, Selection, Facets } from './types.js';
+import type { EntryDetail, Selection, Facets, ClientAttachmentEntry } from './types.js';
 
 const VIEW_MODE_KEY = 'mem-bucket-detail-view-mode';
 
@@ -91,6 +91,7 @@ export class DetailPanel extends LitElement {
     _addingFrontmatter: { state: true },
     _renaming: { state: true },
     _renameValue: { state: true },
+    _viewingAttachment: { state: true },
   };
 
   declare selected: Selection | null;
@@ -108,6 +109,7 @@ export class DetailPanel extends LitElement {
   private _addingFrontmatter = false;
   private _renaming = false;
   private _renameValue = '';
+  private _viewingAttachment: ClientAttachmentEntry | null = null;
 
   static styles = css`
     :host { display: block; padding: 16px; }
@@ -222,6 +224,50 @@ export class DetailPanel extends LitElement {
       margin-left: 2px;
     }
     .attachment-download:hover { opacity: 1; }
+    .attachment-view-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .back-button {
+      font-size: 11px;
+      padding: 3px 8px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: inherit;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .back-button:hover { background: var(--hover); }
+    .attachment-view-title {
+      font-size: 12px;
+      font-weight: 600;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .attachment-view-download {
+      font-size: 11px;
+      text-decoration: none;
+      color: inherit;
+      opacity: 0.75;
+    }
+    .attachment-view-download:hover { opacity: 1; }
+    .attachment-frame {
+      width: 100%;
+      height: 65vh;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg-subtle);
+    }
+    .attachment-image {
+      display: block;
+      max-width: 100%;
+      max-height: 65vh;
+      border-radius: 6px;
+    }
     .source-path {
       font-family: monospace;
       font-size: 11px;
@@ -403,6 +449,7 @@ export class DetailPanel extends LitElement {
       this._editing = false;
       this._addingFrontmatter = false;
       this._renaming = false;
+      this._viewingAttachment = null;
       this.#load();
       this.scrollTop = 0;
     }
@@ -871,7 +918,15 @@ export class DetailPanel extends LitElement {
           ${d.attachments.map(
             (a) => html`
               <li>
-                <a href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}/view" target="_blank" rel="noopener"
+                <a
+                  href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}/view"
+                  target="_blank"
+                  rel="noopener"
+                  @click=${(e: MouseEvent) => {
+                    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                    e.preventDefault();
+                    this._viewingAttachment = a;
+                  }}
                   >${a.filename}</a
                 >
                 <span class="attachment-meta">(${a.mime_type}, ${a.size} bytes)</span>
@@ -889,6 +944,34 @@ export class DetailPanel extends LitElement {
     `;
   }
 
+  /** Replaces the doc body with an inline preview of `a`, shown via the CSP-sandboxed /view route
+   * (see src/web/routes.ts) so arbitrary attachment content can render without executing script
+   * in this origin. Images get an <img>; everything else falls back to an <iframe>, which the
+   * browser renders natively for PDFs and text and shows blank/unsupported for binary types
+   * (the download button next to it is the escape hatch for those). */
+  #renderAttachmentView(d: EntryDetail, table: 'skills' | 'memory_docs', a: ClientAttachmentEntry) {
+    // Passed through so the server can render a text attachment's inline preview (see
+    // renderTextAttachmentPage in src/web/routes.ts) in the same light/dark theme as this app,
+    // including a manual override — not just the OS-level preference the iframe would otherwise
+    // fall back to on its own.
+    const theme = document.documentElement.getAttribute('data-theme');
+    const themeParam = theme === 'light' || theme === 'dark' ? `?theme=${theme}` : '';
+    const viewUrl = `/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}/view${themeParam}`;
+    const downloadUrl = `/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}`;
+    return html`
+      <div class="attachment-view-header">
+        <button class="back-button" title="Back to ${d.name ?? d.key ?? d.id}" @click=${() => (this._viewingAttachment = null)}>
+          ← Back
+        </button>
+        <span class="attachment-view-title" title=${a.filename}>${a.filename}</span>
+        <a class="attachment-view-download" href=${downloadUrl} title="Download ${a.filename}">⇩ Download</a>
+      </div>
+      ${a.mime_type.startsWith('image/')
+        ? html`<img class="attachment-image" src=${viewUrl} alt=${a.filename} />`
+        : html`<iframe class="attachment-frame" src=${viewUrl} title=${a.filename}></iframe>`}
+    `;
+  }
+
   render() {
     if (!this.selected) return html`<div class="empty">Select an entry to view its details.</div>`;
     if (!this._doc) return nothing;
@@ -899,6 +982,8 @@ export class DetailPanel extends LitElement {
 
     if (this._addingFrontmatter) return html`${this.#renderTitleRow(d, isSkill)}${this.#renderDocTypePrompt()}`;
     if (this._editing && this._draft) return html`${this.#renderTitleRow(d, isSkill)}${this.#renderEditForm(isSkill)}`;
+    if (this._viewingAttachment)
+      return html`${this.#renderTitleRow(d, isSkill)}${this.#renderAttachmentView(d, this.selected.table, this._viewingAttachment)}`;
 
     return html`
       ${this.#renderTitleRow(d, isSkill)}

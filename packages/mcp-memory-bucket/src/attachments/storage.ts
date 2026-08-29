@@ -39,8 +39,30 @@ const MIME_BY_EXT: Record<string, string> = {
   '.csv': 'text/csv',
 };
 
+// Extensions whose content isn't meaningfully viewable as text, so an unrecognized one among
+// these should stay application/octet-stream rather than fall through to the text/plain default
+// below — a spreadsheet or archive rendered as raw bytes in the inline preview is just noise;
+// better to leave that preview blank and let the download button be the escape hatch.
+const BINARY_EXTENSIONS = new Set([
+  '.zip', '.tar', '.gz', '.tgz', '.rar', '.7z',
+  '.exe', '.dll', '.so', '.dylib', '.wasm', '.bin', '.class', '.jar',
+  '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+  '.mp3', '.mp4', '.mov', '.avi', '.wav', '.ogg',
+  '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  '.db', '.sqlite', '.ico',
+]);
+
+/**
+ * Attachments on skills/memory docs are overwhelmingly source/config/template files (the
+ * generate-crud-entity-from-plop-templates skill's .hbs templates are a typical example) —
+ * extensions with no dedicated MIME_BY_EXT entry default to text/plain so the inline preview
+ * (src/web/routes.ts's /view route) can actually render them, instead of application/octet-stream
+ * which browsers show as a blank iframe. Recognized binary formats stay opaque via BINARY_EXTENSIONS.
+ */
 export function guessMimeType(filename: string): string {
-  return MIME_BY_EXT[path.extname(filename).toLowerCase()] ?? 'application/octet-stream';
+  const ext = path.extname(filename).toLowerCase();
+  if (MIME_BY_EXT[ext]) return MIME_BY_EXT[ext];
+  return BINARY_EXTENSIONS.has(ext) ? 'application/octet-stream' : 'text/plain';
 }
 
 function uniqueFilename(dir: string, filename: string): string {

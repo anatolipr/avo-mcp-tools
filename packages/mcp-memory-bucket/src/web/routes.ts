@@ -50,6 +50,46 @@ function asArray(v: unknown): string[] {
   return Array.isArray(v) ? v.map(String) : [String(v)];
 }
 
+function isTextishMime(mimeType: string): boolean {
+  return mimeType.startsWith('text/') || mimeType === 'application/json' || mimeType === 'application/xml';
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Colors mirror public/index.html's --bg-subtle/--fg light-dark() pairs (composited over --bg,
+ * since this shell has no ambient page to layer a translucent --bg-subtle over) so a text
+ * attachment's inline preview reads as part of the same surface as the detail panel around it,
+ * in both the app's manual theme override and the OS-level default.
+ */
+function renderTextAttachmentPage(content: string, theme: string): string {
+  return `<!doctype html>
+<html data-theme="${theme}">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  :root[data-theme='light'] { color-scheme: light; }
+  :root[data-theme='dark'] { color-scheme: dark; }
+  html, body { margin: 0; }
+  body { background: light-dark(#f7f7f7, #262626); color: light-dark(#111111, #f0f0f0); }
+  pre {
+    margin: 0;
+    padding: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body><pre>${escapeHtml(content)}</pre></body>
+</html>`;
+}
+
 function tagWhereClause(tags: string[]): { clause: string; params: string[] } {
   if (tags.length === 0) return { clause: '', params: [] };
   const clauses = tags.map(() => `EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`);
@@ -593,7 +633,31 @@ export function buildWebRouter(
       return;
     }
     res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src *");
-    res.setHeader('Content-Type', guessMimeType(filename));
+    const mimeType = guessMimeType(filename);
+
+    // The client's detail-panel embeds this route in an <iframe> sized/backgrounded to match its
+    // own light/dark theme (see .attachment-frame in detail-panel.ts) — but a plain text/JSON/XML
+    // file sent as-is renders through the browser's own raw-text viewer, which is always
+    // white-on-black-text regardless of that surrounding theme. Wrapping it in a tiny themed HTML
+    // shell (same color-scheme/data-theme pattern as public/index.html, so a manual light/dark
+    // pick in the app is honored, not just the OS preference) fixes that mismatch. Images/PDFs/etc.
+    // are unaffected — the browser's native viewer for those is used as-is.
+    if (isTextishMime(mimeType)) {
+      let content: string;
+      try {
+        content = fs.readFileSync(filePath, 'utf-8');
+      } catch {
+        res.status(404).json({ error: 'attachment not found' });
+        return;
+      }
+      const theme = req.query.theme === 'light' || req.query.theme === 'dark' ? req.query.theme : '';
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
+      res.send(renderTextAttachmentPage(content, theme));
+      return;
+    }
+
+    res.setHeader('Content-Type', mimeType);
     res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
     res.sendFile(filePath, (err) => {
       if (err && !res.headersSent) {
