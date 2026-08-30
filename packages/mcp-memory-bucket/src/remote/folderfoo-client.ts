@@ -8,6 +8,14 @@ export class FolderfooAuthError extends Error {
   }
 }
 
+/** Thrown for any non-ok, non-401 folderfoo response — carries the HTTP status so callers can distinguish e.g. a 404 (file genuinely absent) from other failures without string-matching the message. */
+export class FolderfooRequestError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(`folderfoo request failed (${status}): ${message}`);
+    this.name = 'FolderfooRequestError';
+  }
+}
+
 interface LoginResult {
   jwt: string;
 }
@@ -85,7 +93,7 @@ async function withAuth<T>(server: string, baseDir: string, call: (jwt: string) 
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(`folderfoo request failed (${res.status}): ${(body as { error?: string }).error ?? res.statusText}`);
+    throw new FolderfooRequestError(res.status, (body as { error?: string }).error ?? res.statusText);
   }
   return parse(res);
 }

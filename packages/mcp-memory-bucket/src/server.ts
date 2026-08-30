@@ -101,26 +101,35 @@ const attachmentRepo = new AttachmentRepository(memoryRepo, skillRepo, db);
 // comment for why this lives here (needs memoryRepo/skillRepo, which remote-sync.ts itself doesn't
 // depend on) rather than inside pollOne/reconcileDeletions.
 //
-// Skipped entirely for a folder connected under a DIFFERENT identity than the one currently logged
-// in (or connected while nobody was logged in) — same visibility rule memoryRepo.get()/
-// skillRepo.get() already enforce (isFolderVisible). The poller itself has no notion of "current
-// identity" and keeps polling every configured remote source regardless of who's logged in right
-// now, so without this check, repairUnlistedInFolder would sweep a currently-invisible folder's
-// docs, call skillRepo.get()/memoryRepo.get() on them, and get a spurious "not found" per doc —
-// not a real bug, just this visibility rule surfacing as a scary per-doc error instead of a no-op.
+// startRemotePolling below only ever calls onSynced for a folder that passed its own isVisible
+// check first (isRemoteFolderVisible), so this never runs for a folder connected under a
+// different identity than the one currently logged in — repairUnlistedInFolder can safely call
+// skillRepo.get()/memoryRepo.get() without a spurious "not found" from a currently-invisible doc.
 function onAttachmentSync(table: 'skills' | 'memory_docs', folder: RemoteFolder): void {
-  if (!isFolderVisible(folder, identity.current())) return;
   attachmentRepo.repairUnlistedInFolder(table, folder.name).catch((err) =>
     console.error(`[memory-bucket] failed to repair attachments for folder "${folder.name}":`, err)
   );
 }
+// folderfoo integration off means nobody can ever be logged in this process (identity.mode stays
+// 'off'), so every remote folder is permanently invisible per isFolderVisible/matchesCurrentIdentity
+// above regardless of polling - polling them anyway just hits a folderfoo host that was never meant
+// to be reachable this run (e.g. a `dev` host from a previous --folderfoo-mode session) and throws a
+// raw fetch/ECONNREFUSED error on every resync, since pollOne only swallows FolderfooAuthError.
+// Gates the actual network poll, not just the post-sync attachment repair (onAttachmentSync
+// above already had this check, but only for its own callback — pollOne itself ran regardless).
+// A folder connected under a different --folderfoo-mode/identity than the one currently logged in
+// (e.g. a leftover `dev` source from a prior session while this run is `cloud`) is invisible to
+// every tool already; without this it was still polled every interval tick and on every
+// resyncAll, hitting whatever host:port it points at (often nothing, hence the raw
+// fetch/ECONNREFUSED) for a source nothing can currently see anyway.
+const isRemoteFolderVisible = (folder: RemoteFolder) => isFolderVisible(folder, identity.current());
 const remoteSkillPoller: RemotePollerHandle | undefined =
-  config.remoteSkillFolders.length > 0
-    ? startRemotePolling(db, skillSpec, config.remoteSkillFolders, config.baseDir, (folder) => onAttachmentSync('skills', folder))
+  config.folderfooMode !== 'off' && config.remoteSkillFolders.length > 0
+    ? startRemotePolling(db, skillSpec, config.remoteSkillFolders, config.baseDir, (folder) => onAttachmentSync('skills', folder), isRemoteFolderVisible)
     : undefined;
 const remoteMemoryPoller: RemotePollerHandle | undefined =
-  config.remoteMemoryFolders.length > 0
-    ? startRemotePolling(db, memorySpec, config.remoteMemoryFolders, config.baseDir, (folder) => onAttachmentSync('memory_docs', folder))
+  config.folderfooMode !== 'off' && config.remoteMemoryFolders.length > 0
+    ? startRemotePolling(db, memorySpec, config.remoteMemoryFolders, config.baseDir, (folder) => onAttachmentSync('memory_docs', folder), isRemoteFolderVisible)
     : undefined;
 
 // Forces one immediate poll of every remote source at process start, instead
@@ -203,11 +212,12 @@ app.listen(PORT, () => {
   console.error(`[memory-bucket] skill folders: ${config.skillFolders.map((f) => `${f.name}=${f.path}`).join(', ') || '(none)'}`);
   console.error(`[memory-bucket] memory folders: ${config.memoryFolders.map((f) => `${f.name}=${f.path}`).join(', ') || '(none)'}`);
   if (config.remoteSkillFolders.length > 0 || config.remoteMemoryFolders.length > 0) {
+    const suffix = config.folderfooMode === 'off' ? ' (folderfoo integration off — not synced, ignored)' : '';
     console.error(
-      `[memory-bucket] remote (folderfoo) skill folders: ${config.remoteSkillFolders.map((f) => `${f.name}@${f.server}`).join(', ') || '(none)'}`
+      `[memory-bucket] remote (folderfoo) skill folders${suffix}: ${config.remoteSkillFolders.map((f) => `${f.name}@${f.server}`).join(', ') || '(none)'}`
     );
     console.error(
-      `[memory-bucket] remote (folderfoo) memory folders: ${config.remoteMemoryFolders.map((f) => `${f.name}@${f.server}`).join(', ') || '(none)'}`
+      `[memory-bucket] remote (folderfoo) memory folders${suffix}: ${config.remoteMemoryFolders.map((f) => `${f.name}@${f.server}`).join(', ') || '(none)'}`
     );
   }
 });

@@ -13,7 +13,7 @@ import { attachmentsDirFor } from '../attachments/storage.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
 import { rebaseFolderPath } from '../config.js';
 import { normalizeKey } from '../types.js';
-import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, renameFile as renameRemoteFile, trashFile as trashRemoteFile, joinRemoteFolderPath, assertRemoteFolderExists } from '../remote/folderfoo-client.js';
+import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, renameFile as renameRemoteFile, trashFile as trashRemoteFile, joinRemoteFolderPath, assertRemoteFolderExists, FolderfooRequestError } from '../remote/folderfoo-client.js';
 import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 import { writeRemoteThenLocal } from '../remote/write-order.js';
 import type { MemoryDoc, MemoryDocType, MemoryFrontmatter, MemoryKeyType, MemoryStatus } from '../types.js';
@@ -197,6 +197,19 @@ export class MemoryRepository {
   }
 
   /**
+   * Validates a caller-supplied `folder` filter (getByKey/getByFilenameContains/search) against the
+   * configured folder list, throwing the same "unknown memory folder" error resolveFolder() uses for
+   * writes. Without this, an unrecognized folder name (typo, stale name from a since-removed folder,
+   * or an outright made-up one) silently matched zero rows via `folder = ?` in SQL instead of erroring
+   * — indistinguishable from "folder is real but has no matches".
+   */
+  private assertKnownFolder(folderName: string): void {
+    if (!this.folders.some((f) => f.name === folderName)) {
+      throw new Error(`unknown memory folder "${folderName}" — valid folders: ${this.folders.map((f) => f.name).join(', ') || '(none configured)'}`);
+    }
+  }
+
+  /**
    * Registers a new REMOTE (folderfoo) folder: creates its local mirror
    * directory, registers it exactly like a local addFolder (so it starts
    * watching/scanning immediately — empty at first, since nothing's been
@@ -274,6 +287,7 @@ export class MemoryRepository {
       params.push(docType);
     }
     if (opts.folder) {
+      this.assertKnownFolder(opts.folder);
       conditions.push('folder = ?');
       params.push(opts.folder);
     }
@@ -311,6 +325,7 @@ export class MemoryRepository {
       params.push(docType);
     }
     if (opts.folder) {
+      this.assertKnownFolder(opts.folder);
       conditions.push('folder = ?');
       params.push(opts.folder);
     }
@@ -360,6 +375,7 @@ export class MemoryRepository {
       params.push(status);
     }
     if (folder) {
+      this.assertKnownFolder(folder);
       conditions.push('m.folder = ?');
       params.push(folder);
     }
@@ -433,7 +449,19 @@ export class MemoryRepository {
     // blob, nesting one level deeper on every single edit (confirmed via a
     // real corrupted doc: 3 levels of self-nested frontmatter+body after 3
     // edits). Must parse it exactly like a local file read would.
-    const liveBody = matter(await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name)).content.trim();
+    let raw: string;
+    try {
+      raw = await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name);
+    } catch (err) {
+      // Also try the LEGACY extensionless remote name — a doc pushed before the
+      // extension-preserving fix still sits on folderfoo under its bare id (no ".md") and always
+      // will, until it's renamed/re-saved (same tolerance reconcileDeletions already applies via
+      // remoteFilename.toLocal/toRemote — see remote-sync.ts). Only retry on a 404, never for a
+      // FolderfooAuthError or any other failure, which must surface as-is.
+      if (!(err instanceof FolderfooRequestError) || err.status !== 404 || !name.endsWith('.md')) throw err;
+      raw = await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name.slice(0, -3));
+    }
+    const liveBody = matter(raw).content.trim();
     return { ...doc, body: liveBody };
   }
 
@@ -444,9 +472,16 @@ export class MemoryRepository {
   }
 
   listKeys(keyPrefix?: string): Array<{ key: string; docCount: number }> {
+    const conditions = ['paused = 0'];
+    const params: unknown[] = [];
+    const hidden = this.hiddenFolderNames();
+    if (hidden.length > 0) {
+      conditions.push(`folder NOT IN (${hidden.map(() => '?').join(', ')})`);
+      params.push(...hidden);
+    }
     const rows = this.db
-      .prepare(`SELECT key, COUNT(*) as doc_count FROM memory_docs GROUP BY key ORDER BY key`)
-      .all() as Array<{ key: string; doc_count: number }>;
+      .prepare(`SELECT key, COUNT(*) as doc_count FROM memory_docs WHERE ${conditions.join(' AND ')} GROUP BY key ORDER BY key`)
+      .all(...params) as Array<{ key: string; doc_count: number }>;
     const prefix = keyPrefix ? normalizeKey(keyPrefix) : undefined;
     return rows
       .filter((r) => !prefix || r.key.startsWith(prefix))
@@ -739,7 +774,17 @@ export class MemoryRepository {
         const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(oldRelPath));
         const oldName = path.basename(oldRelPath);
         const newName = path.basename(newPath);
-        await renameRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, oldName, newName);
+        try {
+          await renameRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, oldName, newName);
+        } catch (err) {
+          // Same legacy-extensionless fallback as get() above: a doc pushed before the
+          // extension-preserving fix still sits on folderfoo under its bare id (no ".md"), so
+          // renaming by the .md-suffixed name 404s even though the doc reads back fine via get()'s
+          // own fallback. Retry once against the bare name — only on a 404, never for any other
+          // failure, which must surface as-is.
+          if (!(err instanceof FolderfooRequestError) || err.status !== 404 || !oldName.endsWith('.md')) throw err;
+          await renameRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, oldName.slice(0, -3), newName);
+        }
       },
       () => {
         fs.renameSync(existing.source_path, newPath);

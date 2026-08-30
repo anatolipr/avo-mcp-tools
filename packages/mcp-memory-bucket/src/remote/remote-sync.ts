@@ -286,7 +286,17 @@ export function startRemotePolling<TFrontmatter>(
   // above this module (server.ts, once MemoryRepository/SkillRepository/AttachmentRepository all
   // exist) run its own post-sync work without remote-sync.ts needing to depend on those repos
   // itself — see healAttachmentsAfterSync's doc comment for what server.ts actually wires in here.
-  onSynced?: (folder: RemoteFolder) => void | Promise<void>
+  onSynced?: (folder: RemoteFolder) => void | Promise<void>,
+  // True when `folder` should actually be reached over the network right now — server.ts wires this
+  // to isFolderVisible(folder, identity.current()). A folder connected under a DIFFERENT mode/user
+  // than the one currently logged in (e.g. a `dev` folder left over from a previous
+  // --folderfoo-mode session, while this run is `cloud`) is skipped entirely here, not just hidden
+  // from tools afterward — without this, every interval tick, the startup resyncAll, and the web
+  // UI's "resync all" button would all still try to reach that folder's server and throw a raw
+  // fetch/ECONNREFUSED (or worse, succeed against a DIFFERENT server that happens to be listening on
+  // that host:port right now) for a source nothing can currently see anyway. Defaults to "always
+  // visible" so existing callers/tests that don't care about identity keep working unchanged.
+  isVisible: (folder: RemoteFolder) => boolean = () => true
 ): RemotePollerHandle {
   const byName = new Map(remoteFolders.map((f) => [f.name, f]));
 
@@ -297,6 +307,7 @@ export function startRemotePolling<TFrontmatter>(
 
   const interval = setInterval(() => {
     for (const folder of remoteFolders) {
+      if (!isVisible(folder)) continue;
       pollAndNotify(folder).catch((err) => console.error(`[memory-bucket] remote poll failed for ${folder.name}:`, err));
     }
   }, POLL_INTERVAL_MS);
@@ -309,10 +320,12 @@ export function startRemotePolling<TFrontmatter>(
     resyncNow: async (folderName: string) => {
       const folder = byName.get(folderName);
       if (!folder) throw new Error(`no remote source configured with name "${folderName}"`);
+      if (!isVisible(folder)) throw new Error(`remote source "${folderName}" is not visible under the current login — reconnect or log in as the identity it was connected under`);
       await pollAndNotify(folder, { force: true });
     },
     resyncAll: async () => {
       for (const folder of remoteFolders) {
+        if (!isVisible(folder)) continue;
         await pollAndNotify(folder, { force: true });
       }
     },
