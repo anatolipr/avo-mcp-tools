@@ -13,6 +13,12 @@ interface FolderfooFolder {
   createdAt: string;
 }
 
+interface SharedFolder {
+  owner: string;
+  path: string;
+  role: 'member' | 'editor' | null;
+}
+
 export class AddFolderModal extends LitElement {
   static properties = {
     defaultKind: { attribute: false },
@@ -23,7 +29,7 @@ export class AddFolderModal extends LitElement {
 
   declare defaultKind: 'skill' | 'memory';
   declare lockKind: boolean;
-  declare onAdded: () => void;
+  declare onAdded: (warning?: string) => void;
   declare onCancel: () => void;
 
   #kind = new Signal<'skill' | 'memory'>('skill');
@@ -61,8 +67,19 @@ export class AddFolderModal extends LitElement {
   #ffConnecting = new Signal<boolean>(false);
   #ffFolders = new Signal<FolderfooFolder[]>([]);
   #ffSelectedFolderPath = new Signal<string>('');
+  #ffSelectedOwner = new Signal<string>(''); // '' for one of the caller's own folders, else the sharer's username
   #ffLoadingFolders = new Signal<boolean>(false);
   #ffPollTimer?: ReturnType<typeof setInterval>;
+
+  // --- "browse a folder shared with me" sub-mode of the connected folderfoo view ---
+  #ffFolderSource = new Signal<'mine' | 'shared'>('mine');
+  #ffSharedFolders = new Signal<SharedFolder[]>([]);
+  #ffLoadingSharedFolders = new Signal<boolean>(false);
+  // Once a shared root is picked from #ffSharedFolders, browsing INTO its subfolders reuses
+  // #ffFolders (via listFolders' owner+rootFolder params) rather than a parallel list — the same
+  // flat single-level picker as "mine" mode, just rooted at someone else's shared folder instead of
+  // the caller's own root. null means "still choosing which shared root to browse."
+  #ffSharedRoot = new Signal<SharedFolder | null>(null);
 
   static styles = css`
     :host { display: block; }
@@ -372,11 +389,16 @@ export class AddFolderModal extends LitElement {
     }
   }
 
-  async #ffListFolders() {
+  // `owner`/`rootFolder`, when passed, browse INTO a folder someone else shared (see
+  // #ffBrowseSharedRoot below) instead of the caller's own root — same list shape either way (see
+  // folderfoo-client.ts's listFolders doc comment).
+  async #ffListFolders(owner?: string, rootFolder?: string) {
     this.#ffLoadingFolders.set(true);
     this.#error.set('');
     try {
       const params = new URLSearchParams({ server: this.#ffServer.value, tenantId: this.#ffTenantId.value });
+      if (owner) params.set('owner', owner);
+      if (rootFolder) params.set('rootFolder', rootFolder);
       const res = await fetch(`/api/folderfoo/folders?${params.toString()}`);
       const data = await res.json();
       if (!res.ok) {
@@ -389,11 +411,52 @@ export class AddFolderModal extends LitElement {
     }
   }
 
-  #ffSelectFolder(folderPath: string) {
+  async #ffListSharedFolders() {
+    this.#ffLoadingSharedFolders.set(true);
+    this.#error.set('');
+    try {
+      const params = new URLSearchParams({ server: this.#ffServer.value, tenantId: this.#ffTenantId.value });
+      const res = await fetch(`/api/folderfoo/shared-folders?${params.toString()}`);
+      const data = await res.json();
+      if (!res.ok) {
+        this.#error.set(data.error ?? 'failed to list folders shared with you');
+        return;
+      }
+      this.#ffSharedFolders.set(data as SharedFolder[]);
+    } finally {
+      this.#ffLoadingSharedFolders.set(false);
+    }
+  }
+
+  #ffSwitchFolderSource(source: 'mine' | 'shared') {
+    this.#ffFolderSource.set(source);
+    this.#ffSharedRoot.set(null);
+    this.#ffSelectedFolderPath.set('');
+    this.#ffSelectedOwner.set('');
+    if (source === 'shared' && this.#ffSharedFolders.value.length === 0) this.#ffListSharedFolders();
+    else if (source === 'mine') this.#ffListFolders();
+  }
+
+  // Picks which shared root to browse subfolders of — a "member"-role (read-only) share is still
+  // pickable here (browsing/connecting is read access), the role only gates WRITES later, via
+  // folderfoo's own resolveUserDir(..., 'editor') check on every save/rename/trash call.
+  #ffBrowseSharedRoot(root: SharedFolder) {
+    this.#ffSharedRoot.set(root);
+    this.#ffListFolders(root.owner, root.path);
+  }
+
+  #ffSelectFolder(folderPath: string, owner?: string) {
     this.#ffSelectedFolderPath.set(folderPath);
+    this.#ffSelectedOwner.set(owner ?? '');
     if (!this.#name.value) {
       this.#name.set(folderPath.split('/').filter(Boolean).pop() ?? this.#ffTenantId.value);
     }
+  }
+
+  // Selects the shared root itself (not a subfolder browsed into it) — e.g. connecting "bbbmemz"
+  // directly rather than something nested inside it.
+  #ffSelectSharedRoot(root: SharedFolder) {
+    this.#ffSelectFolder(root.path, root.owner);
   }
 
   async #ffSubmit() {
@@ -410,6 +473,7 @@ export class AddFolderModal extends LitElement {
           server: this.#ffServer.value,
           tenantId: this.#ffTenantId.value,
           folderPath: this.#ffSelectedFolderPath.value,
+          owner: this.#ffSelectedOwner.value || undefined,
         }),
       });
       const data = await res.json();
@@ -417,7 +481,7 @@ export class AddFolderModal extends LitElement {
         this.#error.set(data.error ?? 'failed to connect folder');
         return;
       }
-      this.onAdded();
+      this.onAdded(data.kindMismatchWarning as string | undefined);
     } finally {
       this.#submitting.set(false);
     }
@@ -549,27 +613,92 @@ export class AddFolderModal extends LitElement {
       `;
     }
 
+    const sharedFolders = this.#ffSharedFolders.value;
+    const sharedRoot = this.#ffSharedRoot.value;
     return html`
       <div class="ff-body">
         <div class="ff-connected-row"><span class="ff-connected-dot"></span> Connected to ${this.#ffServer.value}</div>
-        ${folders.length > 0
+        <div class="kind-toggle">
+          <button
+            class=${this.#ffFolderSource.value === 'mine' ? 'active' : ''}
+            @click=${() => this.#ffSwitchFolderSource('mine')}
+          >
+            My folders
+          </button>
+          <button
+            class=${this.#ffFolderSource.value === 'shared' ? 'active' : ''}
+            @click=${() => this.#ffSwitchFolderSource('shared')}
+          >
+            Shared with me
+          </button>
+        </div>
+        ${this.#ffFolderSource.value === 'mine'
           ? html`
-              <div class="ff-folder-list">
-                ${folders.map(
-                  (f) => html`<div
-                    class="ff-folder-entry ${this.#ffSelectedFolderPath.value === f.path ? 'selected' : ''}"
-                    @click=${() => this.#ffSelectFolder(f.path)}
-                  >
-                    ${f.path}
-                  </div>`
-                )}
-              </div>
+              ${folders.length > 0
+                ? html`
+                    <div class="ff-folder-list">
+                      ${folders.map(
+                        (f) => html`<div
+                          class="ff-folder-entry ${this.#ffSelectedFolderPath.value === f.path && !this.#ffSelectedOwner.value ? 'selected' : ''}"
+                          @click=${() => this.#ffSelectFolder(f.path)}
+                        >
+                          ${f.path}
+                        </div>`
+                      )}
+                    </div>
+                  `
+                : !this.#ffLoadingFolders.value
+                  ? html`<div class="ff-empty">No folders found.</div>`
+                  : html`<div class="ff-hint">Loading folders…</div>`}
             `
-          : !this.#ffLoadingFolders.value
-            ? html`<div class="ff-empty">No folders found.</div>`
-            : html`<div class="ff-hint">Loading folders…</div>`}
+          : sharedRoot
+            ? html`
+                <div class="breadcrumb-row">
+                  <div class="breadcrumb">${sharedRoot.owner}:${sharedRoot.path}</div>
+                  <button class="new-folder-btn" @click=${() => this.#ffSwitchFolderSource('shared')}>← Back</button>
+                </div>
+                <div
+                  class="ff-folder-entry ${this.#ffSelectedFolderPath.value === sharedRoot.path && this.#ffSelectedOwner.value === sharedRoot.owner ? 'selected' : ''}"
+                  @click=${() => this.#ffSelectSharedRoot(sharedRoot)}
+                >
+                  (connect this folder itself)
+                </div>
+                ${folders.length > 0
+                  ? html`
+                      <div class="ff-folder-list">
+                        ${folders.map(
+                          (f) => html`<div
+                            class="ff-folder-entry ${this.#ffSelectedFolderPath.value === f.path && this.#ffSelectedOwner.value === sharedRoot.owner ? 'selected' : ''}"
+                            @click=${() => this.#ffSelectFolder(f.path, sharedRoot.owner)}
+                          >
+                            ${f.path}
+                          </div>`
+                        )}
+                      </div>
+                    `
+                  : !this.#ffLoadingFolders.value
+                    ? html`<div class="ff-empty">No subfolders.</div>`
+                    : html`<div class="ff-hint">Loading folders…</div>`}
+              `
+            : html`
+                ${sharedFolders.length > 0
+                  ? html`
+                      <div class="ff-folder-list">
+                        ${sharedFolders.map(
+                          (f) => html`<div class="ff-folder-entry" @click=${() => this.#ffBrowseSharedRoot(f)}>
+                            ${f.path} <span style="opacity:0.6">— shared by ${f.owner}${f.role === 'member' ? ' (read-only)' : ''}</span>
+                          </div>`
+                        )}
+                      </div>
+                    `
+                  : !this.#ffLoadingSharedFolders.value
+                    ? html`<div class="ff-empty">No one has shared a folder with you yet.</div>`
+                    : html`<div class="ff-hint">Loading shared folders…</div>`}
+              `}
         ${this.#ffSelectedFolderPath.value
-          ? html`<div class="selected-row">Selected: <span class="path">${this.#ffSelectedFolderPath.value}</span></div>`
+          ? html`<div class="selected-row">
+              Selected: <span class="path">${this.#ffSelectedOwner.value ? `${this.#ffSelectedOwner.value}:` : ''}${this.#ffSelectedFolderPath.value}</span>
+            </div>`
           : ''}
         <div>
           <label>Folder name</label>

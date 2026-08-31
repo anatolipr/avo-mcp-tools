@@ -46,7 +46,7 @@ export class SharedWithMePanel extends LitElement {
 
   declare items: SharedItemRow[];
   declare refreshing: boolean;
-  declare lastRefreshSummary: { updated: number; revoked: number; unchanged: number } | null;
+  declare lastRefreshSummary: { added: number; updated: number; revoked: number; unchanged: number } | null;
   // The fork destination picker's option list, split by kind — a shared memory doc forks into one
   // of the caller's own memory folders, a shared skill into one of their skill folders. Doesn't
   // distinguish local vs. remote: any configured folder the user already owns is a valid target.
@@ -194,7 +194,7 @@ export class SharedWithMePanel extends LitElement {
       <div class="header">
         <h2>Shared with me</h2>
         ${summary
-          ? html`<span class="summary">${summary.updated} updated · ${summary.revoked} revoked · ${summary.unchanged} unchanged</span>`
+          ? html`<span class="summary">${summary.added} added · ${summary.updated} updated · ${summary.revoked} revoked · ${summary.unchanged} unchanged</span>`
           : ''}
         <button
           class="refresh-btn ${this.refreshing ? 'spinning' : ''}"

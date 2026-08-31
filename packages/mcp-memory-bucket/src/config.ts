@@ -25,6 +25,15 @@ export interface RemoteFolder {
   /** The --folderfoo-mode and logged-in username active when this folder was connected — see identity.ts. */
   mode: FolderfooMode;
   username: string;
+  /**
+   * Set only when this source is a folder someone ELSE shared with `username` directly (folderfoo's
+   * shares mechanism, not a folder `username` owns) — e.g. connecting a "Shared with me" folder like
+   * bbbmemz from the add-folder picker. Every folderfoo-client.ts call this source's poller/writer
+   * makes must pass this through as its own `owner` param, addressing `folderPath` inside the
+   * OWNER's tree (gated by folderfoo's hasAccess/role check) rather than `username`'s own. Undefined
+   * for every pre-existing own-folder connection — the common case, unchanged.
+   */
+  owner?: string;
 }
 
 /**
@@ -61,7 +70,7 @@ export interface BucketConfig {
 type SourceEntry =
   | string
   | { name: string; path: string }
-  | { name: string; remote: { server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string } };
+  | { name: string; remote: { server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string; owner?: string } };
 
 interface ConfigFile {
   skill_sources?: SourceEntry[];
@@ -70,7 +79,7 @@ interface ConfigFile {
 
 function isRemoteEntry(
   entry: SourceEntry
-): entry is { name: string; remote: { server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string } } {
+): entry is { name: string; remote: { server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string; owner?: string } } {
   return typeof entry === 'object' && 'remote' in entry;
 }
 
@@ -81,10 +90,14 @@ function isRemoteEntry(
  * get mistaken for one another (see identity.ts) - a mirror connected while
  * logged into "dev" as "anatoli" lands at
  * .memory-bucket-remote-cache/dev_anatoli/<name>/, distinct from the same
- * folder name connected under "cloud" or a different username.
+ * folder name connected under "cloud" or a different username. `owner`, when
+ * this source is a folder someone ELSE shared (see RemoteFolder.owner),
+ * folds into the identity segment too - otherwise a shared folder connected
+ * under the same `name` as one of the caller's own folders would collide on
+ * the same mirror directory.
  */
-export function mirrorDirFor(baseDir: string, mode: FolderfooMode, username: string, name: string): string {
-  const identitySegment = sanitizeFolderName(`${mode}_${username}`);
+export function mirrorDirFor(baseDir: string, mode: FolderfooMode, username: string, name: string, owner?: string): string {
+  const identitySegment = sanitizeFolderName(owner ? `${mode}_${username}_shared-by-${owner}` : `${mode}_${username}`);
   return path.join(baseDir, '.memory-bucket-remote-cache', identitySegment, sanitizeFolderName(name));
 }
 
@@ -136,7 +149,7 @@ function resolveFolders(entries: SourceEntry[], baseDir: string): { folders: Nam
       return { name: nameFromPath(entry), path: path.resolve(baseDir, entry) };
     }
     if (isRemoteEntry(entry)) {
-      const mirrorDir = mirrorDirFor(baseDir, entry.remote.mode, entry.remote.username, entry.name);
+      const mirrorDir = mirrorDirFor(baseDir, entry.remote.mode, entry.remote.username, entry.name, entry.remote.owner);
       remoteFolders.push({ name: entry.name, ...entry.remote, mirrorDir });
       return { name: entry.name, path: mirrorDir };
     }
@@ -226,7 +239,7 @@ export function saveFolder(config: BucketConfig, kind: 'skill' | 'memory', folde
 export function saveRemoteFolder(
   config: BucketConfig,
   kind: 'skill' | 'memory',
-  entry: { name: string; server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string }
+  entry: { name: string; server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string; owner?: string }
 ): void {
   const current = readConfigFile(config.configPath);
   const key = kind === 'skill' ? 'skill_sources' : 'memory_sources';
@@ -243,6 +256,7 @@ export function saveRemoteFolder(
           folderPath: entry.folderPath,
           mode: entry.mode,
           username: entry.username,
+          ...(entry.owner ? { owner: entry.owner } : {}),
         },
       },
     ],

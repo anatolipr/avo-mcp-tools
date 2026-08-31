@@ -103,12 +103,19 @@ function folderQuery(tenantId: string, folderPath: string, extra?: Record<string
   return params.toString();
 }
 
-export async function getLastChanged(server: string, baseDir: string, tenantId: string, folderPath: string): Promise<number> {
+/**
+ * `owner`, when passed, addresses a folder in someone ELSE's tree via a direct-username share —
+ * every folderfoo route below that takes `owner` gates it through the same resolveUserDir/
+ * hasAccess check the file-level `owner` param in filenameParam does (see that function's own
+ * comment). Omitted entirely (not just falsy) for an own-folder call, matching folderfoo's own
+ * `owner ? ... : caller's own dir` branching server-side.
+ */
+export async function getLastChanged(server: string, baseDir: string, tenantId: string, folderPath: string, owner?: string): Promise<number> {
   return withAuth(
     server,
     baseDir,
     (jwt) =>
-      fetch(`${server}/folders/last-changed?${folderQuery(tenantId, folderPath)}`, {
+      fetch(`${server}/folders/last-changed?${folderQuery(tenantId, folderPath, owner ? { owner } : undefined)}`, {
         headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId },
       }),
     async (res) => ((await res.json()) as { lastChanged: number }).lastChanged
@@ -116,19 +123,25 @@ export async function getLastChanged(server: string, baseDir: string, tenantId: 
 }
 
 /**
- * Lists the caller's own folderfoo folders (flat list of full paths, each
- * with a createdAt timestamp - folderfoo's own GET /folders response
- * shape) via folderfoo's existing GET /folders — used by the "connect a
- * folderfoo folder" UI to offer a picker instead of requiring the user to
- * type a raw folder path. Own folders only (no owner param) - browsing
- * INTO a shared folder someone else owns is a separate, not-yet-exposed
- * flow.
+ * Lists folderfoo folders via GET /folders — the caller's own when `owner`/`rootFolder` are
+ * omitted, or a subtree someone else shared with the caller when both are passed (folderfoo gates
+ * this via the same hasAccess check every other shared read uses, requiring `rootFolder` to be a
+ * folder actually shared with the caller). Used by the "connect a folderfoo folder" UI's picker.
  */
-export async function listFolders(server: string, baseDir: string, tenantId: string): Promise<Array<{ path: string; createdAt: string }>> {
+export async function listFolders(
+  server: string,
+  baseDir: string,
+  tenantId: string,
+  options?: { owner?: string; rootFolder?: string }
+): Promise<Array<{ path: string; createdAt: string }>> {
+  const params = new URLSearchParams();
+  if (options?.owner) params.set('owner', options.owner);
+  if (options?.rootFolder) params.set('rootFolder', options.rootFolder);
+  const qs = params.toString();
   return withAuth(
     server,
     baseDir,
-    (jwt) => fetch(`${server}/folders`, { headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId } }),
+    (jwt) => fetch(`${server}/folders${qs ? `?${qs}` : ''}`, { headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId } }),
     (res) => res.json() as Promise<Array<{ path: string; createdAt: string }>>
   );
 }
@@ -282,8 +295,18 @@ export class RemoteFolderGoneError extends Error {
  * folder — the user may have deleted it deliberately. `folderPath === ''` (a source's own root) is
  * never gone (the user's account root always exists), so this only ever checks a non-root path.
  */
-export async function assertRemoteFolderExists(server: string, baseDir: string, tenantId: string, folderPath: string, folderName: string): Promise<void> {
+export async function assertRemoteFolderExists(server: string, baseDir: string, tenantId: string, folderPath: string, folderName: string, owner?: string): Promise<void> {
   if (!folderPath) return;
+  // A shared folder's OWN path never appears in listFolders' own-tree result (it isn't a
+  // subdirectory of the caller's root) - list the owner's tree rooted at folderPath instead and
+  // check for a non-empty (i.e. accessible) result, same "does this still resolve" intent as the
+  // own-folder branch below, just via the owner-aware GET /folders shape (see listFolders' comment).
+  if (owner) {
+    await listFolders(server, baseDir, tenantId, { owner, rootFolder: folderPath }).catch(() => {
+      throw new RemoteFolderGoneError(folderName);
+    });
+    return;
+  }
   const folders = await listFolders(server, baseDir, tenantId);
   if (!folders.some((f) => f.path === folderPath)) {
     throw new RemoteFolderGoneError(folderName);
@@ -301,13 +324,14 @@ export async function getChangedSince(
   baseDir: string,
   tenantId: string,
   folderPath: string,
-  since: number
+  since: number,
+  owner?: string
 ): Promise<ChangedFile[]> {
   return withAuth(
     server,
     baseDir,
     (jwt) =>
-      fetch(`${server}/folders/changed-since?${folderQuery(tenantId, folderPath, { since: String(since) })}`, {
+      fetch(`${server}/folders/changed-since?${folderQuery(tenantId, folderPath, { since: String(since), ...(owner ? { owner } : {}) })}`, {
         headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId },
       }),
     async (res) => ((await res.json()) as { files: ChangedFile[] }).files
@@ -322,7 +346,14 @@ export async function getChangedSince(
 // itself uses this same form in its own sharing tests for exactly this
 // reason. Always use it here rather than only for the single-segment case,
 // so this client doesn't need to special-case folder depth.
-function filenameParam(folderPath: string, name: string): string {
+//
+// `owner`, when passed, addresses a path in someone ELSE's directory (a
+// direct-username share, resolved via folderfoo's shares table rather than
+// the caller's own files) - see resolveUserDir on the server side, which
+// treats a bare (owner-less) filename as always the CALLER's own directory.
+// Every other caller of this function addresses its own files and omits it.
+function filenameParam(folderPath: string, name: string, owner?: string): string {
+  if (owner) return `${encodeURIComponent(owner)}:${folderPath ? encodeURIComponent(folderPath) : ''}:${name}`;
   return folderPath ? `:${encodeURIComponent(folderPath)}:${name}` : name;
 }
 
@@ -341,23 +372,34 @@ export function joinRemoteFolderPath(remoteFolderPath: string, mirrorRelativeDir
   return remoteFolderPath ? `${remoteFolderPath}/${mirrorRelativeDir}` : mirrorRelativeDir;
 }
 
-/** Reads one file's raw content via GET /data/:filename. */
-export async function readFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string): Promise<string> {
+/**
+ * Reads one file's raw content via GET /data/:filename. `owner`, when passed, reads a file from
+ * someone ELSE's directory via a direct-username share (see filenameParam's own comment) - used by
+ * shared-items.ts to pull a shared item's content, since the caller here is the share's RECIPIENT,
+ * not the file's owner.
+ */
+export async function readFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string, owner?: string): Promise<string> {
   return withAuth(
     server,
     baseDir,
-    (jwt) => fetch(`${server}/data/${filenameParam(folderPath, name)}`, { headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId } }),
+    (jwt) => fetch(`${server}/data/${filenameParam(folderPath, name, owner)}`, { headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId } }),
     (res) => res.text()
   );
 }
 
-/** Writes one file's raw content via POST /save/:filename. */
-export async function writeFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string, content: string): Promise<void> {
+/**
+ * Writes one file's raw content via POST /save/:filename. `owner`, when passed, writes into
+ * someone ELSE's directory via a direct-username share (see filenameParam's own comment) — this is
+ * gated 'editor'-role-only server-side (see folderfoo's resolveUserDir(..., 'editor') on this
+ * route), so a 'member' (read-only) shared folder correctly 403s here rather than silently
+ * succeeding against the caller's own directory instead.
+ */
+export async function writeFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string, content: string, owner?: string): Promise<void> {
   await withAuth(
     server,
     baseDir,
     (jwt) =>
-      fetch(`${server}/save/${filenameParam(folderPath, name)}`, {
+      fetch(`${server}/save/${filenameParam(folderPath, name, owner)}`, {
         method: 'POST',
         headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'text/markdown' },
         body: content,
@@ -375,12 +417,12 @@ export async function writeFile(server: string, baseDir: string, tenantId: strin
  * write those callers already do locally, now also propagated as a real rename remotely, instead
  * of write-new (create) + never delete-old.
  */
-export async function renameFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string, newName: string): Promise<void> {
+export async function renameFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string, newName: string, owner?: string): Promise<void> {
   await withAuth(
     server,
     baseDir,
     (jwt) =>
-      fetch(`${server}/rename/${filenameParam(folderPath, name)}`, {
+      fetch(`${server}/rename/${filenameParam(folderPath, name, owner)}`, {
         method: 'POST',
         headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'application/json' },
         body: JSON.stringify({ newName }),
@@ -398,12 +440,12 @@ export async function renameFile(server: string, baseDir: string, tenantId: stri
  * remote file was never touched at all, so the NEXT poll would pull it right back in, making a
  * "deleted" doc silently reappear.
  */
-export async function trashFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string): Promise<void> {
+export async function trashFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string, owner?: string): Promise<void> {
   await withAuth(
     server,
     baseDir,
     (jwt) =>
-      fetch(`${server}/trash/${filenameParam(folderPath, name)}`, {
+      fetch(`${server}/trash/${filenameParam(folderPath, name, owner)}`, {
         method: 'POST',
         headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId },
       }),
@@ -420,12 +462,13 @@ export async function trashFile(server: string, baseDir: string, tenantId: strin
  * it as a wildcard path segment, unlike every other folderPath-bearing endpoint in this client
  * (which use a `?folderPath=` query param), because folderfoo's own route is DELETE /folders/*.
  */
-export async function trashFolder(server: string, baseDir: string, tenantId: string, folderPath: string): Promise<void> {
+export async function trashFolder(server: string, baseDir: string, tenantId: string, folderPath: string, owner?: string): Promise<void> {
+  const qs = owner ? `?owner=${encodeURIComponent(owner)}` : '';
   await withAuth(
     server,
     baseDir,
     (jwt) =>
-      fetch(`${server}/folders/${folderPath.split('/').map(encodeURIComponent).join('/')}`, {
+      fetch(`${server}/folders/${folderPath.split('/').map(encodeURIComponent).join('/')}${qs}`, {
         method: 'DELETE',
         headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId },
       }),
@@ -444,7 +487,7 @@ export async function trashFolder(server: string, baseDir: string, tenantId: str
  * "memz/old-skill-name" / "memz/new-skill-name"), sent as JSON body fields per folderfoo's own
  * route (unlike the wildcard-path DELETE /folders/* trashFolder uses).
  */
-export async function renameFolder(server: string, baseDir: string, tenantId: string, folderPath: string, newFolderPath: string): Promise<void> {
+export async function renameFolder(server: string, baseDir: string, tenantId: string, folderPath: string, newFolderPath: string, owner?: string): Promise<void> {
   await withAuth(
     server,
     baseDir,
@@ -452,7 +495,7 @@ export async function renameFolder(server: string, baseDir: string, tenantId: st
       fetch(`${server}/folders/rename`, {
         method: 'POST',
         headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'application/json' },
-        body: JSON.stringify({ folderPath, newFolderPath }),
+        body: JSON.stringify({ folderPath, newFolderPath, owner }),
       }),
     async () => undefined
   );
@@ -480,13 +523,14 @@ export async function writeBinaryFile(
   folderPath: string,
   name: string,
   data: Buffer,
-  mimeType: string
+  mimeType: string,
+  owner?: string
 ): Promise<void> {
   await withAuth(
     server,
     baseDir,
     (jwt) =>
-      fetch(`${server}/save/${filenameParam(folderPath, name)}`, {
+      fetch(`${server}/save/${filenameParam(folderPath, name, owner)}`, {
         method: 'POST',
         headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': mimeType },
         body: data,

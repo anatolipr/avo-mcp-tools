@@ -16,7 +16,7 @@ import {
 } from '../config.js';
 import type { SkillRepository } from '../skills/repository.js';
 import { stripKey, type MemoryRepository } from '../memory/repository.js';
-import { initialScan, type TableSyncSpec } from '../store/sync.js';
+import { initialScan, walkMarkdownFiles, type TableSyncSpec } from '../store/sync.js';
 import { sanitizeFtsQuery } from '../store/search.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { attachmentsDirFor, guessMimeType, ATTACHMENT_MAX_BYTES } from '../attachments/storage.js';
@@ -33,7 +33,7 @@ import {
   getSharedItem,
   resolveShareTarget,
 } from '../remote/shared-items.js';
-import { shareWithUser, unshareWithUser, createShareLink, createPublicLink, joinRemoteFolderPath } from '../remote/folderfoo-client.js';
+import { shareWithUser, unshareWithUser, createShareLink, createPublicLink, joinRemoteFolderPath, getSharedWithMe, FolderfooRequestError } from '../remote/folderfoo-client.js';
 import { readMarkdownFile } from '../store/markdown-file.js';
 import type { MemoryFrontmatter, SkillFrontmatter } from '../types.js';
 import { getChannel, listChannels } from '../channels/store.js';
@@ -1125,56 +1125,105 @@ export function buildWebRouter(
    * opposed to whether its contents changed.
    *
    * Reuses folderfoo's existing GET /folders (via listFolderfooFolders) — one bulk call per
-   * distinct folderfoo server returns every currently-existing folder path for that login, cheaper
-   * than a per-folder existence check would be for an account with many connected sources. Sources
-   * sharing one server (the common case — see credentials.ts, one login per server) dedupe to a
-   * single call. A confirmed-gone folder is auto-removed via the same removeFolder()+
-   * removeFolderFromConfig() pair the manual "✕ remove folder" route above already uses — this
-   * never touches a folder's contents, only mem-bucket's own registration of it (see
-   * removeFolder's doc comment: it drops DB rows + the local mirror dir, never anything the
-   * folder's write path would consider "the user's own content" beyond that mirror).
+   * distinct folderfoo server returns every currently-existing folder path for the caller's OWN
+   * tree, cheaper than a per-folder existence check would be for an account with many connected own
+   * sources; these dedupe to one call per server (the common case — see credentials.ts, one login
+   * per server). A source connected to a folder someone ELSE shared (RemoteFolder.owner set) is a
+   * different case entirely — GET /folders without an owner never includes a shared folder at all,
+   * so each of those is checked individually via owner+rootFolder instead (see the loop below). A
+   * confirmed-gone folder is auto-removed via the same removeFolder()+removeFolderFromConfig() pair
+   * the manual "✕ remove folder" route above already uses — this never touches a folder's contents,
+   * only mem-bucket's own registration of it (see removeFolder's doc comment: it drops DB rows + the
+   * local mirror dir, never anything the folder's write path would consider "the user's own content"
+   * beyond that mirror).
    *
    * Deliberately does NOT run at write time: a write against a since-deleted remote folder instead
    * fails loudly with its own specific error (see repository create()/update()'s remote-push
    * handling) rather than silently recreating the folder — auto-recreating on write would silently
    * undo a deletion the user may have made deliberately, with no visibility that it happened.
+   *
+   * Only ever checks/prunes sources connected under the CURRENTLY LOGGED-IN identity (see the
+   * isFolderVisible guard in the loop below) — credentials.ts stores exactly one JWT per server, so
+   * a different identity's source checked against the wrong credential would always look
+   * "confirmed gone" and get silently deleted the moment ANY other identity's login triggered a
+   * /api/folders load. This was a real, confirmed bug: switching from user A to user B made B's own
+   * previously-connected folders vanish, because A's login (or nobody's) was the only credential on
+   * hand to check them with.
    */
   async function pruneDeletedRemoteFolders(): Promise<void> {
-    const byServer = new Map<string, Array<{ kind: 'skill' | 'memory'; name: string; folderPath: string; tenantId: string }>>();
+    const ownFolderSources: Array<{ kind: 'skill' | 'memory'; name: string; folderPath: string; server: string; tenantId: string }> = [];
+    const sharedFolderSources: Array<{ kind: 'skill' | 'memory'; name: string; folderPath: string; server: string; tenantId: string; owner: string }> = [];
+    const currentIdentity = identity.current();
     for (const [kind, repo] of [
       ['skill', skillRepo],
       ['memory', memoryRepo],
     ] as const) {
       for (const remote of repo.listRemoteFolders()) {
-        const list = byServer.get(remote.server) ?? [];
-        list.push({ kind, name: remote.name, folderPath: remote.folderPath, tenantId: remote.tenantId });
-        byServer.set(remote.server, list);
+        // Only ever check a source connected under the IDENTITY CURRENTLY LOGGED IN — credentials.ts
+        // stores exactly one JWT per server, overwritten on every login, so a source belonging to a
+        // different identity (e.g. bbb's own folder, checked right after anatoli logs in) would be
+        // checked with the WRONG credential: that credential's owner's tree obviously never contains
+        // the other identity's folder, so it would always look "confirmed gone" and get silently
+        // deleted the moment ANY other identity's login triggered a /api/folders load — exactly the
+        // "my folder disappeared after switching users" bug this skip fixes. A source that doesn't
+        // match is left untouched here entirely; it re-enters this check once its own identity logs
+        // back in and can be verified with the right credential again.
+        if (!isFolderVisible(remote, currentIdentity)) continue;
+        if (remote.owner) {
+          sharedFolderSources.push({ kind, name: remote.name, folderPath: remote.folderPath, server: remote.server, tenantId: remote.tenantId, owner: remote.owner });
+        } else {
+          ownFolderSources.push({ kind, name: remote.name, folderPath: remote.folderPath, server: remote.server, tenantId: remote.tenantId });
+        }
       }
     }
-    if (byServer.size === 0) return;
 
-    for (const [server, sources] of byServer) {
-      let livePaths: Set<string>;
+    const doRemove = (source: { kind: 'skill' | 'memory'; name: string }) => {
+      const repo = source.kind === 'skill' ? skillRepo : memoryRepo;
       try {
-        // Every source on one server shares one login/tenant (credentials.ts is keyed by server
-        // alone), so any one source's tenantId is representative for the whole group's GET /folders
-        // call.
-        const folders = await listFolderfooFolders(server, config.baseDir, sources[0]!.tenantId);
-        livePaths = new Set(folders.map((f) => f.path));
-      } catch {
-        // Not logged in, network blip, etc. — leave every source on this server untouched rather
-        // than treating "couldn't check" as "confirmed gone."
-        continue;
+        repo.removeFolder(source.name);
+        removeFolderFromConfig(config, source.kind, source.name);
+      } catch (err) {
+        console.error(`[memory-bucket] failed to auto-remove deleted remote folder "${source.name}":`, err);
       }
-      for (const source of sources) {
-        if (livePaths.has(source.folderPath)) continue;
-        const repo = source.kind === 'skill' ? skillRepo : memoryRepo;
+    };
+
+    // Own-folder sources: unchanged from before — GET /folders without an owner returns the
+    // caller's own flat tree in one call per distinct server (sources sharing one server share one
+    // login/tenant, so any one source's tenantId is representative for the whole group).
+    if (ownFolderSources.length > 0) {
+      const byServer = new Map<string, typeof ownFolderSources>();
+      for (const source of ownFolderSources) {
+        const list = byServer.get(source.server) ?? [];
+        list.push(source);
+        byServer.set(source.server, list);
+      }
+      for (const [server, sources] of byServer) {
+        let livePaths: Set<string>;
         try {
-          repo.removeFolder(source.name);
-          removeFolderFromConfig(config, source.kind, source.name);
-        } catch (err) {
-          console.error(`[memory-bucket] failed to auto-remove deleted remote folder "${source.name}":`, err);
+          const folders = await listFolderfooFolders(server, config.baseDir, sources[0]!.tenantId);
+          livePaths = new Set(folders.map((f) => f.path));
+        } catch {
+          continue; // not logged in, network blip, etc. — "couldn't check" is not "confirmed gone"
         }
+        for (const source of sources) {
+          if (!livePaths.has(source.folderPath)) doRemove(source);
+        }
+      }
+    }
+
+    // Shared-folder sources: GET /folders without an owner never includes them at all (a shared
+    // folder isn't part of the caller's own tree — see listFolders' doc comment), so the own-folder
+    // check above would wrongly treat every one of these as "confirmed gone" on every single
+    // /api/folders load if it ran against them. Each is checked individually instead, via
+    // owner+rootFolder=its own folderPath — this is exactly what the share grant is for, so success
+    // confirms both "the folder still exists" AND "the share still stands"; a 403 (share revoked) or
+    // 404 (folder deleted) confirms gone, while any OTHER failure (not logged in, network blip)
+    // again means "couldn't check," not "confirmed gone."
+    for (const source of sharedFolderSources) {
+      try {
+        await listFolderfooFolders(source.server, config.baseDir, source.tenantId, { owner: source.owner, rootFolder: source.folderPath });
+      } catch (err) {
+        if (err instanceof FolderfooRequestError && (err.status === 403 || err.status === 404)) doRemove(source);
       }
     }
   }
@@ -1340,9 +1389,35 @@ export function buildWebRouter(
     req.on('close', unsubscribe);
   });
 
-  // Lists the caller's own folderfoo folders for the "connect a folder"
-  // picker, once already logged in to `server` (via the route above).
+  // Lists folderfoo folders for the "connect a folder" picker, once already logged in to `server`
+  // (via the route above). Own folders by default; pass `owner`+`rootFolder` (a folder from
+  // GET /api/folderfoo/shared-folders below) to browse INTO a folder someone else shared instead —
+  // folderfoo's own GET /folders gates that via the same hasAccess check every other shared read
+  // uses, so this route just forwards the params through rather than re-checking anything itself.
   router.get('/api/folderfoo/folders', async (req: Request, res: Response) => {
+    const server = req.query.server as string | undefined;
+    const tenantId = req.query.tenantId as string | undefined;
+    const owner = req.query.owner as string | undefined;
+    const rootFolder = req.query.rootFolder as string | undefined;
+    if (!server || !tenantId) {
+      res.status(400).json({ error: 'server and tenantId query params are required' });
+      return;
+    }
+    try {
+      const folders = await listFolderfooFolders(server, config.baseDir, tenantId, { owner, rootFolder });
+      res.json(folders);
+    } catch (err) {
+      res.status(401).json({ error: (err as Error).message });
+    }
+  });
+
+  // Lists whole FOLDERS (not individual memory docs/skills — see /api/shared-items above for that)
+  // someone has shared directly with the caller, across every owner — backs the "connect a folder"
+  // picker's "Shared with me" source, so a folder like bbbmemz shows up as something to connect
+  // instead of only being visible via folderfoo's own File Open UI. Filters getSharedWithMe's
+  // combined file+folder list down to type:'folder' — a shared FILE has no meaning here, that's the
+  // item-level sharing feature instead.
+  router.get('/api/folderfoo/shared-folders', async (req: Request, res: Response) => {
     const server = req.query.server as string | undefined;
     const tenantId = req.query.tenantId as string | undefined;
     if (!server || !tenantId) {
@@ -1350,8 +1425,8 @@ export function buildWebRouter(
       return;
     }
     try {
-      const folders = await listFolderfooFolders(server, config.baseDir, tenantId);
-      res.json(folders);
+      const shared = await getSharedWithMe(server, config.baseDir, tenantId);
+      res.json(shared.filter((entry) => entry.type === 'folder').map((entry) => ({ owner: entry.owner, path: entry.name, role: entry.role })));
     } catch (err) {
       res.status(401).json({ error: (err as Error).message });
     }
@@ -1364,12 +1439,16 @@ export function buildWebRouter(
   // immediately triggers one poll so content shows up without waiting for
   // the first interval tick.
   router.post('/api/remote-folders', async (req: Request, res: Response) => {
-    const { kind, name, server, tenantId, folderPath } = req.body as {
+    const { kind, name, server, tenantId, folderPath, owner } = req.body as {
       kind?: string;
       name?: string;
       server?: string;
       tenantId?: string;
       folderPath?: string;
+      // Set when connecting a folder someone ELSE shared (see /api/folderfoo/shared-folders) rather
+      // than one of the caller's own — carried onto RemoteFolder.owner so every subsequent
+      // read/write against this source addresses the OWNER's tree, not the caller's own.
+      owner?: string;
     };
     if (kind !== 'skill' && kind !== 'memory') {
       res.status(400).json({ error: 'kind must be "skill" or "memory"' });
@@ -1395,17 +1474,51 @@ export function buildWebRouter(
 
     const repo = kind === 'skill' ? skillRepo : memoryRepo;
     const spec = kind === 'skill' ? skillSpec : memorySpec;
-    const mirrorDir = mirrorDirFor(config.baseDir, current.mode, current.username, folderName);
-    const remote = { name: folderName, server, tenantId, folderPath, mirrorDir, mode: current.mode, username: current.username };
     try {
+      // Resolved FIRST (before deriving mirrorDir) — auto-suffixes the requested name when it
+      // collides with a folder connected under a DIFFERENT folderfoo login (e.g. two different users
+      // each naturally wanting "bbbmemz"), still rejecting a collision against the CALLER's own
+      // identity (a genuine naming mistake) — see resolveAvailableName's own doc comment. Everything
+      // downstream (mirrorDir, the saved config entry, the response, the kind-mismatch check) uses
+      // this resolved name, never the originally-requested one, so nothing reads/writes to a path
+      // computed from a name that ended up not being what actually got connected.
+      const resolvedName = repo.resolveAvailableName(folderName, current.username);
+      const mirrorDir = mirrorDirFor(config.baseDir, current.mode, current.username, resolvedName, owner);
+      const remote = { name: resolvedName, server, tenantId, folderPath, mirrorDir, mode: current.mode, username: current.username, owner };
       repo.registerRemoteFolder(remote);
-      saveRemoteFolder(config, kind, { name: folderName, server, tenantId, folderPath, mode: current.mode, username: current.username });
+      saveRemoteFolder(config, kind, { name: resolvedName, server, tenantId, folderPath, mode: current.mode, username: current.username, owner });
       await pollOne(db, spec, remote, config.baseDir);
-      res.json({ name: folderName, server, tenantId, folderPath, kind });
+      res.json({ name: resolvedName, server, tenantId, folderPath, kind, owner, kindMismatchWarning: detectKindMismatch(kind, mirrorDir) });
     } catch (err) {
       res.status(409).json({ error: (err as Error).message });
     }
   });
+
+  // Cheap best-effort "did the user pick the wrong kind" heuristic, checked once right after connect
+  // (content is already mirrored locally from the pollOne call above, so this is a local directory
+  // walk, not another network round trip) — surfaced to the client as a dismissible warning, never a
+  // hard block, since a folder can legitimately be empty or genuinely mixed. A skill's remote content
+  // always lives under a fixed literal filename "SKILL.md" (see remoteFilename's own doc comment in
+  // sync.ts — skills push under that name regardless of local filename), so "every .md file mirrored
+  // is literally named SKILL.md" is a strong, cheap skill-shaped signal; a memory folder's files keep
+  // their own varied names and are never named exactly that. Returns undefined (no warning) for an
+  // empty folder — nothing synced yet is not evidence of anything.
+  function detectKindMismatch(kind: 'skill' | 'memory', mirrorDir: string): string | undefined {
+    let total = 0;
+    let skillNamed = 0;
+    for (const file of walkMarkdownFiles(mirrorDir)) {
+      total++;
+      if (path.basename(file) === 'SKILL.md') skillNamed++;
+    }
+    if (total === 0) return undefined;
+    if (kind === 'memory' && skillNamed === total) {
+      return `This folder looks like it contains skills (every file is a SKILL.md), not memory docs — you connected it as a memory folder. Remove and reconnect it as a skill folder instead.`;
+    }
+    if (kind === 'skill' && skillNamed === 0) {
+      return `This folder looks like it contains memory docs, not skills (no SKILL.md files found) — you connected it as a skill folder. Remove and reconnect it as a memory folder instead.`;
+    }
+    return undefined;
+  }
 
   // Triggers one immediate out-of-cycle poll for a single remote source —
   // backs the web UI's per-source "resync now" action, so a user who just
@@ -1541,11 +1654,19 @@ export function buildWebRouter(
     }
   });
 
-  // The ONLY way shared_items ever updates after a share is first accepted —
-  // the recycle-icon button in the "Shared with me" panel calls this.
+  // The recycle-icon button in the "Shared with me" panel calls this — also the only way a direct
+  // (non-link) share ever gets discovered and added in the first place, since folderfoo's Share
+  // Manager UI and bucket_share_item grant access with no redeem event for this app to react to
+  // (see refreshSharedItems' own doc comment). Polls every server+tenant the caller is connected to
+  // via a remote folder, not just ones already represented in shared_items, so this works even
+  // before the very first share has been accepted.
   router.post('/api/shared-items/refresh', async (_req: Request, res: Response) => {
     try {
-      const summary = await refreshSharedItems(db, config.baseDir, skillSpec, memorySpec);
+      const remoteFolders = [...skillRepo.listRemoteFolders(), ...memoryRepo.listRemoteFolders()].map((f) => ({
+        server: f.server,
+        tenantId: f.tenantId,
+      }));
+      const summary = await refreshSharedItems(db, config.baseDir, skillSpec, memorySpec, remoteFolders);
       res.json(summary);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });

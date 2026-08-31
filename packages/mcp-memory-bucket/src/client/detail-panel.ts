@@ -95,6 +95,7 @@ export class DetailPanel extends LitElement {
     onFolderClick: { attribute: false },
     onDateClick: { attribute: false },
     onKeyClick: { attribute: false },
+    onGone: { attribute: false },
     _doc: { state: true },
     _viewMode: { state: true },
     _editing: { state: true },
@@ -117,6 +118,7 @@ export class DetailPanel extends LitElement {
   declare onFolderClick: ((folder: string) => void) | undefined;
   declare onDateClick: ((date: string) => void) | undefined;
   declare onKeyClick: ((key: string) => void) | undefined;
+  declare onGone: (() => void) | undefined;
   private _doc?: EntryDetail | null;
   private _viewMode: 'markdown' | 'raw' =
     (localStorage.getItem(VIEW_MODE_KEY) as 'markdown' | 'raw' | null) ?? 'markdown';
@@ -536,7 +538,13 @@ export class DetailPanel extends LitElement {
     if (!this.selected || this._editing || this._addingFrontmatter || this._renaming) return;
     const { table, id } = this.selected;
     const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}`);
-    if (!res.ok) return;
+    if (!res.ok) {
+      // The doc disappeared server-side since it was opened (e.g. a remote folder was hidden by
+      // a logout) - self-heal by clearing instead of leaving stale content on screen.
+      this._doc = null;
+      this.onGone?.();
+      return;
+    }
     const scrollEl = this.shadowRoot?.querySelector('.markdown-body') ?? this.shadowRoot?.querySelector('pre');
     const scrollTop = scrollEl?.scrollTop ?? 0;
     this._doc = (await res.json()) as EntryDetail;

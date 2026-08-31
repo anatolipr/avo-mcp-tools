@@ -151,7 +151,7 @@ export function registerBucketShareTools(
 
   mcp.tool(
     'bucket_list_shared_items',
-    'Lists memory docs/skills someone has shared directly with you, item by item — not a whole connected folder (see bucket_list_remote_folders for that). Each entry\'s `status` is \'active\' or \'revoked\' (no longer shared — see the web UI\'s dismiss action). Reflects whatever was last fetched via the web UI\'s explicit refresh button — refreshing is a UI-only action this tool does not trigger, so this may be stale if nobody has refreshed recently.',
+    'Lists memory docs/skills someone has shared directly with you, item by item — not a whole connected folder (see bucket_list_remote_folders for that). Each entry\'s `status` is \'active\' or \'revoked\' (no longer shared — see the web UI\'s dismiss action). Reflects whatever the web UI last synced (on opening its "Shared with me" panel, or its refresh button) — this tool does not itself trigger a sync, so it may be stale if the panel hasn\'t been opened recently.',
     {},
     async () => {
       return { content: [{ type: 'text', text: JSON.stringify(listSharedItems(db), null, 2) }] };

@@ -61,7 +61,7 @@ export async function addSharedItem(
   const mirrorPath = path.join(mirrorDir, entry.originId, localFilename);
   fs.mkdirSync(path.dirname(mirrorPath), { recursive: true });
 
-  const content = await readFile(entry.server, baseDir, entry.tenantId, dirname(entry.path), path.basename(entry.path));
+  const content = await readFile(entry.server, baseDir, entry.tenantId, dirname(entry.path), path.basename(entry.path), entry.owner);
   fs.writeFileSync(mirrorPath, content);
 
   const now = new Date().toISOString();
@@ -99,6 +99,7 @@ function dirname(remotePath: string): string {
 }
 
 export interface RefreshSummary {
+  added: number;
   updated: number;
   revoked: number;
   unchanged: number;
@@ -106,12 +107,21 @@ export interface RefreshSummary {
 
 /**
  * The ONLY place shared_items ever changes after the initial addSharedItem —
- * called exclusively from the web UI's refresh-button handler (see
- * web/routes.ts's POST /api/shared-items/refresh). No poller, no timer, no
- * auto-refresh on focus/load/tool-call: per the settled design, staleness is
- * fully manual, same as a GitHub list you refresh by hand. Diffs
- * GET /shared-with-me (one call per distinct server+tenant, covering every
- * owner at once) against locally-tracked origin_ids:
+ * called from the web UI's recycle-icon button AND automatically once when
+ * the "Shared with me" panel is opened (see mem-bucket-app.ts's #setView),
+ * so a direct (non-link) share is discoverable without the user knowing to
+ * click refresh first. Still no poller/timer while the panel stays closed —
+ * this is "refresh on demand," not a background sync. Diffs
+ * GET /shared-with-me (one call per distinct server+tenant the caller is
+ * connected to via a remote folder — see `remoteFolders` below, NOT just the
+ * servers/tenants already present in shared_items, so a share that never
+ * went through the link-redeem flow at all — e.g. folderfoo's Share Manager
+ * UI adding a username directly, or bucket_share_item — is still discovered
+ * here, not only shares that started life as a link) against locally-tracked
+ * origin_ids:
+ *  - origin_id present live but NOT locally tracked → a new direct share
+ *    (never accepted via a link, so addSharedItem never ran for it) — added
+ *    via addSharedItem exactly as the accept route would.
  *  - origin_id missing from the response → the share was revoked (or the
  *    item deleted) — evict from the cache/search-index via removeFile and
  *    mark the row 'revoked' (kept for the UI's dismissible "no longer
@@ -130,18 +140,25 @@ export async function refreshSharedItems(
   db: Database.Database,
   baseDir: string,
   skillSpec: TableSyncSpec<SkillFrontmatter>,
-  memorySpec: TableSyncSpec<MemoryFrontmatter>
+  memorySpec: TableSyncSpec<MemoryFrontmatter>,
+  remoteFolders: Array<{ server: string; tenantId: string }>
 ): Promise<RefreshSummary> {
-  const summary: RefreshSummary = { updated: 0, revoked: 0, unchanged: 0 };
-  const tracked = db.prepare(`SELECT * FROM shared_items WHERE status = 'active'`).all() as SharedItemRow[];
-  if (tracked.length === 0) return summary;
+  const summary: RefreshSummary = { added: 0, updated: 0, revoked: 0, unchanged: 0 };
 
+  const tracked = db.prepare(`SELECT * FROM shared_items WHERE status = 'active'`).all() as SharedItemRow[];
   const byServerTenant = new Map<string, SharedItemRow[]>();
   for (const row of tracked) {
     const key = `${row.server}::${row.tenant_id}`;
     const list = byServerTenant.get(key) ?? [];
     list.push(row);
     byServerTenant.set(key, list);
+  }
+  // Union in every connected remote folder's server+tenant too, even ones with zero tracked shared
+  // items yet — otherwise a user who's never accepted a share link has no known server to poll at
+  // all, and a fresh direct share would never surface no matter how many times they hit refresh.
+  for (const { server, tenantId } of remoteFolders) {
+    const key = `${server}::${tenantId}`;
+    if (!byServerTenant.has(key)) byServerTenant.set(key, []);
   }
 
   for (const [key, rows] of byServerTenant) {
@@ -156,6 +173,7 @@ export async function refreshSharedItems(
       continue;
     }
     const liveByOrigin = new Map(live.filter((e) => e.originId).map((e) => [e.originId as string, e]));
+    const trackedOrigins = new Set(rows.map((row) => row.origin_id));
 
     for (const row of rows) {
       const liveEntry = liveByOrigin.get(row.origin_id);
@@ -171,7 +189,7 @@ export async function refreshSharedItems(
         continue;
       }
       try {
-        const content = await readFile(server, baseDir, tenantId, dirname(liveEntry.name), path.basename(liveEntry.name));
+        const content = await readFile(server, baseDir, tenantId, dirname(liveEntry.name), path.basename(liveEntry.name), liveEntry.owner);
         fs.writeFileSync(row.mirror_path, content);
         const mtimeDate = new Date(liveEntry.modifiedAt);
         fs.utimesSync(row.mirror_path, mtimeDate, mtimeDate);
@@ -183,6 +201,28 @@ export async function refreshSharedItems(
         summary.updated++;
       } catch (err) {
         console.error(`[memory-bucket] failed to refresh shared item ${row.origin_id}:`, err);
+      }
+    }
+
+    // Anything live for this server/tenant that isn't already tracked is a share this app never
+    // saw an accept event for (a direct-username share, or one made before this feature existed) —
+    // file it exactly as the accept route would, kind-filtered since a plain (non-mcp-memory-
+    // bucket) file/folder share has kind:null and nothing here knows how to mirror it.
+    for (const entry of live) {
+      if (!entry.originId || !entry.kind || trackedOrigins.has(entry.originId)) continue;
+      try {
+        await addSharedItem(db, baseDir, skillSpec, memorySpec, {
+          owner: entry.owner,
+          server,
+          tenantId,
+          path: entry.name,
+          originId: entry.originId,
+          kind: entry.kind,
+          role: entry.role ?? 'member',
+        });
+        summary.added++;
+      } catch (err) {
+        console.error(`[memory-bucket] failed to add newly-discovered shared item ${entry.originId}:`, err);
       }
     }
   }

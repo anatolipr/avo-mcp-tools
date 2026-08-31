@@ -344,7 +344,7 @@ export class MemBucketApp extends LitElement {
   // own comment for why this deliberately never auto-refreshes on a timer/focus.
   #sharedItems = new Signal<SharedItemRow[]>([]);
   #sharedRefreshing = new Signal<boolean>(false);
-  #sharedRefreshSummary = new Signal<{ updated: number; revoked: number; unchanged: number } | null>(null);
+  #sharedRefreshSummary = new Signal<{ added: number; updated: number; revoked: number; unchanged: number } | null>(null);
 
   #boundOnDragMove = (e: PointerEvent) => this.#onDragMove(e);
   #boundOnDragEnd = () => this.#onDragEnd();
@@ -475,6 +475,13 @@ export class MemBucketApp extends LitElement {
     // list reflects the current identity live, without a page reload.
     this.#unsubscribeIdentity = currentIdentity.subscribe(() => {
       this.#refetchFolders();
+      // Without these, the ENTRIES list and filter facets (tags/owners/folders dropdowns) kept
+      // showing stale rows/options from a remote folder that just became invisible (e.g. logging
+      // out, or switching to a different folderfoo login) until some unrelated action (search,
+      // filter change) happened to trigger the next refetch — a real, confirmed bug: the folder chip
+      // correctly vanished, but its rows lingered in the list/search results underneath it.
+      this.#refetch();
+      this.#refetchFacets();
       // Bounce back to the default view if the login that made "Shared" meaningful just
       // disappeared out from under an already-open panel — matches showShared's own gating in
       // #renderToolbar (the button that opened this view is about to vanish too).
@@ -746,16 +753,30 @@ export class MemBucketApp extends LitElement {
       this.#activeFolders.set(pruned);
       this.#refetch();
     }
+    // Same reasoning applies to the right-hand detail panel's open selection: if it's showing an
+    // entry from a folder that just dropped out of the list, clear it rather than leaving stale
+    // content on screen referencing a folder the user can no longer see or control.
+    const selected = this.#selected.value;
+    if (selected) {
+      const entry = this.#entriesById().get(selected.id);
+      if (entry && !names.has(entry.folder)) this.#selected.set(null);
+    }
   }
 
   #setView(view: 'entries' | 'channels' | 'folder-view' | 'shared') {
     this.#view.set(view);
     if (view === 'channels') this.#refetchChannels();
     else if (view === 'folder-view') this.#refetchFolderViewEntries();
-    // 'shared' deliberately loads whatever's CURRENTLY in shared_items (a plain GET, no diff
-    // against folderfoo) rather than refreshing — opening the panel is not the same action as
-    // clicking its recycle icon, per the settled "refresh is a UI-only, explicit action" design.
-    else if (view === 'shared') this.#loadSharedItems();
+    // 'shared' loads whatever's CURRENTLY cached immediately (so the panel isn't blank while the
+    // network round-trip below is in flight), then kicks off the same diff-against-folderfoo the
+    // recycle-icon button does — opening the panel is the moment a user actually wants to know
+    // "did anyone share something with me," and a direct (non-link) share has no other way to
+    // surface here (see refreshSharedItems' own doc comment) — silently stale-by-default until a
+    // manual click was surprising in practice, so this replaces that "explicit-only" posture.
+    else if (view === 'shared') {
+      this.#loadSharedItems();
+      this.#refreshSharedItems();
+    }
   }
 
   async #loadSharedItems() {
@@ -865,11 +886,15 @@ export class MemBucketApp extends LitElement {
     }
   }
 
-  #onFolderAdded() {
+  #onFolderAdded(warning?: string) {
     this.#showAddFolder.set(false);
     this.#refetchFolders();
     this.#refetchFacets();
     this.#refetch();
+    // Best-effort "did you pick the wrong kind" heuristic from POST /api/remote-folders (see
+    // routes.ts's detectKindMismatch) — a dismissible warning, not a block, since the connect
+    // already succeeded and the folder is already usable either way.
+    if (warning) alert(warning);
   }
 
   // Remote (folderfoo) folders sort after every local folder - they're the
@@ -1154,7 +1179,7 @@ export class MemBucketApp extends LitElement {
           ? html`<add-folder-modal
               .defaultKind=${'skill'}
               .lockKind=${false}
-              .onAdded=${() => this.#onFolderAdded()}
+              .onAdded=${(warning?: string) => this.#onFolderAdded(warning)}
               .onCancel=${() => this.#showAddFolder.set(false)}
             ></add-folder-modal>`
           : ''}
@@ -1325,13 +1350,14 @@ export class MemBucketApp extends LitElement {
           .onFolderClick=${(f: string) => this.#addFolderFilter(f)}
           .onDateClick=${(d: string) => this.#setDateFilter(d)}
           .onKeyClick=${(key: string) => this.#setSearch(key)}
+          .onGone=${() => this.#selected.set(null)}
         ></detail-panel>
       </div>
       ${this.#showAddFolder.value
         ? html`<add-folder-modal
             .defaultKind=${'skill'}
             .lockKind=${false}
-            .onAdded=${() => this.#onFolderAdded()}
+            .onAdded=${(warning?: string) => this.#onFolderAdded(warning)}
             .onCancel=${() => this.#showAddFolder.set(false)}
           ></add-folder-modal>`
         : ''}

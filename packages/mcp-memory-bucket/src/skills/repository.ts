@@ -113,9 +113,9 @@ export class SkillRepository {
   private async pushToRemoteIfNeeded(targetFolderName: string, filePath: string, fileContents: string): Promise<void> {
     const remote = this.remoteFor(targetFolderName);
     if (!remote || !this.credentialsBaseDir) return;
-    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, targetFolderName);
+    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, targetFolderName, remote.owner);
     const skillDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(filePath)));
-    await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath, 'SKILL', fileContents);
+    await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath, 'SKILL', fileContents, remote.owner);
   }
 
   /**
@@ -130,9 +130,9 @@ export class SkillRepository {
   async pushAttachmentIfNeeded(folderName: string, attachmentFilePath: string, data: Buffer, mimeType: string): Promise<void> {
     const remote = this.remoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
-    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName);
+    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
-    await writeRemoteBinaryFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath), data, mimeType);
+    await writeRemoteBinaryFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath), data, mimeType, remote.owner);
   }
 
   /**
@@ -145,9 +145,9 @@ export class SkillRepository {
   async trashAttachmentIfNeeded(folderName: string, attachmentFilePath: string): Promise<void> {
     const remote = this.remoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
-    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName);
+    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
-    await trashRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath));
+    await trashRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath), remote.owner);
   }
 
   /** Attaches the live chokidar watcher so addFolder/removeFolder can mutate it without a restart. */
@@ -197,6 +197,10 @@ export class SkillRepository {
    * perform the initial pull itself — the caller (the web route) does one
    * immediate poll right after this returns, so content shows up without
    * waiting for the first interval tick.
+   *
+   * `remote.name` (and `remote.mirrorDir`, derived from it) must already be the FINAL, resolved
+   * name — see resolveAvailableName, which the web route calls first (before it derives mirrorDir)
+   * so a possibly-auto-suffixed name is settled before anything touches disk.
    */
   registerRemoteFolder(remote: RemoteFolder): void {
     if (this.folders.some((f) => f.name === remote.name)) {
@@ -204,12 +208,43 @@ export class SkillRepository {
     }
     fs.mkdirSync(remote.mirrorDir, { recursive: true });
     this.remoteFolders.push(remote);
-    this.addFolder({ name: remote.name, path: remote.mirrorDir });
+    this.addFolder({ name: remote.name, path: remote.mirrorDir }, { skipCollisionCheck: true });
   }
 
-  /** Registers a new folder: appends it, scans it once, and starts watching it live. */
-  addFolder(folder: NamedFolder): void {
-    if (this.folders.some((f) => f.name === folder.name)) {
+  /**
+   * `name` must stay globally unique across EVERY identity this process has ever seen — see
+   * memory/repository.ts's identical method for the full reasoning and the own-identity-vs-
+   * different-identity distinction (auto-suffix vs reject). Called by the web route BEFORE deriving
+   * mirrorDir/calling registerRemoteFolder, so the name is fully settled before anything touches disk.
+   */
+  resolveAvailableName(requestedName: string, connectingUsername: string): string {
+    const takenByOwnIdentity = (name: string): boolean => this.folders.some((f) => f.name === name) && this.isFolderNameVisible(name);
+    const taken = (name: string): boolean => this.folders.some((f) => f.name === name);
+
+    if (!taken(requestedName)) return requestedName;
+    if (takenByOwnIdentity(requestedName)) {
+      throw new Error(`a skill folder named "${requestedName}" already exists`);
+    }
+
+    let candidate = `${requestedName} (${connectingUsername})`;
+    let suffix = 2;
+    while (taken(candidate)) {
+      if (takenByOwnIdentity(candidate)) {
+        throw new Error(`a skill folder named "${candidate}" already exists`);
+      }
+      candidate = `${requestedName} (${connectingUsername}) ${suffix}`;
+      suffix++;
+    }
+    return candidate;
+  }
+
+  /**
+   * Registers a new folder: appends it, scans it once, and starts watching it live. A purely LOCAL
+   * folder has no "different identity" to auto-suffix against — any collision here is
+   * unconditionally a plain rejection, unlike registerRemoteFolder's own resolveAvailableName.
+   */
+  addFolder(folder: NamedFolder, options?: { skipCollisionCheck?: boolean }): void {
+    if (!options?.skipCollisionCheck && this.folders.some((f) => f.name === folder.name)) {
       throw new Error(`a skill folder named "${folder.name}" already exists`);
     }
     this.folders.push(folder);
@@ -438,7 +473,7 @@ export class SkillRepository {
     // block around this already-frontmattered blob (see memory/
     // repository.ts's get() for the confirmed real-world corruption this
     // caused).
-    const liveBody = matter(await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath, 'SKILL')).content.trim();
+    const liveBody = matter(await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath, 'SKILL', remote.owner)).content.trim();
     return { ...doc, body: liveBody };
   }
 
@@ -623,10 +658,10 @@ export class SkillRepository {
     await writeRemoteThenLocal(
       async () => {
         if (!remote || !this.credentialsBaseDir) return;
-        await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder);
+        await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder, remote.owner);
         const oldDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, oldDir));
         const newDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, newDir));
-        await renameRemoteFolder(remote.server, this.credentialsBaseDir, remote.tenantId, oldDirRelPath, newDirRelPath);
+        await renameRemoteFolder(remote.server, this.credentialsBaseDir, remote.tenantId, oldDirRelPath, newDirRelPath, remote.owner);
       },
       () => {
         fs.renameSync(oldDir, newDir);
@@ -741,9 +776,9 @@ export class SkillRepository {
     const skillDir = path.dirname(existing.source_path);
     const remote = this.remoteFor(existing.folder);
     if (remote && this.credentialsBaseDir) {
-      await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder);
+      await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder, remote.owner);
       const skillDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, skillDir));
-      await trashRemoteFolder(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath);
+      await trashRemoteFolder(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath, remote.owner);
     }
     fs.rmSync(skillDir, { recursive: true, force: true });
     removeFile(this.db, 'skills', existing.source_path);

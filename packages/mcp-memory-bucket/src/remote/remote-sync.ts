@@ -84,7 +84,7 @@ async function reconcileDeletions<TFrontmatter>(
   folder: RemoteFolder,
   credentialsBaseDir: string
 ): Promise<void> {
-  const remoteFiles = await getChangedSince(folder.server, credentialsBaseDir, folder.tenantId, folder.folderPath, 0);
+  const remoteFiles = await getChangedSince(folder.server, credentialsBaseDir, folder.tenantId, folder.folderPath, 0, folder.owner);
   const remoteRelPaths = new Set(
     remoteFiles.map((f) => {
       const mirrorRelativeDir = toMirrorRelativeDir(folder.folderPath, f.folderPath);
@@ -193,7 +193,7 @@ async function pullFile<TFrontmatter>(
   // correct value to pass straight through to readFile (folderfoo expects
   // that same absolute form for GET /data/:filename), but it must be
   // converted to mirror-relative before joining onto folder.mirrorDir.
-  const content = await readFile(folder.server, credentialsBaseDir, folder.tenantId, changedFile.folderPath, changedFile.name);
+  const content = await readFile(folder.server, credentialsBaseDir, folder.tenantId, changedFile.folderPath, changedFile.name, folder.owner);
   const mirrorRelativeDir = toMirrorRelativeDir(folder.folderPath, changedFile.folderPath);
   const localFilename = spec.remoteFilename.toLocal(changedFile.name);
   const relPath = mirrorRelativeDir ? path.join(mirrorRelativeDir, localFilename) : localFilename;
@@ -236,7 +236,7 @@ export async function pollOne<TFrontmatter>(
   onAuthExpired?: () => void
 ): Promise<{ ok: boolean }> {
   try {
-    const lastChanged = await getLastChanged(folder.server, credentialsBaseDir, folder.tenantId, folder.folderPath);
+    const lastChanged = await getLastChanged(folder.server, credentialsBaseDir, folder.tenantId, folder.folderPath, folder.owner);
     const localWatermark = readLocalWatermark(folder.mirrorDir);
     // force (manual resync, or rebuild-cache) always does real work,
     // including reconcileDeletions - a user explicitly asking to resync
@@ -252,7 +252,7 @@ export async function pollOne<TFrontmatter>(
     // be silently invisible to EVERY future poll, forced or not, forever. A real "force resync"
     // has to mean "re-verify everything against the live listing," matching what
     // reconcileDeletions already does unconditionally below.
-    const changed = await getChangedSince(folder.server, credentialsBaseDir, folder.tenantId, folder.folderPath, options.force ? 0 : localWatermark);
+    const changed = await getChangedSince(folder.server, credentialsBaseDir, folder.tenantId, folder.folderPath, options.force ? 0 : localWatermark, folder.owner);
     for (const file of changed) {
       await pullFile(db, spec, folder, credentialsBaseDir, file);
     }

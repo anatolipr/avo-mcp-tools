@@ -105,9 +105,9 @@ export class MemoryRepository {
   async pushAttachmentIfNeeded(folderName: string, attachmentFilePath: string, data: Buffer, mimeType: string): Promise<void> {
     const remote = this.remoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
-    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName);
+    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
-    await writeRemoteBinaryFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath), data, mimeType);
+    await writeRemoteBinaryFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath), data, mimeType, remote.owner);
   }
 
   /**
@@ -123,9 +123,9 @@ export class MemoryRepository {
   async trashAttachmentIfNeeded(folderName: string, attachmentFilePath: string): Promise<void> {
     const remote = this.remoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
-    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName);
+    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
-    await trashRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath));
+    await trashRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath), remote.owner);
   }
 
   /** Attaches the live chokidar watcher so addFolder/removeFolder can mutate it without a restart. */
@@ -218,6 +218,11 @@ export class MemoryRepository {
    * perform the initial pull itself — the caller (the web route) does one
    * immediate poll right after this returns, so content shows up without
    * waiting for the first interval tick.
+   *
+   * `remote.name` (and `remote.mirrorDir`, derived from it) must already be the FINAL, resolved
+   * name — see resolveAvailableName, which the web route calls first (before it derives mirrorDir)
+   * so a possibly-auto-suffixed name is settled before anything touches disk, rather than this
+   * method renaming out from under an already-computed mirrorDir.
    */
   registerRemoteFolder(remote: RemoteFolder): void {
     if (this.folders.some((f) => f.name === remote.name)) {
@@ -225,12 +230,64 @@ export class MemoryRepository {
     }
     fs.mkdirSync(remote.mirrorDir, { recursive: true });
     this.remoteFolders.push(remote);
-    this.addFolder({ name: remote.name, path: remote.mirrorDir });
+    this.addFolder({ name: remote.name, path: remote.mirrorDir }, { skipCollisionCheck: true });
   }
 
-  /** Registers a new folder: appends it, scans it once, and starts watching it live. */
-  addFolder(folder: NamedFolder): void {
-    if (this.folders.some((f) => f.name === folder.name)) {
+  /**
+   * `name` must stay globally unique across EVERY identity this process has ever seen, not just
+   * currently-visible folders — `folder` is the sole key used everywhere a doc/skill addresses which
+   * folder it lives in (the memory_docs.folder/skills.folder DB columns, every `folder = ?` SQL
+   * filter, MCP tool `folder` params, the web UI's folder-chip clicks). Two folders sharing a name
+   * would make all of those ambiguous the instant both became visible in the same request. Called by
+   * the web route BEFORE deriving mirrorDir/calling registerRemoteFolder, so the name is fully
+   * settled before anything touches disk or the config file.
+   *
+   * Two different cases, handled differently:
+   *  - Collides with a folder the SAME identity already has (own or shared) → a genuine naming
+   *    mistake (e.g. reusing a name they already picked themselves) → rejected.
+   *  - Collides with a folder a DIFFERENT identity owns (e.g. two different folderfoo logins each
+   *    naturally wanting "bbbmemz") → auto-suffixed with " (<connecting username>)" instead of
+   *    rejected, since forcing every user to invent an arbitrary alternate name for their OWN
+   *    folder just because someone else's login already used the obvious one is exactly the friction
+   *    this exists to avoid. The suffixed form is still checked for its own (now vanishingly
+   *    unlikely, but not impossible — e.g. two different usernames on two different modes) collision
+   *    and suffixed further with an incrementing counter if needed, so this always terminates with a
+   *    genuinely available name rather than looping forever or erroring on a contrived edge case.
+   */
+  resolveAvailableName(requestedName: string, connectingUsername: string): string {
+    const takenByOwnIdentity = (name: string): boolean => this.folders.some((f) => f.name === name) && this.isFolderNameVisible(name);
+    const taken = (name: string): boolean => this.folders.some((f) => f.name === name);
+
+    if (!taken(requestedName)) return requestedName;
+    if (takenByOwnIdentity(requestedName)) {
+      throw new Error(`a memory folder named "${requestedName}" already exists`);
+    }
+
+    // Collides with a DIFFERENT identity's folder — auto-suffix rather than reject (see this
+    // method's own doc comment). Re-checks the suffixed candidate too: astronomically unlikely to
+    // still collide, but not impossible (e.g. someone literally named a folder "bbbmemz (bbb)"), so
+    // this keeps incrementing until it lands on a name nobody's using yet, rather than assuming the
+    // first suffix attempt always works.
+    let candidate = `${requestedName} (${connectingUsername})`;
+    let suffix = 2;
+    while (taken(candidate)) {
+      if (takenByOwnIdentity(candidate)) {
+        throw new Error(`a memory folder named "${candidate}" already exists`);
+      }
+      candidate = `${requestedName} (${connectingUsername}) ${suffix}`;
+      suffix++;
+    }
+    return candidate;
+  }
+
+  /**
+   * Registers a new folder: appends it, scans it once, and starts watching it live. A purely LOCAL
+   * folder (no folderfoo login involved) has no "different identity" to auto-suffix against — any
+   * collision here is unconditionally a plain rejection, unlike registerRemoteFolder's own
+   * resolveAvailableName.
+   */
+  addFolder(folder: NamedFolder, options?: { skipCollisionCheck?: boolean }): void {
+    if (!options?.skipCollisionCheck && this.folders.some((f) => f.name === folder.name)) {
       throw new Error(`a memory folder named "${folder.name}" already exists`);
     }
     this.folders.push(folder);
@@ -476,7 +533,7 @@ export class MemoryRepository {
     // edits). Must parse it exactly like a local file read would.
     let raw: string;
     try {
-      raw = await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name);
+      raw = await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, remote.owner);
     } catch (err) {
       // Also try the LEGACY extensionless remote name — a doc pushed before the
       // extension-preserving fix still sits on folderfoo under its bare id (no ".md") and always
@@ -484,7 +541,7 @@ export class MemoryRepository {
       // remoteFilename.toLocal/toRemote — see remote-sync.ts). Only retry on a 404, never for a
       // FolderfooAuthError or any other failure, which must surface as-is.
       if (!(err instanceof FolderfooRequestError) || err.status !== 404 || !name.endsWith('.md')) throw err;
-      raw = await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name.slice(0, -3));
+      raw = await readRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name.slice(0, -3), remote.owner);
     }
     const liveBody = matter(raw).content.trim();
     return { ...doc, body: liveBody };
@@ -588,7 +645,7 @@ export class MemoryRepository {
         // Confirms the remote folder still exists before writing — folderfoo's own save endpoint
         // would otherwise silently recreate a deleted folder rather than failing (see
         // assertRemoteFolderExists's doc comment).
-        await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, targetFolder.name);
+        await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, targetFolder.name, remote.owner);
         // The remote filename keeps the SAME name (including .md) as the local mirror file — no
         // extension stripping. Historically this stripped ".md" to match the old opaque id (which
         // never carried an extension), which meant a memory doc's OWN remote file was named
@@ -601,7 +658,7 @@ export class MemoryRepository {
         const relPath = path.relative(remote.mirrorDir, filePath);
         const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(relPath));
         const name = path.basename(relPath);
-        await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, fileContents);
+        await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, fileContents, remote.owner);
       },
       () => {
         fs.mkdirSync(targetDir, { recursive: true });
@@ -664,12 +721,12 @@ export class MemoryRepository {
     await writeRemoteThenLocal(
       async () => {
         if (!remote || !this.credentialsBaseDir) return;
-        await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder);
+        await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder, remote.owner);
         // No .md stripping — see create()'s comment.
         const relPath = path.relative(remote.mirrorDir, existing.source_path);
         const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(relPath));
         const name = path.basename(relPath);
-        await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, fileContents);
+        await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, fileContents, remote.owner);
       },
       () => fs.writeFileSync(existing.source_path, fileContents, 'utf-8')
     );
@@ -751,11 +808,11 @@ export class MemoryRepository {
     // recoverable if the delete was a mistake.
     const remote = this.remoteFor(existing.folder);
     if (remote && this.credentialsBaseDir) {
-      await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder);
+      await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder, remote.owner);
       const relPath = path.relative(remote.mirrorDir, existing.source_path);
       const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(relPath));
       const name = path.basename(relPath);
-      await trashRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name);
+      await trashRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, remote.owner);
     }
     // The sibling wrapper directory exists solely to hold attachments/ for this doc (memory docs
     // are otherwise flat files), so remove the whole wrapper — not just attachments/ — to avoid
@@ -794,13 +851,13 @@ export class MemoryRepository {
     await writeRemoteThenLocal(
       async () => {
         if (!remote || !this.credentialsBaseDir) return;
-        await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder);
+        await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder, remote.owner);
         const oldRelPath = path.relative(remote.mirrorDir, existing.source_path);
         const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(oldRelPath));
         const oldName = path.basename(oldRelPath);
         const newName = path.basename(newPath);
         try {
-          await renameRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, oldName, newName);
+          await renameRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, oldName, newName, remote.owner);
         } catch (err) {
           // Same legacy-extensionless fallback as get() above: a doc pushed before the
           // extension-preserving fix still sits on folderfoo under its bare id (no ".md"), so
@@ -808,7 +865,7 @@ export class MemoryRepository {
           // own fallback. Retry once against the bare name — only on a 404, never for any other
           // failure, which must surface as-is.
           if (!(err instanceof FolderfooRequestError) || err.status !== 404 || !oldName.endsWith('.md')) throw err;
-          await renameRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, oldName.slice(0, -3), newName);
+          await renameRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, oldName.slice(0, -3), newName, remote.owner);
         }
       },
       () => {
