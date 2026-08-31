@@ -133,6 +133,137 @@ export async function listFolders(server: string, baseDir: string, tenantId: str
   );
 }
 
+export interface SharedWithMeEntry {
+  name: string; // path on the owner's folderfoo, relative to their root (folderfoo's own field name)
+  owner: string;
+  type: 'file' | 'folder';
+  size: number;
+  createdAt: string;
+  modifiedAt: string;
+  role: 'member' | 'editor' | null;
+  originId: string | null;
+  kind: 'memory' | 'skill' | null;
+}
+
+/**
+ * Lists everything (files and folders, from every owner) shared with the
+ * current user via folderfoo's direct-username `shares` mechanism — see
+ * folderfoo's GET /shared-with-me. Used ONLY by an explicit refresh action
+ * (see remote/shared-items.ts's refreshSharedItems) — never polled on a
+ * timer, per the settled "refresh is a UI-only concept" design. role/
+ * originId/kind are null for a plain (non-mcp-memory-bucket) share, e.g. one
+ * created before this feature existed or shared by a different app.
+ */
+export async function getSharedWithMe(server: string, baseDir: string, tenantId: string): Promise<SharedWithMeEntry[]> {
+  return withAuth(
+    server,
+    baseDir,
+    (jwt) => fetch(`${server}/shared-with-me`, { headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId } }),
+    (res) => res.json() as Promise<SharedWithMeEntry[]>
+  );
+}
+
+/**
+ * Grants another folderfoo user direct access to one of the caller's own memory docs/skills, via
+ * folderfoo's POST /share/:filename — the immediate, no-link-needed half of Phase 4's share UX
+ * (paired with createShareLink/createPublicLink below for the out-of-band half). `kind` tags the
+ * grant so a recipient's shared_items row (see shared-items.ts) never has to guess memory-vs-skill
+ * from content — see folderfoo's shares.js v6->v7 migration for why this exists at all.
+ */
+export async function shareWithUser(
+  server: string,
+  baseDir: string,
+  tenantId: string,
+  folderPath: string,
+  name: string,
+  targetUsername: string,
+  kind: 'memory' | 'skill',
+  role: 'member' | 'editor'
+): Promise<void> {
+  await withAuth(
+    server,
+    baseDir,
+    (jwt) =>
+      fetch(`${server}/share/${filenameParam(folderPath, name)}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'application/json' },
+        body: JSON.stringify({ username: targetUsername, kind, role }),
+      }),
+    async () => undefined
+  );
+}
+
+/** Revokes a specific recipient's direct access via folderfoo's DELETE /share/:filename/:username. */
+export async function unshareWithUser(
+  server: string,
+  baseDir: string,
+  tenantId: string,
+  folderPath: string,
+  name: string,
+  targetUsername: string
+): Promise<void> {
+  await withAuth(
+    server,
+    baseDir,
+    (jwt) =>
+      fetch(`${server}/share/${filenameParam(folderPath, name)}/${encodeURIComponent(targetUsername)}`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId },
+      }),
+    async () => undefined
+  );
+}
+
+export interface CreatedLink {
+  id: string;
+  token: string;
+  expiresAt: string;
+}
+
+/** Creates an out-of-band, login-required collaborator share link via folderfoo's POST /share-links. */
+export async function createShareLink(
+  server: string,
+  baseDir: string,
+  tenantId: string,
+  folderPath: string,
+  name: string,
+  kind: 'memory' | 'skill'
+): Promise<CreatedLink> {
+  return withAuth(
+    server,
+    baseDir,
+    (jwt) =>
+      fetch(`${server}/share-links`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'application/json' },
+        body: JSON.stringify({ path: joinRemoteFolderPath(folderPath, name), type: 'file', kind }),
+      }),
+    (res) => res.json() as Promise<CreatedLink>
+  );
+}
+
+/** Creates an anonymous, no-login-required public view link via folderfoo's POST /public-links. */
+export async function createPublicLink(
+  server: string,
+  baseDir: string,
+  tenantId: string,
+  folderPath: string,
+  name: string,
+  kind: 'memory' | 'skill'
+): Promise<CreatedLink> {
+  return withAuth(
+    server,
+    baseDir,
+    (jwt) =>
+      fetch(`${server}/public-links`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'application/json' },
+        body: JSON.stringify({ path: joinRemoteFolderPath(folderPath, name), kind }),
+      }),
+    (res) => res.json() as Promise<CreatedLink>
+  );
+}
+
 /** Thrown when a write targets a remote folder that no longer exists on folderfoo (deleted server-side since the last connect/UI-open sync). */
 export class RemoteFolderGoneError extends Error {
   constructor(folderName: string) {

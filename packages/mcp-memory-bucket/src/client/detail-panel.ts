@@ -103,6 +103,11 @@ export class DetailPanel extends LitElement {
     _renaming: { state: true },
     _renameValue: { state: true },
     _viewingAttachment: { state: true },
+    _sharing: { state: true },
+    _shareUsername: { state: true },
+    _shareRole: { state: true },
+    _shareBusy: { state: true },
+    _shareStatus: { state: true },
   };
 
   declare selected: Selection | null;
@@ -121,6 +126,11 @@ export class DetailPanel extends LitElement {
   private _renaming = false;
   private _renameValue = '';
   private _viewingAttachment: ClientAttachmentEntry | null = null;
+  private _sharing = false;
+  private _shareUsername = '';
+  private _shareRole: 'member' | 'editor' = 'member';
+  private _shareBusy = false;
+  private _shareStatus: string | null = null;
 
   static styles = css`
     :host { display: block; padding: 16px; }
@@ -479,6 +489,21 @@ export class DetailPanel extends LitElement {
       color: inherit;
     }
     .hint { font-size: 11px; opacity: 0.6; }
+    .share-form {
+      display: flex; flex-direction: column; gap: 8px; padding: 10px; margin-top: 4px;
+      border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-subtle);
+    }
+    .share-row { display: flex; gap: 6px; align-items: center; }
+    .share-row input[type='text'] {
+      flex: 1; font-size: 12px; padding: 4px 6px; border: 1px solid var(--border-strong);
+      border-radius: 4px; background: var(--bg); color: inherit;
+    }
+    .share-row select {
+      font-size: 12px; padding: 4px 6px; border: 1px solid var(--border-strong); border-radius: 4px;
+      background: var(--bg); color: inherit;
+    }
+    .share-links-row { display: flex; gap: 6px; }
+    .share-status { font-size: 11px; opacity: 0.75; }
   `;
 
   updated(changed: Map<string, unknown>) {
@@ -584,6 +609,64 @@ export class DetailPanel extends LitElement {
     if (this._viewingAttachment?.filename === filename) this._viewingAttachment = null;
     await this.#load();
     this.onChanged?.();
+  }
+
+  #startShare() {
+    this._sharing = true;
+    this._shareUsername = '';
+    this._shareRole = 'member';
+    this._shareStatus = null;
+  }
+
+  #cancelShare() {
+    this._sharing = false;
+    this._shareStatus = null;
+  }
+
+  async #confirmShareWithUser() {
+    if (!this.selected || !this._shareUsername.trim()) return;
+    const { table, id } = this.selected;
+    this._shareBusy = true;
+    this._shareStatus = null;
+    try {
+      const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/share`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: this._shareUsername.trim(), role: this._shareRole }),
+      });
+      const body = await res.json().catch(() => ({}));
+      this._shareStatus = res.ok ? `Shared with ${this._shareUsername.trim()}.` : `Share failed: ${body.error ?? res.statusText}`;
+      if (res.ok) this._shareUsername = '';
+    } finally {
+      this._shareBusy = false;
+    }
+  }
+
+  async #copyShareLink(kind: 'share-link' | 'public-link') {
+    if (!this.selected) return;
+    const { table, id } = this.selected;
+    this._shareBusy = true;
+    this._shareStatus = null;
+    try {
+      const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/${kind}`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this._shareStatus = `Failed to create link: ${body.error ?? res.statusText}`;
+        return;
+      }
+      const paramName = kind === 'share-link' ? 'shareToken' : 'publicToken';
+      const url = new URL(window.location.href);
+      url.search = `?${paramName}=${encodeURIComponent(body.token)}`;
+      const linkText = url.toString();
+      try {
+        await navigator.clipboard?.writeText(linkText);
+        this._shareStatus = `${kind === 'share-link' ? 'Share' : 'Public'} link copied to clipboard.`;
+      } catch {
+        this._shareStatus = `Link: ${linkText}`;
+      }
+    } finally {
+      this._shareBusy = false;
+    }
   }
 
   async #deleteDoc() {
@@ -995,6 +1078,38 @@ export class DetailPanel extends LitElement {
     return renderer;
   }
 
+  // Both "share with a specific person" (immediate, no link) and "copy a link" (out-of-band) live
+  // in one inline form — mirrors folderfoo's own dual sharing model for plain files, just pointed
+  // at a memory doc/skill instead (see remote/folderfoo-client.ts's shareWithUser/createShareLink/
+  // createPublicLink). Only ever rendered when d.remoteInfo is non-null (see the "Share…" button's
+  // own guard) — sharing a purely local doc has nothing on folderfoo to address.
+  #renderShareForm() {
+    return html`
+      <div class="share-form">
+        <div class="share-row">
+          <input
+            type="text"
+            placeholder="username"
+            .value=${this._shareUsername}
+            @input=${(e: Event) => (this._shareUsername = (e.target as HTMLInputElement).value)}
+            @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && this.#confirmShareWithUser()}
+          />
+          <select .value=${this._shareRole} @change=${(e: Event) => (this._shareRole = (e.target as HTMLSelectElement).value as 'member' | 'editor')}>
+            <option value="member">Read-only</option>
+            <option value="editor">Can edit</option>
+          </select>
+          <button ?disabled=${this._shareBusy || !this._shareUsername.trim()} @click=${() => this.#confirmShareWithUser()}>Share</button>
+        </div>
+        <div class="share-links-row">
+          <button ?disabled=${this._shareBusy} @click=${() => this.#copyShareLink('share-link')}>Copy share link</button>
+          <button ?disabled=${this._shareBusy} @click=${() => this.#copyShareLink('public-link')}>Copy public link</button>
+          <button @click=${() => this.#cancelShare()}>Close</button>
+        </div>
+        ${this._shareStatus ? html`<div class="share-status">${this._shareStatus}</div>` : nothing}
+      </div>
+    `;
+  }
+
   #renderAttachments(d: EntryDetail, table: 'skills' | 'memory_docs') {
     return html`
       <div class="attachments-section">
@@ -1095,6 +1210,7 @@ export class DetailPanel extends LitElement {
                     ${isSkill
                       ? nothing
                       : html`<button class="danger" @click=${() => this.#deleteFrontmatter()}>Delete frontmatter</button>`}
+                    ${d.remoteInfo ? html`<button @click=${() => this.#startShare()}>Share…</button>` : nothing}
                   `}
               <button class="danger" @click=${() => this.#deleteDoc()}>Delete</button>
             </div>
@@ -1112,6 +1228,7 @@ export class DetailPanel extends LitElement {
                   </div>
                 `
               : nothing}
+            ${this._sharing ? this.#renderShareForm() : nothing}
           `}
       ${this.#renderAttachments(d, this.selected.table)}
       <div class="view-toggle">

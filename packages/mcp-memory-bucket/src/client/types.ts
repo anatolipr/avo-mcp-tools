@@ -50,6 +50,11 @@ export interface EntryDetail {
    * `body`, which is always frontmatter-stripped. */
   raw_file?: string;
   attachments?: ClientAttachmentEntry[];
+  /** Non-null only when this doc's folder is a folderfoo-connected remote source — the
+   * coordinates detail-panel.ts's Share/Copy-link actions need, since those only make sense for
+   * a doc that actually exists on folderfoo (a purely local doc has nothing for folderfoo's own
+   * share endpoints to address). */
+  remoteInfo: { server: string; tenantId: string; folderPath: string; mirrorDir: string } | null;
 }
 
 export interface Facets {

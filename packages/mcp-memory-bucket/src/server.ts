@@ -13,6 +13,7 @@ import { registerMemoryTools } from './memory/tools.js';
 import { registerRelocateTool } from './shared/relocate-tool.js';
 import { registerSearchTool } from './shared/search-tool.js';
 import { registerBucketFolderTools } from './shared/bucket-folder-tool.js';
+import { registerBucketShareTools } from './shared/bucket-share-tool.js';
 import { registerAttachmentTools } from './attachments/tools.js';
 import { AttachmentRepository } from './attachments/repository.js';
 import { buildWebRouter } from './web/routes.js';
@@ -22,6 +23,7 @@ import { startChannelSweep } from './channels/store.js';
 import { startRemotePolling, type RemotePollerHandle } from './remote/remote-sync.js';
 import { IdentityTracker, decodeUsername, isFolderVisible } from './remote/identity.js';
 import { getCredential } from './remote/credentials.js';
+import { FolderfooAuthError } from './remote/folderfoo-client.js';
 
 // server.ts is rebuilt from `buildMcpServer()` on every /mcp request (see below),
 // so tool schemas (which conditionally include `folder` based on folder count) always
@@ -106,9 +108,14 @@ const attachmentRepo = new AttachmentRepository(memoryRepo, skillRepo, db);
 // different identity than the one currently logged in — repairUnlistedInFolder can safely call
 // skillRepo.get()/memoryRepo.get() without a spurious "not found" from a currently-invisible doc.
 function onAttachmentSync(table: 'skills' | 'memory_docs', folder: RemoteFolder): void {
-  attachmentRepo.repairUnlistedInFolder(table, folder.name).catch((err) =>
-    console.error(`[memory-bucket] failed to repair attachments for folder "${folder.name}":`, err)
-  );
+  attachmentRepo.repairUnlistedInFolder(table, folder.name).catch((err) => {
+    console.error(`[memory-bucket] failed to repair attachments for folder "${folder.name}":`, err);
+    // The credential can die between pollOne's own success and this later read (a real race, not
+    // just pollOne's own auth check) — see remote-sync.ts's onAuthExpired doc comment for why
+    // identity must be told here too, not just from pollOne's catch block, or IdentityTracker keeps
+    // reporting a dead login as live until the user manually re-authenticates.
+    if (err instanceof FolderfooAuthError) identity.clearUsername();
+  });
 }
 // folderfoo integration off means nobody can ever be logged in this process (identity.mode stays
 // 'off'), so every remote folder is permanently invisible per isFolderVisible/matchesCurrentIdentity
@@ -125,11 +132,27 @@ function onAttachmentSync(table: 'skills' | 'memory_docs', folder: RemoteFolder)
 const isRemoteFolderVisible = (folder: RemoteFolder) => isFolderVisible(folder, identity.current());
 const remoteSkillPoller: RemotePollerHandle | undefined =
   config.folderfooMode !== 'off' && config.remoteSkillFolders.length > 0
-    ? startRemotePolling(db, skillSpec, config.remoteSkillFolders, config.baseDir, (folder) => onAttachmentSync('skills', folder), isRemoteFolderVisible)
+    ? startRemotePolling(
+        db,
+        skillSpec,
+        config.remoteSkillFolders,
+        config.baseDir,
+        (folder) => onAttachmentSync('skills', folder),
+        isRemoteFolderVisible,
+        () => identity.clearUsername()
+      )
     : undefined;
 const remoteMemoryPoller: RemotePollerHandle | undefined =
   config.folderfooMode !== 'off' && config.remoteMemoryFolders.length > 0
-    ? startRemotePolling(db, memorySpec, config.remoteMemoryFolders, config.baseDir, (folder) => onAttachmentSync('memory_docs', folder), isRemoteFolderVisible)
+    ? startRemotePolling(
+        db,
+        memorySpec,
+        config.remoteMemoryFolders,
+        config.baseDir,
+        (folder) => onAttachmentSync('memory_docs', folder),
+        isRemoteFolderVisible,
+        () => identity.clearUsername()
+      )
     : undefined;
 
 // Forces one immediate poll of every remote source at process start, instead
@@ -165,6 +188,7 @@ function buildMcpServer(): McpServer {
   registerRelocateTool(server, skillRepo, memoryRepo);
   registerSearchTool(server, db);
   registerBucketFolderTools(server, config, skillRepo, memoryRepo, db, skillSpec, memorySpec, identity);
+  registerBucketShareTools(server, config, skillRepo, memoryRepo, db);
   registerAttachmentTools(server, attachmentRepo);
   registerUiTool(server, PORT);
   registerMemoryChannelTools(server);

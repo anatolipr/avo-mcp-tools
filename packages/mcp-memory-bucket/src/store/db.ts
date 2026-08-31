@@ -68,6 +68,30 @@ export function openCache(dbPath: string): Database.Database {
 
     CREATE INDEX IF NOT EXISTS idx_doc_dates_date ON doc_dates(date);
     CREATE INDEX IF NOT EXISTS idx_doc_dates_ref ON doc_dates(ref_table, ref_id, ref_folder);
+
+    -- Item-level shares: individual memory docs/skills shared directly with
+    -- this user by someone else, NOT tied to a whole connected folder (see
+    -- config.ts's RemoteFolder for that separate, folder-level mechanism).
+    -- origin_id (from folderfoo's shares/share_links.origin_id — see
+    -- folderfoo's shares.js v6->v7 migration) is the identity, not path/
+    -- owner+path: a rename on the owner's side updates mirror_path in place
+    -- rather than looking like a revoke-plus-new-item (see refreshSharedItems
+    -- in remote/shared-items.ts). Refresh is a UI-only action (a button in
+    -- "Shared with me", never a background timer) — this table is exactly as
+    -- fresh as the last time that button was clicked.
+    CREATE TABLE IF NOT EXISTS shared_items (
+      origin_id TEXT NOT NULL PRIMARY KEY,
+      owner TEXT NOT NULL,
+      server TEXT NOT NULL,
+      tenant_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('memory', 'skill')),
+      role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member', 'editor')),
+      remote_path TEXT NOT NULL,       -- current path on the owner's folderfoo, e.g. "notes.md"
+      mirror_path TEXT NOT NULL,       -- local mirror file this item is synced into
+      last_seen_modified_at TEXT,      -- folderfoo's modifiedAt as of the last refresh, for change detection
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+      added_at TEXT NOT NULL
+    );
   `);
 
   ensureDocDatesHasRefFolderColumn(db);

@@ -318,7 +318,15 @@ export class SkillRepository {
       /** Defaults to false: paused skills are hidden from discovery (see setPaused). */
       includePaused?: boolean;
     } = {}
-  ): Array<{ name: string; description: string; folder: string; snippet: string; score: number }> {
+  ): Array<{
+    name: string;
+    description: string;
+    folder: string;
+    snippet: string;
+    score: number;
+    shared_owner?: string;
+    shared_role?: 'member' | 'editor';
+  }> {
     const { folder, status, owner, tag, limit = 20, offset = 0, includePaused = false } = opts;
     const conditions: string[] = [];
     const params: unknown[] = [sanitizeFtsQuery(query)];
@@ -349,19 +357,38 @@ export class SkillRepository {
     params.push(limit, offset);
 
     try {
+      // shared_items is LEFT JOINed on s.source_path (== mirror_path for an item-level share — see
+      // remote/shared-items.ts) — same reasoning as MemoryRepository.search's identical join: a
+      // shared skill's `folder` is always '' and otherwise indistinguishable from any other
+      // unfoldered local skill.
       const rows = this.db
         .prepare(
           `SELECT s.id AS name, s.description, s.folder,
                   snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
-                  -bm25(search_index) AS score
+                  -bm25(search_index) AS score,
+                  si.owner AS shared_owner,
+                  si.role AS shared_role
            FROM search_index
            JOIN skills s ON s.id = search_index.ref_id AND s.folder = search_index.ref_folder
+           LEFT JOIN shared_items si ON si.status = 'active' AND si.mirror_path = s.source_path
            WHERE search_index.ref_table = 'skills' AND search_index MATCH ? ${conditions.map((c) => `AND ${c}`).join(' ')}
            ORDER BY bm25(search_index)
            LIMIT ? OFFSET ?`
         )
-        .all(...params) as Array<{ name: string; description: string; folder: string; snippet: string; score: number }>;
-      return rows;
+        .all(...params) as Array<{
+        name: string;
+        description: string;
+        folder: string;
+        snippet: string;
+        score: number;
+        shared_owner: string | null;
+        shared_role: string | null;
+      }>;
+      return rows.map(({ shared_owner, shared_role, ...rest }) => ({
+        ...rest,
+        shared_owner: shared_owner ?? undefined,
+        shared_role: (shared_role as 'member' | 'editor' | null) ?? undefined,
+      }));
     } catch (err) {
       throw new SearchQueryError(query, err);
     }

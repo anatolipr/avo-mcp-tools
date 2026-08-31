@@ -159,6 +159,13 @@ export interface CombinedSearchHit {
   folder: string;
   snippet: string;
   score: number;
+  /** Present only when this hit is an item-level share (see remote/shared-items.ts) — a shared
+   * item's `folder` column is always '' (its mirror path lives outside every configured source
+   * directory, so folderForFile can't attribute it to one), which on its own looks identical to
+   * any other unfoldered doc. shared_owner/shared_role surface the provenance a plain folder
+   * column can't, without requiring a caller to cross-reference bucket_list_shared_items separately. */
+  shared_owner?: string;
+  shared_role?: 'member' | 'editor';
 }
 
 /**
@@ -170,21 +177,29 @@ export interface CombinedSearchHit {
 export function searchCombined(db: Database.Database, query: string, limit = 20, offset = 0): CombinedSearchHit[] {
   const sanitized = sanitizeFtsQuery(query);
   try {
-    return db
+    const rows = db
       .prepare(
         `SELECT ref_table, ref_id AS id,
                 COALESCE(s.description, m.description) AS description,
                 COALESCE(s.folder, m.folder) AS folder,
                 snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
-                -bm25(search_index) AS score
+                -bm25(search_index) AS score,
+                si.owner AS shared_owner,
+                si.role AS shared_role
          FROM search_index
          LEFT JOIN skills s ON search_index.ref_table = 'skills' AND s.id = search_index.ref_id AND s.folder = search_index.ref_folder
          LEFT JOIN memory_docs m ON search_index.ref_table = 'memory_docs' AND m.source_path = search_index.ref_id
+         LEFT JOIN shared_items si ON si.status = 'active' AND si.mirror_path = COALESCE(s.source_path, m.source_path)
          WHERE search_index MATCH ?
          ORDER BY bm25(search_index)
          LIMIT ? OFFSET ?`
       )
-      .all(sanitized, limit, offset) as CombinedSearchHit[];
+      .all(sanitized, limit, offset) as Array<CombinedSearchHit & { shared_owner: string | null; shared_role: string | null }>;
+    return rows.map((row) => ({
+      ...row,
+      shared_owner: row.shared_owner ?? undefined,
+      shared_role: (row.shared_role as 'member' | 'editor' | null) ?? undefined,
+    }));
   } catch (err) {
     throw new SearchQueryError(query, err);
   }

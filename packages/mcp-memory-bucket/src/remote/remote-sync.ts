@@ -221,8 +221,20 @@ export async function pollOne<TFrontmatter>(
   spec: TableSyncSpec<TFrontmatter>,
   folder: RemoteFolder,
   credentialsBaseDir: string,
-  options: { force?: boolean } = {}
-): Promise<void> {
+  options: { force?: boolean } = {},
+  // Called when this poll discovers the stored credential is dead (refresh failed, or a second
+  // 401 after refresh) — server.ts wires this to identity.clearUsername(). Without it, a dead JWT
+  // (e.g. revoked server-side, or expired past its refresh window) leaves IdentityTracker still
+  // reporting the OLD username as logged in forever, since nothing previously told it the
+  // credential folderfoo-client.ts already gave up on and cleared. That mismatch is exactly what
+  // let a remote folder keep showing as visible (isFolderVisible checks identity.current(), not
+  // whether the credential still works) even though every real read/write against it was already
+  // failing loudly with its own FolderfooAuthError — the folder list and the actual login state
+  // silently disagreed until the user manually re-logged-in. Only called once per poll failure,
+  // not per retry inside withAuth itself, since pollOne is the layer that already decides to
+  // swallow-and-log rather than propagate.
+  onAuthExpired?: () => void
+): Promise<{ ok: boolean }> {
   try {
     const lastChanged = await getLastChanged(folder.server, credentialsBaseDir, folder.tenantId, folder.folderPath);
     const localWatermark = readLocalWatermark(folder.mirrorDir);
@@ -231,7 +243,7 @@ export async function pollOne<TFrontmatter>(
     // shouldn't silently no-op just because folderfoo's watermark happens
     // to equal what we last saw; the whole point of a manual resync is to
     // re-verify against the live state, not trust the cheap check alone.
-    if (!options.force && lastChanged <= localWatermark) return; // cheap path: nothing changed since our last sync, no listing call
+    if (!options.force && lastChanged <= localWatermark) return { ok: true }; // cheap path: nothing changed since our last sync, no listing call
 
     // force must query since=0, not localWatermark - getChangedSince filters strictly by
     // mtime > since, so a file whose mtime happens to equal (or predate) the local watermark -
@@ -246,6 +258,7 @@ export async function pollOne<TFrontmatter>(
     }
     await reconcileDeletions(db, spec, folder, credentialsBaseDir);
     writeLocalWatermark(folder.mirrorDir, lastChanged);
+    return { ok: true };
   } catch (err) {
     if (err instanceof FolderfooAuthError) {
       // Per the settled design: fail loudly per-call, but a poll tick
@@ -254,7 +267,14 @@ export async function pollOne<TFrontmatter>(
       // this source will surface its own FolderfooAuthError directly to
       // the caller regardless of poller state).
       console.error(`[memory-bucket] ${err.message}`);
-      return;
+      onAuthExpired?.();
+      // { ok: false } tells pollAndNotify to skip onSynced for this folder this tick — onSynced
+      // (server.ts's onAttachmentSync) calls memoryRepo.get()/skillRepo.get(), which are gated by
+      // isFolderNameVisible/identity.current(). Calling onAuthExpired above can flip that gate to
+      // "invisible" in this exact tick, so firing onSynced right after would make a perfectly
+      // real, still-on-disk doc look "not found" (a confusing symptom of the SAME auth failure,
+      // not a second bug) rather than the original, more informative FolderfooAuthError.
+      return { ok: false };
     }
     throw err;
   }
@@ -296,13 +316,22 @@ export function startRemotePolling<TFrontmatter>(
   // fetch/ECONNREFUSED (or worse, succeed against a DIFFERENT server that happens to be listening on
   // that host:port right now) for a source nothing can currently see anyway. Defaults to "always
   // visible" so existing callers/tests that don't care about identity keep working unchanged.
-  isVisible: (folder: RemoteFolder) => boolean = () => true
+  isVisible: (folder: RemoteFolder) => boolean = () => true,
+  // Forwarded straight through to every pollOne call this handle makes — see pollOne's own doc
+  // comment for why this exists. server.ts wires this to identity.clearUsername().
+  onAuthExpired?: () => void
 ): RemotePollerHandle {
   const byName = new Map(remoteFolders.map((f) => [f.name, f]));
 
   async function pollAndNotify(folder: RemoteFolder, options?: { force?: boolean }): Promise<void> {
-    await pollOne(db, spec, folder, credentialsBaseDir, options);
-    await onSynced?.(folder);
+    const { ok } = await pollOne(db, spec, folder, credentialsBaseDir, options, onAuthExpired);
+    // Matches this function's own long-standing doc comment above ("NOT called on a failed poll")
+    // — previously not actually enforced, since pollOne swallowed a FolderfooAuthError internally
+    // and returned normally either way, so onSynced fired even on a failed poll. Surfaced as a
+    // real bug once onAuthExpired started clearing identity mid-tick (see pollOne's { ok: false }
+    // comment) — onSynced's memoryRepo.get()/skillRepo.get() calls are gated by that same identity,
+    // so firing it right after a just-failed poll could report a perfectly real doc as "not found".
+    if (ok) await onSynced?.(folder);
   }
 
   const interval = setInterval(() => {

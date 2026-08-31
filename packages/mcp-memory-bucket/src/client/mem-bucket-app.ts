@@ -8,10 +8,13 @@ import './tag-multiselect.js';
 import './channel-view.js';
 import './folder-view.js';
 import './app-toolbar.js';
+import './shared-with-me-panel.js';
 import type { Entry, Facets, Selection, TypeFilter, FoldersResponse, Folder, ChannelSummary, ChannelDetail } from './types.js';
+import type { SharedItemRow } from './shared-with-me-panel.js';
 import { TENANT_ID, getFolderfooConfig } from './server-config.js';
 import { parseFolderfooAddress } from './folderfoo-address.js';
 import { currentIdentity, startIdentityStream } from './identity-stream.js';
+import { startShareAccept } from './share-accept.js';
 
 // Set once the folderfoo-profile-circle widget module has been dynamically imported (module
 // execution, including its customElements.define, only happens once per URL) - lets later mount
@@ -330,12 +333,18 @@ export class MemBucketApp extends LitElement {
   #selectedIds = new Signal<Set<string>>(new Set());
   #theme = new Signal<ThemeMode>(loadTheme());
   #reindexing = new Signal<boolean>(false);
-  #view = new Signal<'entries' | 'channels' | 'folder-view'>('entries');
+  #view = new Signal<'entries' | 'channels' | 'folder-view' | 'shared'>('entries');
   #folderViewEntries = new Signal<Entry[]>([]);
   #channels = new Signal<ChannelSummary[]>([]);
   #selectedChannel = new Signal<string | null>(null);
   #channelDetail = new Signal<ChannelDetail | null>(null);
   #channelLoading = new Signal<boolean>(false);
+  // Populated ONLY by an explicit GET on view-switch (loading whatever the server currently has,
+  // never a fetch-and-refresh) and by the recycle-icon's onRefresh — see shared-with-me-panel.ts's
+  // own comment for why this deliberately never auto-refreshes on a timer/focus.
+  #sharedItems = new Signal<SharedItemRow[]>([]);
+  #sharedRefreshing = new Signal<boolean>(false);
+  #sharedRefreshSummary = new Signal<{ updated: number; revoked: number; unchanged: number } | null>(null);
 
   #boundOnDragMove = (e: PointerEvent) => this.#onDragMove(e);
   #boundOnDragEnd = () => this.#onDragEnd();
@@ -455,10 +464,22 @@ export class MemBucketApp extends LitElement {
     // logged out and back in.
     this.#onFolderfooAuthChange();
     startIdentityStream();
+    startShareAccept((entry) => this.#acceptSharedItem(entry));
+    // Loaded once up front (not just on-demand when the panel opens) so showShared's "has at least
+    // one shared item" fallback is correct on the very first render — a public-link item accepted
+    // in a prior session needs the button visible immediately, not only after the user somehow
+    // finds a now-hidden panel to open it from.
+    this.#loadSharedItems();
     // The server pushes identity changes (from ANY tab's login/logout) over
     // SSE - re-fetch folders whenever that arrives so this tab's visible
     // list reflects the current identity live, without a page reload.
-    this.#unsubscribeIdentity = currentIdentity.subscribe(() => this.#refetchFolders());
+    this.#unsubscribeIdentity = currentIdentity.subscribe(() => {
+      this.#refetchFolders();
+      // Bounce back to the default view if the login that made "Shared" meaningful just
+      // disappeared out from under an already-open panel — matches showShared's own gating in
+      // #renderToolbar (the button that opened this view is about to vanish too).
+      if (this.#view.value === 'shared' && currentIdentity.value.username === null) this.#setView('entries');
+    });
   }
 
   // Opens a file picked via folderfoo's own File Open dialog directly in
@@ -727,10 +748,83 @@ export class MemBucketApp extends LitElement {
     }
   }
 
-  #setView(view: 'entries' | 'channels' | 'folder-view') {
+  #setView(view: 'entries' | 'channels' | 'folder-view' | 'shared') {
     this.#view.set(view);
     if (view === 'channels') this.#refetchChannels();
     else if (view === 'folder-view') this.#refetchFolderViewEntries();
+    // 'shared' deliberately loads whatever's CURRENTLY in shared_items (a plain GET, no diff
+    // against folderfoo) rather than refreshing — opening the panel is not the same action as
+    // clicking its recycle icon, per the settled "refresh is a UI-only, explicit action" design.
+    else if (view === 'shared') this.#loadSharedItems();
+  }
+
+  async #loadSharedItems() {
+    const res = await fetch('/api/shared-items');
+    this.#sharedItems.set(res.ok ? ((await res.json()) as SharedItemRow[]) : []);
+  }
+
+  async #refreshSharedItems() {
+    this.#sharedRefreshing.set(true);
+    try {
+      const res = await fetch('/api/shared-items/refresh', { method: 'POST' });
+      if (res.ok) this.#sharedRefreshSummary.set(await res.json());
+      await this.#loadSharedItems();
+    } finally {
+      this.#sharedRefreshing.set(false);
+    }
+  }
+
+  async #dismissSharedItem(originId: string) {
+    await fetch(`/api/shared-items/${encodeURIComponent(originId)}`, { method: 'DELETE' });
+    await this.#loadSharedItems();
+  }
+
+  #openSharedItem(item: SharedItemRow) {
+    if (!item.entryId) return;
+    this.#selected.set({ table: item.kind === 'skill' ? 'skills' : 'memory_docs', id: item.entryId });
+    this.#setView('entries');
+  }
+
+  // Called by share-accept.ts once a redeemed share-link/public-link resolves to an item-level
+  // share (Phase 3) — posts it into shared_items and switches straight into the "Shared with me"
+  // panel so accepting a link feels the same as Bulletino force-opening a shared document, not a
+  // silent background change the user has to go looking for.
+  async #acceptSharedItem(entry: {
+    owner: string;
+    path: string;
+    originId: string;
+    kind: 'memory' | 'skill';
+    role: 'member' | 'editor';
+    server: string;
+    tenantId: string;
+  }) {
+    const res = await fetch('/api/shared-items/accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entry),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert((body as { error?: string }).error || 'Failed to accept the shared item.');
+      return;
+    }
+    this.#setView('shared');
+  }
+
+  // Writes an independent copy of a shared item into a folder the user owns — see
+  // POST /api/shared-items/:originId/fork's own doc comment for why this carries no ongoing
+  // shared_items linkage afterward. Returns a result object (not throwing) since the panel shows
+  // the outcome inline rather than via a toast/alert.
+  async #forkSharedItem(item: SharedItemRow, folder: string): Promise<{ ok: boolean; message: string }> {
+    const res = await fetch(`/api/shared-items/${encodeURIComponent(item.origin_id)}/fork`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, message: body.error || `Fork failed (${res.status}).` };
+    await this.#refetch();
+    return { ok: true, message: `Copied into "${folder}".` };
   }
 
   async #refetchChannels() {
@@ -947,17 +1041,27 @@ export class MemBucketApp extends LitElement {
   // .folderfoo-slot (see #mountFolderfooProfileCircle) does real async work (module import,
   // config fetch) that a same-tick teardown/recreate cycle could otherwise race and lose.
   #renderToolbar() {
-    const showReindex = this.#view.value !== 'channels' && this.#foldersLoaded.value && this.#allFolders().length > 0;
+    const showReindex =
+      this.#view.value !== 'channels' && this.#view.value !== 'shared' && this.#foldersLoaded.value && this.#allFolders().length > 0;
+    // Gated on login OR having at least one already-accepted shared item — NOT login alone, unlike
+    // remote folders. A public-link accept (role always 'member', see share-accept.ts) needs no
+    // folderfoo login at all by design, so hiding the button whenever logged out would strand a
+    // user who only ever accepted a public link with no way back into the panel that already has
+    // their content in it.
+    const showShared = currentIdentity.value.username !== null || this.#sharedItems.value.length > 0;
     return html`
       <app-toolbar
         .showReindex=${showReindex}
         .reindexing=${this.#reindexing.value}
         .channelsActive=${this.#view.value === 'channels'}
         .folderViewActive=${this.#view.value === 'folder-view'}
+        .showShared=${showShared}
+        .sharedActive=${this.#view.value === 'shared'}
         .theme=${this.#theme.value}
         .onReindex=${() => this.#reindex()}
         .onToggleChannels=${() => this.#setView(this.#view.value === 'channels' ? 'entries' : 'channels')}
         .onToggleFolderView=${() => this.#setView(this.#view.value === 'folder-view' ? 'entries' : 'folder-view')}
+        .onToggleShared=${() => this.#setView(this.#view.value === 'shared' ? 'entries' : 'shared')}
         .onCycleTheme=${() => this.#cycleTheme()}
       ></app-toolbar>
     `;
@@ -985,6 +1089,23 @@ export class MemBucketApp extends LitElement {
   #renderBody() {
     const facets = this.#facets.value;
     const allFolders = this.#allFolders();
+
+    if (this.#view.value === 'shared') {
+      return html`
+        <div class="toolbar-bar"></div>
+        <shared-with-me-panel
+          .items=${this.#sharedItems.value}
+          .refreshing=${this.#sharedRefreshing.value}
+          .lastRefreshSummary=${this.#sharedRefreshSummary.value}
+          .memoryFolderNames=${this.#folders.value.memory.map((f) => f.name)}
+          .skillFolderNames=${this.#folders.value.skill.map((f) => f.name)}
+          .onRefresh=${() => this.#refreshSharedItems()}
+          .onDismiss=${(originId: string) => this.#dismissSharedItem(originId)}
+          .onOpen=${(item: SharedItemRow) => this.#openSharedItem(item)}
+          .onFork=${(item: SharedItemRow, folder: string) => this.#forkSharedItem(item, folder)}
+        ></shared-with-me-panel>
+      `;
+    }
 
     if (this.#view.value === 'channels') {
       return html`

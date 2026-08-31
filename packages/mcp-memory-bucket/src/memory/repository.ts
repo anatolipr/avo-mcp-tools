@@ -362,7 +362,17 @@ export class MemoryRepository {
       /** Defaults to false: paused docs are hidden from discovery (see setPaused). */
       includePaused?: boolean;
     } = {}
-  ): Array<{ filename: string; key: string; description: string; doc_type: MemoryDocType; folder: string; snippet: string; score: number }> {
+  ): Array<{
+    filename: string;
+    key: string;
+    description: string;
+    doc_type: MemoryDocType;
+    folder: string;
+    snippet: string;
+    score: number;
+    shared_owner?: string;
+    shared_role?: 'member' | 'editor';
+  }> {
     const { docType, status, folder, tag, limit = 20, offset = 0, includePaused = false } = opts;
     const conditions: string[] = [];
     const params: unknown[] = [sanitizeFtsQuery(query)];
@@ -394,13 +404,21 @@ export class MemoryRepository {
     params.push(limit, offset);
 
     try {
+      // shared_items is LEFT JOINed on m.source_path (== mirror_path for an item-level share —
+      // see remote/shared-items.ts) to surface owner/role on any hit that came from a share, since
+      // a shared item's own `folder` column is always '' (its mirror path is outside every
+      // configured source directory, so folderForFile can't attribute it to one) and would
+      // otherwise look identical to any other unfoldered local doc.
       const rows = this.db
         .prepare(
           `SELECT m.source_path, m.key, m.description, m.doc_type, m.folder,
                   snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
-                  -bm25(search_index) AS score
+                  -bm25(search_index) AS score,
+                  si.owner AS shared_owner,
+                  si.role AS shared_role
            FROM search_index
            JOIN memory_docs m ON m.source_path = search_index.ref_id
+           LEFT JOIN shared_items si ON si.status = 'active' AND si.mirror_path = m.source_path
            WHERE search_index.ref_table = 'memory_docs' AND search_index MATCH ? ${conditions.map((c) => `AND ${c}`).join(' ')}
            ORDER BY bm25(search_index)
            LIMIT ? OFFSET ?`
@@ -413,8 +431,15 @@ export class MemoryRepository {
         folder: string;
         snippet: string;
         score: number;
+        shared_owner: string | null;
+        shared_role: string | null;
       }>;
-      return rows.map(({ source_path, ...rest }) => ({ ...rest, filename: path.basename(source_path) }));
+      return rows.map(({ source_path, shared_owner, shared_role, ...rest }) => ({
+        ...rest,
+        filename: path.basename(source_path),
+        shared_owner: shared_owner ?? undefined,
+        shared_role: (shared_role as 'member' | 'editor' | null) ?? undefined,
+      }));
     } catch (err) {
       throw new SearchQueryError(query, err);
     }

@@ -20,10 +20,13 @@ export class AppToolbar extends LitElement {
     reindexing: { attribute: false },
     channelsActive: { attribute: false },
     folderViewActive: { attribute: false },
+    showShared: { attribute: false },
+    sharedActive: { attribute: false },
     theme: { attribute: false },
     onReindex: { attribute: false },
     onToggleChannels: { attribute: false },
     onToggleFolderView: { attribute: false },
+    onToggleShared: { attribute: false },
     onCycleTheme: { attribute: false },
   };
 
@@ -31,10 +34,13 @@ export class AppToolbar extends LitElement {
   declare reindexing: boolean;
   declare channelsActive: boolean;
   declare folderViewActive: boolean;
+  declare showShared: boolean;
+  declare sharedActive: boolean;
   declare theme: ThemeMode;
   declare onReindex: () => void;
   declare onToggleChannels: () => void;
   declare onToggleFolderView: () => void;
+  declare onToggleShared: () => void;
   declare onCycleTheme: () => void;
 
   static styles = css`
@@ -69,7 +75,7 @@ export class AppToolbar extends LitElement {
     .reindex-toggle:disabled { cursor: default; opacity: 0.4; }
     .reindex-toggle.spinning { animation: reindex-spin 0.8s linear infinite; }
     @keyframes reindex-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-    .channels-toggle, .folder-view-toggle {
+    .channels-toggle, .folder-view-toggle, .shared-toggle {
       height: 28px;
       padding: 0 12px;
       border: 1px solid var(--border-strong);
@@ -85,8 +91,8 @@ export class AppToolbar extends LitElement {
       opacity: 0.75;
       font-family: inherit;
     }
-    .channels-toggle:hover, .folder-view-toggle:hover { opacity: 1; background: var(--hover); }
-    .channels-toggle.active, .folder-view-toggle.active {
+    .channels-toggle:hover, .folder-view-toggle:hover, .shared-toggle:hover { opacity: 1; background: var(--hover); }
+    .channels-toggle.active, .folder-view-toggle.active, .shared-toggle.active {
       background: var(--accent); border-color: var(--accent); color: var(--accent-fg); opacity: 1;
     }
   `;
@@ -122,6 +128,17 @@ export class AppToolbar extends LitElement {
       >
         🗂 Folder View
       </button>
+      ${this.showShared
+        ? html`
+            <button
+              class="shared-toggle ${this.sharedActive ? 'active' : ''}"
+              title="Items shared with you"
+              @click=${() => this.onToggleShared()}
+            >
+              🤝 Shared
+            </button>
+          `
+        : ''}
       <button
         class="theme-toggle"
         title=${`Theme: ${THEME_LABEL[this.theme]} (click to change)`}

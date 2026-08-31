@@ -25,6 +25,17 @@ import { listFolders as listFolderfooFolders } from '../remote/folderfoo-client.
 import { setCredential } from '../remote/credentials.js';
 import { pollOne, type RemotePollerHandle } from '../remote/remote-sync.js';
 import { decodeUsername, isFolderVisible, type IdentityTracker } from '../remote/identity.js';
+import {
+  refreshSharedItems,
+  listSharedItems,
+  dismissRevokedSharedItem,
+  addSharedItem,
+  getSharedItem,
+  resolveShareTarget,
+} from '../remote/shared-items.js';
+import { shareWithUser, unshareWithUser, createShareLink, createPublicLink, joinRemoteFolderPath } from '../remote/folderfoo-client.js';
+import { readMarkdownFile } from '../store/markdown-file.js';
+import type { MemoryFrontmatter, SkillFrontmatter } from '../types.js';
 import { getChannel, listChannels } from '../channels/store.js';
 
 type EntryType = 'skill' | 'memory' | 'all';
@@ -615,7 +626,23 @@ export function buildWebRouter(
     // memory_docs rows have no `id` column of their own (see idCol above) — expose source_path as
     // `id` so the client's EntryDetail.id is always populated, matching the list endpoint's id.
     const responseId = table === 'skills' ? row.id : row.source_path;
-    res.json({ ...row, id: responseId, tags, trigger_phrases, attachments, has_frontmatter, raw_file });
+    // Sharing an item (Phase 4's "Copy share link"/"Copy public link" buttons) only makes sense
+    // for a doc that actually exists on folderfoo — a purely local doc has no remote counterpart
+    // for folderfoo's own POST /share/POST /share-links to address. remoteInfo is the coordinates
+    // detail-panel.ts needs to build that request (server/tenantId) and to compute the
+    // folderfoo-relative path (folderPath + filename, via mirrorDir-relative math), without the
+    // client needing its own copy of RemoteFolder-resolution logic.
+    const remote = (table === 'skills' ? skillRepo : memoryRepo).listRemoteFolders().find((f) => f.name === row.folder);
+    res.json({
+      ...row,
+      id: responseId,
+      tags,
+      trigger_phrases,
+      attachments,
+      has_frontmatter,
+      raw_file,
+      remoteInfo: remote ? { server: remote.server, tenantId: remote.tenantId, folderPath: remote.folderPath, mirrorDir: remote.mirrorDir } : null,
+    });
   });
 
   // Serves a single attachment file for a doc. Unauthenticated web-facing surface, so the
@@ -1418,6 +1445,225 @@ export function buildWebRouter(
     try {
       await Promise.all([remotePollers?.skill?.resyncAll(), remotePollers?.memory?.resyncAll()]);
       res.json({ resynced: true });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // "Shared with me" (item-level shares, not whole connected folders — see
+  // config.ts's RemoteFolder for that separate mechanism). Deliberately NOT
+  // called anywhere automatically (no poller, no auto-refresh on load/focus)
+  // — GET only ever returns whatever's currently in shared_items, exactly as
+  // fresh as the last time POST /refresh below was explicitly clicked. This
+  // is the settled "refresh is a UI-only concept" design.
+  router.get('/api/shared-items', (_req: Request, res: Response) => {
+    res.json(listSharedItems(db));
+  });
+
+  // Turns a redeemed share-link/public-link (client/share-accept.ts's onSharedItemAccepted) into a
+  // new shared_items row and pulls its content immediately — this one fetch is the explicit act of
+  // accepting a share, not the "refresh is UI-only" background sync (see addSharedItem's own doc
+  // comment). Called once per accept, never on a timer.
+  router.post('/api/shared-items/accept', async (req: Request, res: Response) => {
+    const { owner, path: itemPath, originId, kind, role, server, tenantId } = req.body || {};
+    if (!owner || !itemPath || !originId || (kind !== 'memory' && kind !== 'skill') || !server || !tenantId) {
+      res.status(400).json({ error: 'owner, path, originId, kind, server, and tenantId are required' });
+      return;
+    }
+    try {
+      await addSharedItem(db, config.baseDir, skillSpec, memorySpec, {
+        owner,
+        path: itemPath,
+        originId,
+        kind,
+        role: role === 'editor' ? 'editor' : 'member',
+        server,
+        tenantId,
+      });
+      res.json({ accepted: originId });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // "Fork to mine" — writes an INDEPENDENT copy of a shared item into a folder the caller owns
+  // (local bucket, or a remote folder they're connected to), via the same MemoryRepository.create/
+  // SkillRepository.create path any other new doc goes through (collision-avoided by
+  // uniqueFilename for memory, or a clean "already exists" error for skills — no separate fork-
+  // specific write path). The fork carries NO shared_items linkage afterward: once created, it's
+  // indistinguishable from a doc the user authored themselves — editing it never touches the
+  // original owner's copy, unlike a live role:'editor' share.
+  router.post('/api/shared-items/:originId/fork', async (req: Request, res: Response) => {
+    const { originId } = req.params;
+    const { folder } = req.body || {};
+    if (!originId) {
+      res.status(400).json({ error: 'originId is required' });
+      return;
+    }
+    const item = getSharedItem(db, originId);
+    if (!item) {
+      res.status(404).json({ error: 'shared item not found' });
+      return;
+    }
+    try {
+      const parsed = readMarkdownFile<Record<string, unknown>>(item.mirror_path);
+      if (item.kind === 'memory') {
+        const fm = parsed.frontmatter as Partial<MemoryFrontmatter>;
+        const doc = await memoryRepo.create({
+          filename: path.basename(item.mirror_path),
+          key: fm.key ?? path.basename(item.mirror_path, '.md'),
+          key_type: fm.key_type ?? 'freeform',
+          doc_type: fm.doc_type ?? 'other',
+          description: fm.description ?? path.basename(item.mirror_path, '.md'),
+          body: parsed.body,
+          tags: fm.tags,
+          status: fm.status,
+          related_to: fm.related_to,
+          folder,
+        });
+        res.json({ forked: true, table: 'memory_docs', id: doc.source_path });
+      } else {
+        const fm = parsed.frontmatter as Partial<SkillFrontmatter>;
+        if (!fm.name || !fm.description) {
+          res.status(500).json({ error: 'shared skill is missing required name/description frontmatter' });
+          return;
+        }
+        const doc = await skillRepo.create(
+          { name: fm.name, description: fm.description, tags: fm.tags, trigger_phrases: fm.trigger_phrases },
+          parsed.body,
+          undefined,
+          folder
+        );
+        res.json({ forked: true, table: 'skills', id: doc.name });
+      }
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // The ONLY way shared_items ever updates after a share is first accepted —
+  // the recycle-icon button in the "Shared with me" panel calls this.
+  router.post('/api/shared-items/refresh', async (_req: Request, res: Response) => {
+    try {
+      const summary = await refreshSharedItems(db, config.baseDir, skillSpec, memorySpec);
+      res.json(summary);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Dismisses a revoked row from view — no-ops for a still-active share (use
+  // the refresh button to detect revocation in the first place, this only
+  // clears a row already marked revoked).
+  router.delete('/api/shared-items/:originId', (req: Request, res: Response) => {
+    const { originId } = req.params;
+    if (!originId) {
+      res.status(400).json({ error: 'originId is required' });
+      return;
+    }
+    dismissRevokedSharedItem(db, originId);
+    res.json({ dismissed: originId });
+  });
+
+  // Resolves a table/id EntryDetail into the folderfoo coordinates (folderPath, name — the
+  // "name" folderfoo actually stores it under) needed to call shareWithUser/createShareLink/
+  // createPublicLink below. Shared by all three POST routes so the "must be remote, must
+  // exist under a connected folder" validation lives in exactly one place. Returns null if the
+  // doc isn't remote (this app's own local-only docs have nothing on folderfoo to address).
+  const resolveShareTargetHere = (table: 'skills' | 'memory_docs', id: string) => resolveShareTarget(db, { skill: skillRepo, memory: memoryRepo }, table, id);
+
+  router.post('/api/entries/:table/:id/share', async (req: Request, res: Response) => {
+    const { table, id } = req.params;
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    const { username, role } = req.body || {};
+    if (!username) {
+      res.status(400).json({ error: 'username is required' });
+      return;
+    }
+    const target = resolveShareTargetHere(table, id);
+    if (!target) {
+      res.status(400).json({ error: 'this doc is not connected to a folderfoo remote folder' });
+      return;
+    }
+    try {
+      await shareWithUser(target.server, config.baseDir, target.tenantId, target.folderPath, target.name, username, target.kind, role === 'editor' ? 'editor' : 'member');
+      res.json({ shared: true, username });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  router.delete('/api/entries/:table/:id/share/:username', async (req: Request, res: Response) => {
+    const { table, id, username } = req.params;
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!id || !username) {
+      res.status(400).json({ error: 'id and username are required' });
+      return;
+    }
+    const target = resolveShareTargetHere(table, id);
+    if (!target) {
+      res.status(400).json({ error: 'this doc is not connected to a folderfoo remote folder' });
+      return;
+    }
+    try {
+      await unshareWithUser(target.server, config.baseDir, target.tenantId, target.folderPath, target.name, username);
+      res.json({ unshared: true, username });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  router.post('/api/entries/:table/:id/share-link', async (req: Request, res: Response) => {
+    const { table, id } = req.params;
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    const target = resolveShareTargetHere(table, id);
+    if (!target) {
+      res.status(400).json({ error: 'this doc is not connected to a folderfoo remote folder' });
+      return;
+    }
+    try {
+      const link = await createShareLink(target.server, config.baseDir, target.tenantId, target.folderPath, target.name, target.kind);
+      res.json(link);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  router.post('/api/entries/:table/:id/public-link', async (req: Request, res: Response) => {
+    const { table, id } = req.params;
+    if (table !== 'skills' && table !== 'memory_docs') {
+      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
+      return;
+    }
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    const target = resolveShareTargetHere(table, id);
+    if (!target) {
+      res.status(400).json({ error: 'this doc is not connected to a folderfoo remote folder' });
+      return;
+    }
+    try {
+      const link = await createPublicLink(target.server, config.baseDir, target.tenantId, target.folderPath, target.name, target.kind);
+      res.json(link);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
