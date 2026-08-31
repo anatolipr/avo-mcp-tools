@@ -120,7 +120,7 @@ export function registerBucketFolderTools(
     {
       kind: KIND,
       folderPath: z.string().describe("a `path` value from bucket_list_remote_folders ('' for the folderfoo root)"),
-      name: z.string().optional().describe("name for the folder; defaults to a sanitized version of folderPath's last segment"),
+      name: z.string().optional().describe("name for the folder; defaults to a sanitized version of folderPath's last segment. Auto-suffixed with the connecting username if it collides with a folder connected under a different folderfoo login."),
     },
     async ({ kind, folderPath, name }) => {
       if (config.folderfooMode === 'off' || !config.folderfooHost) {
@@ -147,13 +147,19 @@ export function registerBucketFolderTools(
       if (!folderName) {
         return { content: [{ type: 'text', text: 'could not derive a valid folder name — provide one explicitly' }], isError: true };
       }
-      const mirrorDir = mirrorDirFor(config.baseDir, current.mode, current.username, folderName);
-      const remote: RemoteFolder = { name: folderName, server, tenantId: TENANT_ID, folderPath, mirrorDir, mode: current.mode, username: current.username };
       try {
+        // Resolved FIRST (before deriving mirrorDir) — auto-suffixes the requested name when it
+        // collides with a folder connected under a DIFFERENT folderfoo login (e.g. two different users
+        // each naturally wanting "bbbmemz"), still rejecting a collision against the CALLER's own
+        // identity. Mirrors the web route's POST /api/remote-folders logic (routes.ts) — see
+        // repo.resolveAvailableName's doc comment.
+        const resolvedName = repo.resolveAvailableName(folderName, current.username);
+        const mirrorDir = mirrorDirFor(config.baseDir, current.mode, current.username, resolvedName);
+        const remote: RemoteFolder = { name: resolvedName, server, tenantId: TENANT_ID, folderPath, mirrorDir, mode: current.mode, username: current.username };
         repo.registerRemoteFolder(remote);
-        saveRemoteFolder(config, kind, { name: folderName, server, tenantId: TENANT_ID, folderPath, mode: current.mode, username: current.username });
+        saveRemoteFolder(config, kind, { name: resolvedName, server, tenantId: TENANT_ID, folderPath, mode: current.mode, username: current.username });
         await pollOne(db, specFor(kind), remote, config.baseDir);
-        return { content: [{ type: 'text', text: JSON.stringify({ name: folderName, server, tenantId: TENANT_ID, folderPath, kind }, null, 2) }] };
+        return { content: [{ type: 'text', text: JSON.stringify({ name: resolvedName, server, tenantId: TENANT_ID, folderPath, kind }, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
       }
