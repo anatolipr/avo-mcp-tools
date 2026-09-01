@@ -80,16 +80,19 @@ export function guessMimeType(filename: string): string {
   return BINARY_EXTENSIONS.has(ext) ? 'application/octet-stream' : 'text/plain';
 }
 
+/** `filename` may include a relative subpath (e.g. "references/foo.md") to nest it inside `dir`. */
 export function uniqueFilename(dir: string, filename: string): string {
   // Validate that the filename doesn't escape the directory
   resolveWithinBase(dir, undefined, filename);
 
   if (!fs.existsSync(path.join(dir, filename))) return filename;
+  const dirPart = path.dirname(filename); // '.' for a bare filename, or e.g. "references"
   const ext = path.extname(filename);
   const base = path.basename(filename, ext);
+  const candidate = (n: number) => (dirPart === '.' ? `${base}-${n}${ext}` : path.join(dirPart, `${base}-${n}${ext}`));
   let n = 2;
-  while (fs.existsSync(path.join(dir, `${base}-${n}${ext}`))) n++;
-  return `${base}-${n}${ext}`;
+  while (fs.existsSync(path.join(dir, candidate(n)))) n++;
+  return candidate(n);
 }
 
 /**
@@ -118,15 +121,25 @@ export function buildAttachmentEntry(dir: string, filename: string, data: Buffer
 /** `dir` is the attachments directory itself, as returned by attachmentsDirFor. */
 export function writeAttachmentFile(dir: string, filename: string, data: Buffer): AttachmentEntry {
   const entry = buildAttachmentEntry(dir, filename, data);
-  fs.mkdirSync(dir, { recursive: true });
   const safePath = resolveWithinBase(dir, undefined, entry.filename);
+  fs.mkdirSync(path.dirname(safePath), { recursive: true }); // creates nested subdirs too, e.g. attachments/references/
   fs.writeFileSync(safePath, data);
   return entry;
 }
 
+/** Recurses into subdirectories — an attachment's `filename` may be a nested relative path (e.g. "references/foo.md"). Returns paths relative to `dir`. */
 export function listAttachmentFiles(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter((name) => fs.statSync(path.join(dir, name)).isFile());
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      for (const nested of listAttachmentFiles(full)) out.push(path.join(entry.name, nested));
+    } else if (entry.isFile()) {
+      out.push(entry.name);
+    }
+  }
+  return out;
 }
 
 /**

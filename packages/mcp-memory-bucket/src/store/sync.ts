@@ -50,6 +50,16 @@ export interface TableSyncSpec<TFrontmatter> {
    * sibling named after the file, so an external rename can't orphan them the same way.
    */
   onIndexed?: (fm: TFrontmatter, filePath: string) => void;
+  /**
+   * Optional: called on every raw add/change/unlink event under `sources` that `matchesFile` did NOT
+   * match. Skills use this to react to a file dropped directly into an existing skill's directory
+   * (e.g. references/foo.md, scripts/bar.mjs) by a generic filesystem write that bypassed every MCP
+   * tool — see server.ts's wiring — pushing/trashing it on its remote-backed parent folder. Memory
+   * docs pass nothing here (a non-.md file under a memory folder has no sync story to react to).
+   * Never called for a path under attachments/ — chokidar's own `ignored` filter drops those before
+   * either watcher branch runs.
+   */
+  onUnmatchedFileChange?: (filePath: string, changeType: 'add' | 'change' | 'unlink') => void;
 }
 
 // `paused` is deliberately absent from both lists: it's a local-only cache column (see
@@ -65,7 +75,15 @@ export function skillSyncSpec(sources: NamedFolder[]): TableSyncSpec<SkillFrontm
     matchesFile: (filePath) => path.basename(filePath) === 'SKILL.md',
     columns: skillColumns,
     getId: (fm) => fm.name,
-    remoteFilename: { toRemote: () => 'SKILL', toLocal: () => 'SKILL.md' },
+    remoteFilename: {
+      toRemote: () => 'SKILL',
+      // SKILL.md itself pushes/pulls under the fixed opaque remote name "SKILL" (translated to/from
+      // "SKILL.md" locally) — but a sibling file (references/foo.md, scripts/bar.mjs) pushes under
+      // its own real name (see SkillRepository.pushSkillSiblingFileIfNeeded) and must pull back down
+      // under that SAME real name, not get coerced into "SKILL.md". Only translate the one name this
+      // spec actually owns; anything else passes through unchanged.
+      toLocal: (remoteName) => (remoteName === 'SKILL' ? 'SKILL.md' : remoteName),
+    },
     toRow: (fm, _sourcePath, mtimeMs) => ({
       id: fm.name,
       description: fm.description,
@@ -348,6 +366,27 @@ export function* walkAttachmentFiles(dir: string): Generator<string> {
   }
 }
 
+/**
+ * Yields every file under `skillDir` (a single skill's own directory, i.e. dirname(SKILL.md's
+ * source_path)) EXCEPT SKILL.md itself and anything under attachments/ — the "sibling files" a
+ * portable agentskills.io skill keeps alongside SKILL.md (references/, scripts/, assets/, etc).
+ * Used by push (walk-and-push on create()) and by remote-sync.ts's reconcileDeletions to prune
+ * stale siblings. A sibling is never indexed as its own doc row — see skillSyncSpec's matchesFile,
+ * which only ever matches SKILL.md itself.
+ */
+export function* walkSkillSiblingFiles(skillDir: string): Generator<string> {
+  if (!fs.existsSync(skillDir)) return;
+  for (const entry of fs.readdirSync(skillDir, { withFileTypes: true })) {
+    const full = path.join(skillDir, entry.name);
+    if (entry.isDirectory()) {
+      if (isUnderAttachmentsDir(entry.name)) continue;
+      yield* walkSkillSiblingFiles(full);
+    } else if (entry.isFile() && entry.name !== 'SKILL.md') {
+      yield full;
+    }
+  }
+}
+
 export function watchSources<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): FSWatcher {
   const watcher = chokidar.watch(
     spec.sources.map((f) => f.path),
@@ -356,7 +395,10 @@ export function watchSources<TFrontmatter>(db: Database.Database, spec: TableSyn
 
   watcher
     .on('add', (filePath) => {
-      if (!spec.matchesFile(filePath)) return;
+      if (!spec.matchesFile(filePath)) {
+        spec.onUnmatchedFileChange?.(filePath, 'add');
+        return;
+      }
       try {
         upsertFile(db, spec, filePath);
       } catch (err) {
@@ -364,7 +406,10 @@ export function watchSources<TFrontmatter>(db: Database.Database, spec: TableSyn
       }
     })
     .on('change', (filePath) => {
-      if (!spec.matchesFile(filePath)) return;
+      if (!spec.matchesFile(filePath)) {
+        spec.onUnmatchedFileChange?.(filePath, 'change');
+        return;
+      }
       try {
         upsertFile(db, spec, filePath);
       } catch (err) {
@@ -372,7 +417,10 @@ export function watchSources<TFrontmatter>(db: Database.Database, spec: TableSyn
       }
     })
     .on('unlink', (filePath) => {
-      if (!spec.matchesFile(filePath)) return;
+      if (!spec.matchesFile(filePath)) {
+        spec.onUnmatchedFileChange?.(filePath, 'unlink');
+        return;
+      }
       removeFile(db, spec.table, filePath);
     });
 

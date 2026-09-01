@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
 import type { TableSyncSpec } from '../store/sync.js';
-import { upsertFile, removeFile, walkMarkdownFiles, walkAttachmentFiles } from '../store/sync.js';
+import { upsertFile, removeFile, walkMarkdownFiles, walkAttachmentFiles, walkSkillSiblingFiles } from '../store/sync.js';
 import type { RemoteFolder } from '../config.js';
 import { getLastChanged, getChangedSince, readFile, FolderfooAuthError } from './folderfoo-client.js';
 import { isUnderAttachmentsDir } from '../attachments/storage.js';
@@ -94,6 +94,12 @@ async function reconcileDeletions<TFrontmatter>(
 
   if (!fs.existsSync(folder.mirrorDir)) return;
   for (const mirrorFilePath of walkMarkdownFiles(folder.mirrorDir)) {
+    // For skills, this loop must only ever act on SKILL.md itself — a sibling .md file (e.g.
+    // references/foo.md) is handled by the dedicated sibling-diff loop below instead, which compares
+    // it against the remote listing under its own real name (no remoteFilename translation, unlike
+    // SKILL.md's fixed "SKILL" remote name). Without this guard, a sibling .md would look
+    // deleted-remotely here (it was never pushed under "SKILL") and get wrongly deleted.
+    if (spec.table === 'skills' && path.basename(mirrorFilePath) !== 'SKILL.md') continue;
     const relPath = path.relative(folder.mirrorDir, mirrorFilePath);
     // remoteFiles' entries are keyed by folderfoo's own filename grammar, which may differ from
     // the local mirror's filename (see spec.remoteFilename's doc comment — skills push under the
@@ -126,6 +132,24 @@ async function reconcileDeletions<TFrontmatter>(
   for (const mirrorFilePath of walkAttachmentFiles(folder.mirrorDir)) {
     const relPath = path.relative(folder.mirrorDir, mirrorFilePath);
     if (!remoteRelPaths.has(relPath)) fs.unlinkSync(mirrorFilePath);
+  }
+
+  // Prunes a stale SKILL SIBLING file (references/foo.md, scripts/bar.mjs, etc. — anything under a
+  // skill's own directory besides SKILL.md itself and attachments/) once it's gone from folderfoo's
+  // listing. Reuses the SAME remoteRelPaths already fetched above — no extra network call. Siblings
+  // are never indexed as their own doc row (see walkSkillSiblingFiles's doc comment), so like
+  // attachments there's no removeFile/DB row to clean up, just the mirror file itself. Pushed under
+  // its own literal filename (see pushSkillSiblingFileIfNeeded) with no remoteFilename translation,
+  // so a plain relative-path membership check is enough, same as the attachment loop above.
+  if (spec.table === 'skills') {
+    const skillRows = db.prepare(`SELECT source_path FROM skills WHERE folder = ?`).all(folder.name) as Array<{ source_path: string }>;
+    for (const { source_path: sourcePath } of skillRows) {
+      const skillDir = path.dirname(sourcePath);
+      for (const siblingPath of walkSkillSiblingFiles(skillDir)) {
+        const relPath = path.relative(folder.mirrorDir, siblingPath);
+        if (!remoteRelPaths.has(relPath)) fs.unlinkSync(siblingPath);
+      }
+    }
   }
 
   if (spec.table === 'memory_docs') {

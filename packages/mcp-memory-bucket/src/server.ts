@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
@@ -6,7 +7,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { loadConfig, type RemoteFolder } from './config.js';
 import { openCache } from './store/db.js';
 import { initialScan, watchSources, skillSyncSpec, memorySyncSpec } from './store/sync.js';
-import { SkillRepository } from './skills/repository.js';
+import { SkillRepository, findSkillDirAncestor } from './skills/repository.js';
 import { MemoryRepository } from './memory/repository.js';
 import { registerSkillTools } from './skills/tools.js';
 import { registerMemoryTools } from './memory/tools.js';
@@ -74,11 +75,9 @@ const skillFolders = [{ name: 'builtin', path: builtinSkillsDir }, ...config.ski
 const skillSpec = skillSyncSpec(skillFolders);
 const memorySpec = memorySyncSpec(config.memoryFolders);
 
-initialScan(db, skillSpec);
-initialScan(db, memorySpec);
-const skillWatcher = watchSources(db, skillSpec);
-const memoryWatcher = watchSources(db, memorySpec);
-
+// Built before watchSources below so onUnmatchedFileChange's closure can reference skillRepo —
+// SkillRepository's own constructor doesn't need the watcher itself (that's attached separately via
+// setWatcher once it exists).
 const skillRepo = new SkillRepository(
   db,
   skillFolders,
@@ -87,6 +86,34 @@ const skillRepo = new SkillRepository(
   identity
 );
 const memoryRepo = new MemoryRepository(db, config.memoryFolders, config.remoteMemoryFolders, config.baseDir, identity);
+
+// Reacts to a direct filesystem write under an existing skill's directory (any file that isn't
+// SKILL.md itself, outside attachments/) that bypassed every MCP tool — e.g. an agent using a
+// generic file-write tool to drop references/foo.md straight into a skill's directory. Pushes/
+// re-pushes it to the skill's remote folder if that folder is remote-backed (no-op for a local
+// folder — pushSkillSiblingFileIfNeeded/trashSkillSiblingFileIfNeeded already guard on that), and
+// trashes it remotely on unlink. Kept out of the generic sync.ts layer since "parent dir contains
+// SKILL.md" is a skill-specific convention.
+skillSpec.onUnmatchedFileChange = (filePath, changeType) => {
+  if (path.basename(filePath) === '.last-synced') return; // remote poller's own watermark sidecar file, not skill content
+  const folder = skillFolders.find((f) => filePath.startsWith(f.path + path.sep));
+  if (!folder) return;
+  const skillDir = findSkillDirAncestor(filePath, folder.path);
+  if (!skillDir) return; // not actually under any skill's own directory (e.g. a stray file at the folder root)
+  if (changeType === 'unlink') {
+    skillRepo.trashSkillSiblingFileIfNeeded(folder.name, filePath).catch((err) => console.error(`[memory-bucket] failed to trash sibling ${filePath}:`, err));
+  } else {
+    fs.promises
+      .readFile(filePath)
+      .then((data) => skillRepo.pushSkillSiblingFileIfNeeded(folder.name, filePath, data))
+      .catch((err) => console.error(`[memory-bucket] failed to push sibling ${filePath}:`, err));
+  }
+};
+
+initialScan(db, skillSpec);
+initialScan(db, memorySpec);
+const skillWatcher = watchSources(db, skillSpec);
+const memoryWatcher = watchSources(db, memorySpec);
 skillRepo.setWatcher(skillWatcher);
 memoryRepo.setWatcher(memoryWatcher);
 

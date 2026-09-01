@@ -6,13 +6,14 @@ import matter from 'gray-matter';
 import { writeMarkdownFile, formatMarkdownFile } from '../store/markdown-file.js';
 import { assertValidSkillName } from '../store/skill-name.js';
 import { resolveWithinBase } from '../store/safe-path.js';
-import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, skillSyncSpec, type TableSyncSpec } from '../store/sync.js';
+import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, skillSyncSpec, walkSkillSiblingFiles, type TableSyncSpec } from '../store/sync.js';
 import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
 import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
 import { rebaseFolderPath } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
 import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, trashFile as trashRemoteFile, trashFolder as trashRemoteFolder, renameFolder as renameRemoteFolder, joinRemoteFolderPath, assertRemoteFolderExists } from '../remote/folderfoo-client.js';
+import { guessMimeType } from '../attachments/storage.js';
 import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 import { writeRemoteThenLocal } from '../remote/write-order.js';
 
@@ -148,6 +149,34 @@ export class SkillRepository {
     await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
     await trashRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(attachmentFilePath), remote.owner);
+  }
+
+  /**
+   * Pushes one arbitrary file (by its LOCAL absolute path) that lives alongside SKILL.md in a
+   * skill's own directory — the sibling-file counterpart to pushToRemoteIfNeeded (SKILL.md only,
+   * fixed remote name 'SKILL') and pushAttachmentIfNeeded (attachments/ only). Pushed under its own
+   * real filename, since folderfoo has no reason to rename it. No-op for a local folder.
+   */
+  async pushSkillSiblingFileIfNeeded(folderName: string, filePath: string, content: string | Buffer): Promise<void> {
+    const remote = this.remoteFor(folderName);
+    if (!remote || !this.credentialsBaseDir) return;
+    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
+    const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(filePath)));
+    const name = path.basename(filePath);
+    if (typeof content === 'string') {
+      await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, name, content, remote.owner);
+    } else {
+      await writeRemoteBinaryFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, name, content, guessMimeType(name), remote.owner);
+    }
+  }
+
+  /** Trashes one sibling file's remote copy on folderfoo — the sibling-file counterpart to trashAttachmentIfNeeded. No-op for a local folder. */
+  async trashSkillSiblingFileIfNeeded(folderName: string, filePath: string): Promise<void> {
+    const remote = this.remoteFor(folderName);
+    if (!remote || !this.credentialsBaseDir) return;
+    await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
+    const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(filePath)));
+    await trashRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dirRelPath, path.basename(filePath), remote.owner);
   }
 
   /** Attaches the live chokidar watcher so addFolder/removeFolder can mutate it without a restart. */
@@ -540,6 +569,13 @@ export class SkillRepository {
       }
     );
     upsertFile(this.db, this.syncSpec, filePath);
+    // Pushes any sibling files (references/, scripts/, etc.) an agent already populated the skill
+    // dir with before calling create() — e.g. a portable agentskills.io skill assembled on disk
+    // first. No-op when the dir was empty besides SKILL.md, and a no-op push for a local folder.
+    for (const siblingPath of walkSkillSiblingFiles(skillDir)) {
+      const data = fs.readFileSync(siblingPath);
+      await this.pushSkillSiblingFileIfNeeded(targetFolder.name, siblingPath, data);
+    }
     return { ...fm, body, paused: false };
   }
 
@@ -806,4 +842,23 @@ export class SkillRepository {
 function stripSourcePath<T extends { source_path: string; folder: string }>(fm: T): Omit<T, 'source_path' | 'folder'> {
   const { source_path: _sp, folder: _folder, ...rest } = fm;
   return rest;
+}
+
+/**
+ * Walks upward from `filePath` looking for the nearest ancestor directory that contains a
+ * SKILL.md — i.e. "is this file a sibling somewhere under some skill's own directory." A sibling
+ * can be arbitrarily deep (e.g. references/sub/foo.md), so this must walk multiple levels up, not
+ * just check the immediate parent. Stops at `folderRoot` (the configured skill folder's own root)
+ * so a stray file sitting directly at the folder root — not under any skill's directory at all —
+ * correctly returns null instead of walking past the folder entirely.
+ */
+export function findSkillDirAncestor(filePath: string, folderRoot: string): string | null {
+  let dir = path.dirname(filePath);
+  const root = path.resolve(folderRoot);
+  while (dir.startsWith(root)) {
+    if (fs.existsSync(path.join(dir, 'SKILL.md'))) return dir;
+    if (dir === root) break;
+    dir = path.dirname(dir);
+  }
+  return null;
 }

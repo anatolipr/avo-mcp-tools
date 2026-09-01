@@ -62,8 +62,9 @@ export class AttachmentRepository {
     await writeRemoteThenLocal(
       () => this.pushAttachmentToRemoteIfNeeded(kind, doc.folder, path.join(dir, entry.filename), data, guessMimeType(entry.filename)),
       () => {
-        fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(resolveWithinBase(dir, undefined, entry.filename), data);
+        const safePath = resolveWithinBase(dir, undefined, entry.filename);
+        fs.mkdirSync(path.dirname(safePath), { recursive: true }); // creates nested subdirs too, e.g. attachments/references/
+        fs.writeFileSync(safePath, data);
       }
     );
     const existing = doc.attachments ?? [];
@@ -92,6 +93,7 @@ export class AttachmentRepository {
     await writeRemoteThenLocal(
       () => this.pushAttachmentToRemoteIfNeeded(kind, doc.folder, safePath, data, guessMimeType(filename)),
       () => {
+        fs.mkdirSync(path.dirname(safePath), { recursive: true }); // harmless if already present; guards a nested dir removed out-of-band
         fs.rmSync(safePath, { force: true });
         fs.writeFileSync(safePath, data);
       }
@@ -113,6 +115,14 @@ export class AttachmentRepository {
     // disk locally.
     await this.trashAttachmentOnRemoteIfNeeded(kind, doc.folder, safePath);
     fs.rmSync(safePath, { force: true });
+    // Clean up now-empty intermediate subdirectories (e.g. attachments/references/ after its last
+    // file is removed) — walks upward from the removed file's own parent dir, stopping at `dir`
+    // (attachments/ itself, which the check below already handles).
+    let cleanupDir = path.dirname(safePath);
+    while (cleanupDir !== dir && fs.existsSync(cleanupDir) && fs.readdirSync(cleanupDir).length === 0) {
+      fs.rmdirSync(cleanupDir);
+      cleanupDir = path.dirname(cleanupDir);
+    }
     const next = (doc.attachments ?? []).filter((a) => a.filename !== filename);
     await this.saveAttachmentsList(kind, folder, docIdOrName, next);
     if (listAttachmentFiles(dir).length === 0) {

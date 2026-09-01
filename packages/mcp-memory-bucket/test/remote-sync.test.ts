@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { openCache } from '../src/store/db.js';
-import { memorySyncSpec } from '../src/store/sync.js';
+import { memorySyncSpec, skillSyncSpec } from '../src/store/sync.js';
 import { setCredential } from '../src/remote/credentials.js';
 import { pollOne, startRemotePolling } from '../src/remote/remote-sync.js';
 import type { RemoteFolder } from '../src/config.js';
@@ -475,4 +475,98 @@ test('pollOne: force resync evicts a pre-existing misindexed attachment row from
   assert.equal(row, undefined, 'a pre-existing misindexed attachment row must be evicted by a forced resync');
   // The mirror file itself is untouched - it's still a real, live attachment on disk.
   assert.ok(fs.existsSync(attachmentMirrorFile));
+});
+
+// Regression coverage for the reported bug: a portable agentskills.io-style skill keeps its own
+// references/, scripts/, etc. alongside SKILL.md — these "sibling" files were never pulled down
+// correctly (pullFile writes them fine, they just weren't reported remotely before this fix existed
+// server-side, but reconcileDeletions actively deleted any sibling .md it DID find locally with no
+// remote counterpart) and any non-.md sibling was simply never round-tripped. This exercises the
+// pull+reconcile half directly: a remote listing containing SKILL.md plus a references/foo.md and a
+// scripts/bar.mjs sibling must mirror both down, survive reconcileDeletions untouched, and never
+// become their own skills row.
+test('pollOne: pulls skill sibling files (references/, scripts/) and does not index them as standalone skills', async (t) => {
+  const credsDir = tmpDir('mb-remote-sync-creds-');
+  const mirrorDir = tmpDir('mb-remote-sync-mirror-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const spec = skillSyncSpec([{ name: 'team-qa', path: mirrorDir }]);
+  const folder = makeFolder(mirrorDir); // folder.folderPath === 'plans'
+
+  const skillFm = '---\nname: my-skill\ndescription: A portable skill\ntags: []\ntrigger_phrases: []\nmetadata:\n  owner: null\n  status: unreviewed\n  extends: null\n---\nBody.';
+  t.mock.method(
+    globalThis,
+    'fetch',
+    mockFolderfoo({
+      lastChanged: 100,
+      files: [
+        { name: 'SKILL', folderPath: 'plans/my-skill', mtime: 100, content: skillFm },
+        { name: 'foo.md', folderPath: 'plans/my-skill/references', mtime: 100, content: '# Reference doc' },
+        { name: 'bar.mjs', folderPath: 'plans/my-skill/scripts', mtime: 100, content: 'export const x = 1;' },
+      ],
+    })
+  );
+  await pollOne(db, spec, folder, credsDir);
+
+  const skillMirrorFile = path.join(mirrorDir, 'my-skill', 'SKILL.md');
+  const referenceMirrorFile = path.join(mirrorDir, 'my-skill', 'references', 'foo.md');
+  const scriptMirrorFile = path.join(mirrorDir, 'my-skill', 'scripts', 'bar.mjs');
+  assert.ok(fs.existsSync(skillMirrorFile));
+  assert.ok(fs.existsSync(referenceMirrorFile), 'references/foo.md must be pulled down alongside SKILL.md');
+  assert.ok(fs.existsSync(scriptMirrorFile), 'scripts/bar.mjs must be pulled down alongside SKILL.md');
+
+  assert.ok(db.prepare(`SELECT * FROM skills WHERE source_path = ?`).get(skillMirrorFile), 'SKILL.md itself must be indexed');
+  assert.equal(
+    db.prepare(`SELECT * FROM skills WHERE source_path = ?`).get(referenceMirrorFile),
+    undefined,
+    'a sibling .md file must never be indexed as its own skills row'
+  );
+});
+
+test('pollOne: reconcileDeletions prunes a skill sibling file once gone remotely, but never sweeps one still present', async (t) => {
+  const credsDir = tmpDir('mb-remote-sync-creds-');
+  const mirrorDir = tmpDir('mb-remote-sync-mirror-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const spec = skillSyncSpec([{ name: 'team-qa', path: mirrorDir }]);
+  const folder = makeFolder(mirrorDir);
+
+  const skillFm = '---\nname: my-skill\ndescription: A portable skill\ntags: []\ntrigger_phrases: []\nmetadata:\n  owner: null\n  status: unreviewed\n  extends: null\n---\nBody.';
+
+  // First poll: SKILL.md plus two siblings, both present remotely.
+  t.mock.method(
+    globalThis,
+    'fetch',
+    mockFolderfoo({
+      lastChanged: 100,
+      files: [
+        { name: 'SKILL', folderPath: 'plans/my-skill', mtime: 100, content: skillFm },
+        { name: 'foo.md', folderPath: 'plans/my-skill/references', mtime: 100, content: '# keep me' },
+        { name: 'bar.mjs', folderPath: 'plans/my-skill/scripts', mtime: 100, content: 'export const x = 1;' },
+      ],
+    })
+  );
+  await pollOne(db, spec, folder, credsDir);
+  const keptFile = path.join(mirrorDir, 'my-skill', 'references', 'foo.md');
+  const removedFile = path.join(mirrorDir, 'my-skill', 'scripts', 'bar.mjs');
+  assert.ok(fs.existsSync(keptFile));
+  assert.ok(fs.existsSync(removedFile));
+
+  // Second poll (forced): folderfoo no longer reports scripts/bar.mjs (deleted remotely).
+  t.mock.method(
+    globalThis,
+    'fetch',
+    mockFolderfoo({
+      lastChanged: 200,
+      files: [
+        { name: 'SKILL', folderPath: 'plans/my-skill', mtime: 100, content: skillFm },
+        { name: 'foo.md', folderPath: 'plans/my-skill/references', mtime: 100, content: '# keep me' },
+      ],
+    })
+  );
+  await pollOne(db, spec, folder, credsDir, { force: true });
+
+  assert.ok(fs.existsSync(keptFile), 'a sibling still present remotely must survive reconcileDeletions');
+  assert.ok(!fs.existsSync(removedFile), 'a sibling removed remotely must be pruned from the local mirror');
+  assert.ok(fs.existsSync(path.join(mirrorDir, 'my-skill', 'SKILL.md')), 'SKILL.md itself must be untouched');
 });

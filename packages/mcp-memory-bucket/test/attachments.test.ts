@@ -53,6 +53,24 @@ test('writeAttachmentFile: auto-renames on collision', () => {
   assert.equal(fs.readFileSync(path.join(dir, 'foo-2.json'), 'utf-8'), 'second');
 });
 
+test('writeAttachmentFile: supports a nested relative filename, creating intermediate directories', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-test-'));
+  const entry = writeAttachmentFile(dir, 'references/foo.md', Buffer.from('nested content'));
+  assert.equal(entry.filename, 'references/foo.md');
+  assert.equal(entry.path, path.join('attachments', 'references', 'foo.md'));
+  assert.ok(fs.existsSync(path.join(dir, 'references', 'foo.md')));
+  assert.equal(fs.readFileSync(path.join(dir, 'references', 'foo.md'), 'utf-8'), 'nested content');
+});
+
+test('writeAttachmentFile: auto-renames a nested path on collision, keeping the subdirectory', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-test-'));
+  writeAttachmentFile(dir, 'references/foo.md', Buffer.from('first'));
+  const second = writeAttachmentFile(dir, 'references/foo.md', Buffer.from('second'));
+  assert.equal(second.filename, path.join('references', 'foo-2.md'));
+  assert.ok(fs.existsSync(path.join(dir, 'references', 'foo-2.md')));
+  assert.equal(fs.readFileSync(path.join(dir, 'references', 'foo-2.md'), 'utf-8'), 'second');
+});
+
 test('writeAttachmentFile: rejects files over the size limit', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-test-'));
   const tooBig = Buffer.alloc(ATTACHMENT_MAX_BYTES + 1);
@@ -458,4 +476,29 @@ test('AttachmentRepository: skill-kind add/list/cascade-delete end-to-end', asyn
 
   assert.ok(!fs.existsSync(attachmentsDir), 'skill delete must cascade-remove the attachments dir');
   assert.equal(await skillRepo.get(skill.name), null);
+});
+
+test('AttachmentRepository: nested attachment path round-trips through add/list/remove, cleaning up its now-empty subdirectory', async () => {
+  const { skillRepo } = setupSkillRepo();
+  const skill = await skillRepo.create(
+    { name: 'demo-skill-nested-attach', description: 'Demo skill for nested attachment coverage. Use when testing.', owner: null, status: 'unreviewed', tags: [], trigger_phrases: [] },
+    'Body text.'
+  );
+  const attachRepo = new AttachmentRepository(undefined as any, skillRepo);
+
+  const entry = await attachRepo.add('skill', skill.folder, skill.name, 'references/foo.md', Buffer.from('nested'));
+  assert.equal(entry.filename, 'references/foo.md');
+
+  const attachmentsDir = attachmentsDirFor((await skillRepo.get(skill.name))!.source_path, 'skill');
+  const nestedFile = path.join(attachmentsDir, 'references', 'foo.md');
+  assert.ok(fs.existsSync(nestedFile));
+
+  const listed = await attachRepo.list('skill', skill.folder, skill.name);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]!.filename, 'references/foo.md');
+
+  await attachRepo.remove('skill', skill.folder, skill.name, 'references/foo.md');
+  assert.ok(!fs.existsSync(nestedFile), 'the file itself must be removed');
+  assert.ok(!fs.existsSync(path.join(attachmentsDir, 'references')), 'the now-empty references/ subdirectory must be cleaned up');
+  assert.ok(!fs.existsSync(attachmentsDir), 'attachments/ itself must be removed once fully empty');
 });

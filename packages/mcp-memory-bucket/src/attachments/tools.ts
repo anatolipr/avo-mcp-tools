@@ -24,7 +24,7 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
       kind: kindSchema,
       ...folderSchema,
       doc: z.string().describe('memory doc filename or skill name'),
-      filename: z.string(),
+      filename: z.string().describe('filename to store it under — may include a relative subpath (e.g. "references/foo.md") to nest it inside attachments/'),
       file_path: z.string().describe('local filesystem path to the file to attach'),
     },
     async ({ kind, folder, doc, filename, file_path }: any) => {
@@ -59,7 +59,7 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
   mcp.tool(
     'attachment_update',
     "Replaces an attachment's content in place.",
-    { kind: kindSchema, ...folderSchema, doc: z.string(), filename: z.string(), file_path: z.string() },
+    { kind: kindSchema, ...folderSchema, doc: z.string(), filename: z.string().describe('may include a relative subpath (e.g. "references/foo.md")'), file_path: z.string() },
     async ({ kind, folder, doc, filename, file_path }: any) => {
       try {
         assertFileSizeOk(file_path);

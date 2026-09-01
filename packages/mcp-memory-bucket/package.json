@@ -1,6 +1,6 @@
 {
   "name": "mcp-memory-bucket",
-  "version": "0.10.14",
+  "version": "0.10.15",
   "type": "module",
   "description": "MCP server exposing skill_* (reusable coding patterns) and memory_* (point-in-time working context) tools over a markdown+frontmatter source, cached into SQLite at runtime.",
   "repository": {
