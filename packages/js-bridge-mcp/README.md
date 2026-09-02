@@ -90,137 +90,101 @@ implementing so you don't reinvent the wiring below from scratch.
 **Requires `window.__mcpTools` to already be defined by the page** (see
 above) — this only handles the *connection*, not the tool contract.
 
-Add a small connector module, e.g. `src/mcp-connect.ts`:
+The connect lifecycle itself (probe, connect, rename, leave-old-channel-on-
+switch) is shared infrastructure, served by this package the same way
+`tool-bus.js` is: `src/client/connect.js`, importable by URL at
+`<server>/connect.js`, exporting one factory:
+
+```js
+import { createMcpConnect } from 'http://localhost:8766/connect.js';
+
+const connect = createMcpConnect({ appName: 'myapp' }); // localStorage key + default channel + tool-name label
+connect.init();                                          // connects on page load
+connect.handleConnectClick();                             // wire to a toolbar button
+connect.onConnectionStateChange((state, channel, appLabel) => { /* render a status indicator */ });
+connect.getConnectionState();                              // { state, channel, appLabel } - synchronous
+```
+
+`createMcpConnect` also accepts `defaultChannel` (defaults to `appName`) and
+`beforeConnect` (an optional async hook run once, before the first
+`main.js` import — for a host page that layers extra tool providers onto
+`window.__mcpTools` first, e.g. via `tool-bus.js`; see bulletino-1's
+`mcp-connect.mjs` for a worked example).
+
+If the host page's bundler doesn't support top-level await at its configured
+build target (common with Vite's default target), `connect.js` still has to
+be reached via a dynamic `import()` rather than a static one — wrap it in a
+small synchronous stub that starts `'disconnected'` and swaps in the real
+instance once the import resolves, so a UI component that reads
+`getConnectionState()` synchronously at its own module-eval time still
+works. See htmlpaint.com's or mindfoo's `mcp-connect.js`/`.ts` for the
+pattern (native ESM pages with no bundler, like bulletino-1's
+`mcp-connect.mjs`, can just top-level-`await` it directly).
+
+### Channel:app-name — joining a shared channel
+
+The prompt `handleConnectClick()` shows (and the one in this recipe's own
+UI wiring below) accepts either a bare channel name (`"bug123"`) or
+`"channel:app-name"` (`"bug123:htmlpaint"`) — the part after the colon sets
+`window.__mcpAppName` explicitly, independent of the channel itself. This is
+how several different apps deliberately join the **same** channel (like
+inviting several people into one Slack channel) while each keeps its own
+readable tool-name prefix instead of colliding on the channel name as its
+label: type `bug123:htmlpaint` in one tab and `bug123:bulletino` in another,
+and both land on tenant `bug123` with tools prefixed `htmlpaint__...` /
+`bulletino__...` — see "Multiple tabs on one tenant" below for how that
+prefixing works. Omitting `:app-name` keeps the app's own default label.
+
+### Orphaned channels get cleaned up automatically
+
+Two independent mechanisms, so switching channels (or just closing a tab)
+doesn't leave a dead tenant sitting around for the 2-hour general idle sweep
+to eventually notice:
+
+- **Explicit switch**: when `connect.js` reconnects a tab from channel A to
+  channel B (via `handleConnectClick` or a fresh `init()`), it sends a
+  `leave_channel` message on A's socket before opening the new one on B. The
+  server drops A's tenant immediately if that was its last connection — a
+  no-op if other tabs/apps are still on A.
+- **Tab closed / crashed**: the server can't distinguish a genuine tab close
+  from a brief network drop — both look like the same WebSocket `close`
+  event. So instead it tracks how long a tenant has had *zero* connections
+  and disposes it once that exceeds `TENANT_EMPTY_TIMEOUT_MS` (default
+  15s, separate from and much shorter than `TENANT_IDLE_TIMEOUT_MS`'s 2-hour
+  default) — comfortably above the client's ~2s reconnect retry, so a reload
+  or brief blip never trips it, but an actually-closed tab is gone within
+  seconds rather than hours.
+
+Add a thin connector module, e.g. `src/mcp-connect.ts`, wrapping the shared
+factory shown above:
 
 ```ts
-// js-bridge-mcp has no production deployment - it only ever runs locally,
-// launched via `npx`, so this always targets localhost regardless of where
-// the host app is served from.
-const JSBRIDGE_HOST = 'http://localhost:8766';
+import { createMcpConnect } from 'http://localhost:8766/connect.js';
 
-const CHANNEL_STORAGE_KEY = 'myapp_mcp_channel';
-const DEFAULT_CHANNEL = 'myapp';
-
-function getStoredChannel(): string {
-  try {
-    return localStorage.getItem(CHANNEL_STORAGE_KEY) || DEFAULT_CHANNEL;
-  } catch {
-    return DEFAULT_CHANNEL;
-  }
-}
-
-function setStoredChannel(name: string): void {
-  try {
-    localStorage.setItem(CHANNEL_STORAGE_KEY, name);
-  } catch {
-    // ignore - falls back to DEFAULT_CHANNEL next load
-  }
-}
-
-export type ConnectionState = 'disconnected' | 'connecting' | 'connected';
-
-// Wire these two into whatever reactive primitive your app already uses
-// (a signal/store), so a toolbar button can render off them - see your
-// framework's own equivalent of a Signal/observable/ref.
-let state: ConnectionState = 'disconnected';
-let currentChannel = getStoredChannel();
-const stateListeners = new Set<(state: ConnectionState, channel: string) => void>();
-
-function setState(next: ConnectionState): void {
-  state = next;
-  stateListeners.forEach((cb) => cb(state, currentChannel));
-}
-
-export function onConnectionStateChange(cb: (state: ConnectionState, channel: string) => void): () => void {
-  stateListeners.add(cb);
-  return () => stateListeners.delete(cb);
-}
-
-// Lightweight reachability probe via plain HTTP - main.js exposes no
-// connect/disconnect events to the importer, so this is the only way to
-// know "is js-bridge-mcp up" before (and independent of) actually
-// importing main.js.
-async function probeJsBridgeMcp(): Promise<boolean> {
-  try {
-    const res = await fetch(`${JSBRIDGE_HOST}/main.js`, { method: 'HEAD' });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function connectToChannel(channelName: string): Promise<void> {
-  setState('connecting');
-  (window as any).__mcpAppName = channelName;
-  currentChannel = channelName;
-  setStoredChannel(channelName);
-
-  const reachable = await probeJsBridgeMcp();
-  if (!reachable) {
-    setState('disconnected');
-    return;
-  }
-
-  // A fresh import (unique URL per channel/tenant, since main.js reads
-  // `tenant` once at module-eval time and exposes no way to retarget an
-  // existing connection) - main.js has no export, so this is fire-and-
-  // forget; connect/disconnect status past this point is inferred from the
-  // probe above plus the module having loaded without throwing.
-  await import(
-    /* @vite-ignore */ `${JSBRIDGE_HOST}/main.js?server=${encodeURIComponent(JSBRIDGE_HOST)}&tenant=${encodeURIComponent(channelName)}&_=${Date.now()}`
-  );
-  setState('connected');
-}
-
-// Must match js-bridge-mcp's own isValidChannelName (mcp-tenant-lib/src/tenant.ts)
-// exactly - channel names become the WS `?tenant=` query param, and the
-// server rejects anything outside this set with a 4404 close before a
-// Tenant is ever created.
-const VALID_CHANNEL_NAME = /^[a-zA-Z0-9_-]+$/;
-
-// Click behavior: connect (or reconnect) if not connected; if already
-// connected, prompt to rename the channel.
-export async function handleConnectClick(): Promise<void> {
-  if (state === 'connected') {
-    let next = prompt('Name this connection (used to identify it to agents):', currentChannel);
-    while (next && next !== currentChannel && !VALID_CHANNEL_NAME.test(next)) {
-      next = prompt(
-        `"${next}" isn't a valid channel name - only letters, digits, underscore, and hyphen are allowed (no spaces). Try again:`,
-        next.replace(/[^a-zA-Z0-9_-]+/g, '-')
-      );
-    }
-    if (!next || next === currentChannel) return;
-    await connectToChannel(next);
-    return;
-  }
-  await connectToChannel(currentChannel);
-}
-
-// Connects automatically on page load - no button click required. The
-// button wired up wherever this is imported is only for reconnecting after
-// a failed probe, or renaming the channel.
-export async function initMcpConnect(): Promise<void> {
-  await connectToChannel(currentChannel);
-}
+export const connect = createMcpConnect({ appName: 'myapp' });
 ```
+
+(If your bundler can't top-level-`await` a dynamic import at its configured
+build target, wrap this in the synchronous-stub pattern described above
+instead of a bare re-export — see htmlpaint.com's/mindfoo's `mcp-connect`
+files for the full worked version.)
 
 Wire it into the app's entry point, **after** `window.__mcpTools` is set:
 
 ```ts
 import './mcpbridge'; // sets window.__mcpTools
-import { initMcpConnect } from './mcp-connect';
+import { connect } from './mcp-connect';
 
-initMcpConnect(); // no dev-mode gate - JSBRIDGE_HOST is always localhost
+connect.init(); // no dev-mode gate - JSBRIDGE_HOST is always localhost
 ```
 
-And a status button somewhere in the toolbar, bound to `onConnectionStateChange`
-(or the reactive primitive you wired `setState`/`state` into) and
-`handleConnectClick`:
+And a status button somewhere in the toolbar, bound to
+`connect.onConnectionStateChange` and `connect.handleConnectClick`:
 
 ```
 ⚪ myapp        -- disconnected, click to connect
 🟡 connecting…  -- probing/importing
-🟢 myapp        -- connected on channel "myapp", click to rename
+🟢 myapp        -- connected on channel "myapp", click to rename (or "channel:app-name" to join a shared channel)
 ```
 
 Any MCP client can now reach this page's tools without ever touching

@@ -121,6 +121,19 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
           ? `[ws] resync from connection=${connectionId}: restoring tenant "${tenantId}" state pushed back by the browser`
           : `[ws] resync from connection=${connectionId}: ignored — tenant "${tenantId}" already has state at least as recent`);
       }
+
+      if (msg.type === 'leave_channel') {
+        // The page told us — as opposed to just dropping — that it's done
+        // with this channel (e.g. switching to a different one). Remove
+        // this connection now rather than waiting for the socket's own
+        // 'close' event, so a tenant this was the last connection on
+        // becomes empty (and eligible for startEmptySweep) immediately;
+        // the socket is closed right after, which would otherwise fire the
+        // same removeConnection redundantly — guarded there by connections
+        // no longer having this id.
+        console.error(`[ws] connection ${connectionId} left tenant=${tenantId} (${t.connections.size - 1} connection(s) remaining)`);
+        t.removeConnection(connectionId);
+      }
     });
 
     ws.on('close', (code, reason) => {

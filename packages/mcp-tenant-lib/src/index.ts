@@ -1,4 +1,4 @@
-export { Store, Tenant, tenants, getOrCreateTenant, disposeTenant, startIdleSweep, isValidChannelName, sanitizeChannelName, dashboardEvents } from './tenant.js';
+export { Store, Tenant, tenants, getOrCreateTenant, disposeTenant, startIdleSweep, startEmptySweep, isValidChannelName, sanitizeChannelName, dashboardEvents } from './tenant.js';
 export { buildMcpServer, type RegisterToolsFn, type McpServerIdentity } from './mcp.js';
 export { createHttpServer, type CreateHttpServerOptions } from './http.js';
 export { attachWebSocketServer } from './ws.js';

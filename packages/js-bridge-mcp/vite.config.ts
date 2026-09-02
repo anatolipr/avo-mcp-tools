@@ -2,20 +2,23 @@ import { defineConfig, type Plugin } from 'vite';
 import { copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
-// tool-bus.js is a hand-written vanilla ES module (see src/client/tool-bus.js),
-// not run through vite/tsc - it's shared infrastructure, not app-specific
-// code. emptyOutDir wipes dist/client/ on every build (including each
-// `vite build --watch` rebuild), so it has to be re-copied via closeBundle
-// rather than a one-off npm script step, or a watch rebuild would leave it
-// missing.
-function copyToolBus(): Plugin {
-  const src = resolve(__dirname, 'src/client/tool-bus.js');
-  const dest = resolve(__dirname, 'dist/client/tool-bus.js');
+// tool-bus.js and connect.js are hand-written vanilla ES modules (see
+// src/client/), not run through vite/tsc - shared infrastructure any host
+// page imports by URL, not app-specific code. emptyOutDir wipes dist/client/
+// on every build (including each `vite build --watch` rebuild), so they
+// have to be re-copied via closeBundle rather than a one-off npm script
+// step, or a watch rebuild would leave them missing.
+function copyClientExtras(): Plugin {
+  const files = ['tool-bus.js', 'connect.js'];
   return {
-    name: 'copy-tool-bus',
+    name: 'copy-client-extras',
     closeBundle() {
-      mkdirSync(dirname(dest), { recursive: true });
-      copyFileSync(src, dest);
+      for (const file of files) {
+        const src = resolve(__dirname, 'src/client', file);
+        const dest = resolve(__dirname, 'dist/client', file);
+        mkdirSync(dirname(dest), { recursive: true });
+        copyFileSync(src, dest);
+      }
     },
   };
 }
@@ -24,7 +27,7 @@ function copyToolBus(): Plugin {
 // an unrelated static page via a fixed URL (<script src=".../main.js">),
 // so the output filename must be stable rather than content-hashed.
 export default defineConfig({
-  plugins: [copyToolBus()],
+  plugins: [copyClientExtras()],
   build: {
     outDir: 'dist/client',
     emptyOutDir: true,

@@ -202,24 +202,24 @@ export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSch
       pathname = '/';
     }
 
-    const mountEntry = Object.entries(extraStaticMounts).find(
-      ([prefix]) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+    // A single-file mount (e.g. "/main.js") only ever matches its own exact
+    // path — checked first so a directory mount rooted at "/" (see below)
+    // can't shadow it. A directory mount (no extension on its prefix, e.g.
+    // "/") matches its prefix or anything nested under it.
+    const singleFileMatch = Object.entries(extraStaticMounts).find(
+      ([prefix]) => path.extname(prefix) && pathname === prefix
+    );
+    const dirMatch = Object.entries(extraStaticMounts).find(
+      ([prefix]) => !path.extname(prefix) && (pathname === prefix || pathname.startsWith(`${prefix}/`))
     );
     let filePath: string;
-    if (mountEntry) {
-      const [prefix, dir] = mountEntry;
-      if (path.extname(prefix)) {
-        // A prefix with a file extension (e.g. "/main.js") is a single-file
-        // mount — `dir` is that file's parent directory, and any request
-        // exactly matching `prefix` resolves straight to it, no index.html
-        // fallback. Lets a consumer serve one fixed-URL asset (e.g. an
-        // embed script referenced by other pages as "<server>/main.js")
-        // from a build directory that also happens to hold other files.
-        filePath = path.join(dir, path.basename(prefix));
-      } else {
-        const rest = pathname.slice(prefix.length);
-        filePath = path.join(dir, rest === '' || rest === '/' ? '/index.html' : rest);
-      }
+    if (singleFileMatch) {
+      const [prefix, dir] = singleFileMatch;
+      filePath = path.join(dir, path.basename(prefix));
+    } else if (dirMatch) {
+      const [prefix, dir] = dirMatch;
+      const rest = pathname.slice(prefix.length);
+      filePath = path.join(dir, rest === '' || rest === '/' ? '/index.html' : rest);
     } else {
       filePath = path.join(staticDir, pathname === '/' ? '/index.html' : pathname);
     }

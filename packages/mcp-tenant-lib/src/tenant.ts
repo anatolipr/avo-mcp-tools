@@ -111,6 +111,17 @@ export class Tenant<TSchema, TValues> {
   lastStateChangeAt = 0;
   wsClients: Set<WebSocket>;
   connections = new Map<string, TenantConnection>();
+  /**
+   * Timestamp this tenant's connection count last dropped to zero, or
+   * `undefined` while it has at least one live connection. Distinct from
+   * `lastActivityAt` (bumped by ordinary traffic, drives the multi-hour
+   * general idle sweep) — this backs a much shorter "orphaned channel"
+   * sweep (see startEmptySweep) aimed at the "closed the tab" case: a
+   * channel nobody is connected to anymore, as opposed to one that's just
+   * quiet. Cleared the moment any connection registers again, so a normal
+   * ~2s client reconnect never trips the short timeout.
+   */
+  emptyAt: number | undefined;
   #legacyManifest?: ToolManifestEntry[];
   #legacySummary?: string;
   lastActivityAt: number;
@@ -184,6 +195,7 @@ export class Tenant<TSchema, TValues> {
   registerConnection(id: string, socket: WebSocket) {
     this.connections.set(id, { id, socket, manifest: [], summary: undefined, label: undefined });
     this.wsClients.add(socket);
+    this.emptyAt = undefined;
     notifyDashboard();
   }
 
@@ -214,6 +226,7 @@ export class Tenant<TSchema, TValues> {
     const conn = this.connections.get(id);
     if (conn) this.wsClients.delete(conn.socket);
     this.connections.delete(id);
+    if (this.connections.size === 0) this.emptyAt ??= Date.now();
     this.syncManifestToolRegistries();
     notifyDashboard();
   }
@@ -502,4 +515,35 @@ function startIdleSweep(onSweep: (id: string) => void) {
   return sweepInterval;
 }
 
-export { tenants, getOrCreateTenant, disposeTenant, startIdleSweep, isValidChannelName, sanitizeChannelName };
+/**
+ * Much shorter, separate sweep aimed at "the browser tab closed" rather
+ * than "the connection went quiet" (that's TENANT_IDLE_TIMEOUT_MS/
+ * startIdleSweep above, which looks at traffic on a tenant that still has a
+ * live connection). This one only fires on tenants that have had ZERO
+ * connections for more than TENANT_EMPTY_TIMEOUT_MS — see Tenant.emptyAt.
+ * The server has no direct "tab closed" signal (a clean close and a brief
+ * network drop look identical), so this grace window doubles as the
+ * reconnect-tolerance budget: the client's own retry loop
+ * (client-bridge.ts) reconnects within ~2s of a drop, comfortably under the
+ * default, so a real reconnect always beats the sweep; a channel that stays
+ * empty past it is treated as abandoned.
+ */
+const TENANT_EMPTY_TIMEOUT_MS = envMs('TENANT_EMPTY_TIMEOUT_MS', 15_000);
+const TENANT_EMPTY_SWEEP_INTERVAL_MS = envMs('TENANT_EMPTY_SWEEP_INTERVAL_MS', 5_000);
+
+function startEmptySweep(onSweep: (id: string) => void) {
+  const sweepInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [id, tenant] of tenants) {
+      if (id === 'default') continue;
+      if (tenant.emptyAt !== undefined && now - tenant.emptyAt > TENANT_EMPTY_TIMEOUT_MS) {
+        onSweep(id);
+        disposeTenant(id);
+      }
+    }
+  }, TENANT_EMPTY_SWEEP_INTERVAL_MS);
+  sweepInterval.unref();
+  return sweepInterval;
+}
+
+export { tenants, getOrCreateTenant, disposeTenant, startIdleSweep, startEmptySweep, isValidChannelName, sanitizeChannelName };

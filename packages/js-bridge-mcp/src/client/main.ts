@@ -108,3 +108,17 @@ const socket = connectStateSocket<undefined, undefined>(
   socket.send({ type: 'rename_connection', appLabel: next });
   console.log(`[js-bridge-mcp] renamed connection to "${next}"`);
 };
+
+// Best-effort hook for connect.js (or any other importer that wants to
+// switch this tab to a different channel/tenant): tells the server this
+// socket is intentionally leaving its current channel, right before a
+// fresh main.js import opens a new one on the new channel/tenant. Lets the
+// server drop the old tenant immediately once empty (see leave_channel in
+// mcp-tenant-lib) instead of only after this socket's close is detected.
+// Assigned as a plain global rather than returned, matching this module's
+// no-exports/side-effects-only shape (see the header comment on main.ts's
+// design) - overwritten harmlessly on every re-import since only the most
+// recently opened socket is ever the "current" one worth leaving.
+(window as any).__mcpLeaveChannel = () => {
+  socket.send({ type: 'leave_channel' });
+};

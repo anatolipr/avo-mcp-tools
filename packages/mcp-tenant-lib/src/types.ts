@@ -52,6 +52,21 @@ export interface InterruptMessage {
   type: 'interrupt';
 }
 
+/**
+ * Sent by a page that is intentionally switching this socket off its
+ * current channel (e.g. a connect-flow "rename to a different channel")
+ * before it opens a fresh socket on the new one — distinct from an ordinary
+ * unclean close (network drop, tab crash), which carries no such signal.
+ * Lets the server dispose the old tenant immediately once this was its last
+ * connection, instead of waiting out the empty-tenant grace window (see
+ * Tenant.emptyAt / startEmptySweep in tenant.ts) for a channel the page
+ * itself just told us it's done with. A no-op if other connections remain
+ * on the tenant, or if it has already been disposed.
+ */
+export interface LeaveChannelMessage {
+  type: 'leave_channel';
+}
+
 export interface ToolParamSpec {
   type: 'string' | 'number' | 'boolean';
   description?: string;
@@ -120,4 +135,4 @@ export interface RenameConnectionMessage {
   appLabel: string;
 }
 
-export type ClientMessage = SetMessage | SubmitMessage | InterruptMessage | RegisterToolsMessage | CallResultMessage | RenameConnectionMessage | ResyncMessage;
+export type ClientMessage = SetMessage | SubmitMessage | InterruptMessage | RegisterToolsMessage | CallResultMessage | RenameConnectionMessage | ResyncMessage | LeaveChannelMessage;
