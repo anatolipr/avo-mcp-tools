@@ -71,6 +71,163 @@ repeated `get_embed_snippet` calls within the same session return the same
 tenant id — the page stays connected to whichever session generated the
 snippet it's using.
 
+## Auto-connect on page load (no DevTools paste)
+
+The manual paste above is the right default for a one-off static page, but a
+real app with its own build (Vite/webpack/etc) that wants to stay connected
+across every reload doesn't need a human to paste anything, ever. Instead of
+a session-minted tenant UUID, the app connects itself on boot using a fixed,
+human-readable **channel** name — `js-bridge-mcp`'s channel support
+(`mcp-tenant-lib` 0.3.3+) treats a channel name as the same string-keyed
+tenant id `main.js` already accepts via its `tenant` query param, so any MCP
+client can attach to the exact same live connection later via
+`join_channel("<channel-name>")`, with zero interaction on the page side.
+
+There's also a packaged skill for this exact recipe:
+`.agents/skills/js-bridge-mcp-auto-connect-button/SKILL.md` — load it before
+implementing so you don't reinvent the wiring below from scratch.
+
+**Requires `window.__mcpTools` to already be defined by the page** (see
+above) — this only handles the *connection*, not the tool contract.
+
+Add a small connector module, e.g. `src/mcp-connect.ts`:
+
+```ts
+// js-bridge-mcp has no production deployment - it only ever runs locally,
+// launched via `npx`, so this always targets localhost regardless of where
+// the host app is served from.
+const JSBRIDGE_HOST = 'http://localhost:8766';
+
+const CHANNEL_STORAGE_KEY = 'myapp_mcp_channel';
+const DEFAULT_CHANNEL = 'myapp';
+
+function getStoredChannel(): string {
+  try {
+    return localStorage.getItem(CHANNEL_STORAGE_KEY) || DEFAULT_CHANNEL;
+  } catch {
+    return DEFAULT_CHANNEL;
+  }
+}
+
+function setStoredChannel(name: string): void {
+  try {
+    localStorage.setItem(CHANNEL_STORAGE_KEY, name);
+  } catch {
+    // ignore - falls back to DEFAULT_CHANNEL next load
+  }
+}
+
+export type ConnectionState = 'disconnected' | 'connecting' | 'connected';
+
+// Wire these two into whatever reactive primitive your app already uses
+// (a signal/store), so a toolbar button can render off them - see your
+// framework's own equivalent of a Signal/observable/ref.
+let state: ConnectionState = 'disconnected';
+let currentChannel = getStoredChannel();
+const stateListeners = new Set<(state: ConnectionState, channel: string) => void>();
+
+function setState(next: ConnectionState): void {
+  state = next;
+  stateListeners.forEach((cb) => cb(state, currentChannel));
+}
+
+export function onConnectionStateChange(cb: (state: ConnectionState, channel: string) => void): () => void {
+  stateListeners.add(cb);
+  return () => stateListeners.delete(cb);
+}
+
+// Lightweight reachability probe via plain HTTP - main.js exposes no
+// connect/disconnect events to the importer, so this is the only way to
+// know "is js-bridge-mcp up" before (and independent of) actually
+// importing main.js.
+async function probeJsBridgeMcp(): Promise<boolean> {
+  try {
+    const res = await fetch(`${JSBRIDGE_HOST}/main.js`, { method: 'HEAD' });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function connectToChannel(channelName: string): Promise<void> {
+  setState('connecting');
+  (window as any).__mcpAppName = channelName;
+  currentChannel = channelName;
+  setStoredChannel(channelName);
+
+  const reachable = await probeJsBridgeMcp();
+  if (!reachable) {
+    setState('disconnected');
+    return;
+  }
+
+  // A fresh import (unique URL per channel/tenant, since main.js reads
+  // `tenant` once at module-eval time and exposes no way to retarget an
+  // existing connection) - main.js has no export, so this is fire-and-
+  // forget; connect/disconnect status past this point is inferred from the
+  // probe above plus the module having loaded without throwing.
+  await import(
+    /* @vite-ignore */ `${JSBRIDGE_HOST}/main.js?server=${encodeURIComponent(JSBRIDGE_HOST)}&tenant=${encodeURIComponent(channelName)}&_=${Date.now()}`
+  );
+  setState('connected');
+}
+
+// Must match js-bridge-mcp's own isValidChannelName (mcp-tenant-lib/src/tenant.ts)
+// exactly - channel names become the WS `?tenant=` query param, and the
+// server rejects anything outside this set with a 4404 close before a
+// Tenant is ever created.
+const VALID_CHANNEL_NAME = /^[a-zA-Z0-9_-]+$/;
+
+// Click behavior: connect (or reconnect) if not connected; if already
+// connected, prompt to rename the channel.
+export async function handleConnectClick(): Promise<void> {
+  if (state === 'connected') {
+    let next = prompt('Name this connection (used to identify it to agents):', currentChannel);
+    while (next && next !== currentChannel && !VALID_CHANNEL_NAME.test(next)) {
+      next = prompt(
+        `"${next}" isn't a valid channel name - only letters, digits, underscore, and hyphen are allowed (no spaces). Try again:`,
+        next.replace(/[^a-zA-Z0-9_-]+/g, '-')
+      );
+    }
+    if (!next || next === currentChannel) return;
+    await connectToChannel(next);
+    return;
+  }
+  await connectToChannel(currentChannel);
+}
+
+// Connects automatically on page load - no button click required. The
+// button wired up wherever this is imported is only for reconnecting after
+// a failed probe, or renaming the channel.
+export async function initMcpConnect(): Promise<void> {
+  await connectToChannel(currentChannel);
+}
+```
+
+Wire it into the app's entry point, **after** `window.__mcpTools` is set:
+
+```ts
+import './mcpbridge'; // sets window.__mcpTools
+import { initMcpConnect } from './mcp-connect';
+
+initMcpConnect(); // no dev-mode gate - JSBRIDGE_HOST is always localhost
+```
+
+And a status button somewhere in the toolbar, bound to `onConnectionStateChange`
+(or the reactive primitive you wired `setState`/`state` into) and
+`handleConnectClick`:
+
+```
+⚪ myapp        -- disconnected, click to connect
+🟡 connecting…  -- probing/importing
+🟢 myapp        -- connected on channel "myapp", click to rename
+```
+
+Any MCP client can now reach this page's tools without ever touching
+DevTools: `join_channel("myapp")`, then call tools by name (or their
+prefixed form if more than one connection shares the channel — see
+"Multiple tabs on one tenant" below).
+
 ## Bridge any other project's static HTML to this MCP server
 
 `js-bridge-mcp` doesn't care what the page is — `legacy-page/hello-world.html`
