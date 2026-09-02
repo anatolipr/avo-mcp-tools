@@ -8,7 +8,7 @@ import { openCache } from '../src/store/db.js';
 import { MemoryRepository } from '../src/memory/repository.js';
 import { SkillRepository } from '../src/skills/repository.js';
 import { AttachmentRepository } from '../src/attachments/repository.js';
-import { walkMarkdownFiles } from '../src/store/sync.js';
+import { walkMarkdownFiles, walkSkillSiblingFiles } from '../src/store/sync.js';
 import { registerAttachmentTools } from '../src/attachments/tools.js';
 
 function setupMemoryRepo() {
@@ -228,6 +228,21 @@ test('walkMarkdownFiles: skips attachments directories', () => {
   const found = [...walkMarkdownFiles(dir)];
   assert.ok(found.some((f) => f.endsWith('doc.md')));
   assert.ok(!found.some((f) => f.includes('attachments')));
+});
+
+test('walkSkillSiblingFiles: skips SKILL.md, attachments/, and OS junk files (.DS_Store, Thumbs.db)', () => {
+  const skillDir = fs.mkdtempSync(path.join(os.tmpdir(), 'walk-skill-test-'));
+  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: x\n---\nbody');
+  fs.writeFileSync(path.join(skillDir, '.DS_Store'), 'junk');
+  fs.mkdirSync(path.join(skillDir, 'references'));
+  fs.writeFileSync(path.join(skillDir, 'references', 'foo.md'), '# real sibling content');
+  fs.writeFileSync(path.join(skillDir, 'references', '.DS_Store'), 'junk');
+  fs.writeFileSync(path.join(skillDir, 'references', 'Thumbs.db'), 'junk');
+  fs.mkdirSync(path.join(skillDir, 'attachments'));
+  fs.writeFileSync(path.join(skillDir, 'attachments', 'attached.txt'), 'not a sibling');
+
+  const found = [...walkSkillSiblingFiles(skillDir)];
+  assert.deepEqual(found, [path.join(skillDir, 'references', 'foo.md')], 'must yield only the real sibling file, never SKILL.md, attachments/, or OS junk files');
 });
 
 test('registerAttachmentTools: registers all six attachment tools', () => {

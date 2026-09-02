@@ -11,6 +11,18 @@ import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
 import type { NamedFolder } from '../config.js';
 import { reconcileRenamedAttachmentsDir, isUnderAttachmentsDir } from '../attachments/storage.js';
 
+/**
+ * OS-generated bookkeeping files (macOS's per-directory .DS_Store, Windows' Thumbs.db) that the OS
+ * itself creates/deletes as a side effect of Finder/Explorer merely browsing a folder — never
+ * user/skill content, so they must never be treated as a skill sibling to push/pull/reconcile, and
+ * must never even reach the watcher's onUnmatchedFileChange hook (a stray .DS_Store churning in and
+ * out of an open Finder window would otherwise spam push/trash calls against the remote folder).
+ */
+function isOsJunkFile(filePath: string): boolean {
+  const name = path.basename(filePath);
+  return name === '.DS_Store' || name === 'Thumbs.db';
+}
+
 export interface TableSyncSpec<TFrontmatter> {
   table: 'skills' | 'memory_docs';
   sources: NamedFolder[];
@@ -381,7 +393,7 @@ export function* walkSkillSiblingFiles(skillDir: string): Generator<string> {
     if (entry.isDirectory()) {
       if (isUnderAttachmentsDir(entry.name)) continue;
       yield* walkSkillSiblingFiles(full);
-    } else if (entry.isFile() && entry.name !== 'SKILL.md') {
+    } else if (entry.isFile() && entry.name !== 'SKILL.md' && !isOsJunkFile(full)) {
       yield full;
     }
   }
@@ -390,7 +402,7 @@ export function* walkSkillSiblingFiles(skillDir: string): Generator<string> {
 export function watchSources<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): FSWatcher {
   const watcher = chokidar.watch(
     spec.sources.map((f) => f.path),
-    { ignoreInitial: true, persistent: true, depth: 10, ignored: (filePath) => isUnderAttachmentsDir(filePath) }
+    { ignoreInitial: true, persistent: true, depth: 10, ignored: (filePath) => isUnderAttachmentsDir(filePath) || isOsJunkFile(filePath) }
   );
 
   watcher
