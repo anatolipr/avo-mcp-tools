@@ -29,6 +29,7 @@ export interface SkillFrontmatter {
     owner: string | null;
     status: SkillStatus;
     extends: string | null;
+    group: string | null; // this skill's primary category — distinct from folder (physical location) and tags (cross-cutting labels)
     [key: string]: string | null; // spec allows arbitrary additional string-valued keys
   };
   deprecated?: boolean; // independent of metadata.status; defaults to false

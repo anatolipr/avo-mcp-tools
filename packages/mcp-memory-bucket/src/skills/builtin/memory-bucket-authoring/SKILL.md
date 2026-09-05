@@ -23,6 +23,7 @@ metadata:
   status: stable
   extends: null
 deprecated: false
+created_at: '2026-08-29T21:51:13.402Z'
 body: >-
   ## Two namespaces, two different jobs
 
@@ -126,11 +127,38 @@ body: >-
 
   - `tags`, `trigger_phrases` — arrays of extra keywords `skill_list`'s
     keyword search matches against, beyond `description` itself.
-  - `owner`, `status` (`stable`/`beta`/`unreviewed`), `extends` — stored
-    under `metadata` in the frontmatter (a string-keyed map the standard
-    reserves for exactly this kind of client-specific extension). `status`
-    defaults to `unreviewed` if omitted, so low-trust content doesn't read
-    as equivalent to a reviewed pattern.
+  - `owner`, `status` (`stable`/`beta`/`unreviewed`), `extends`, `group` —
+    stored under `metadata` in the frontmatter (a string-keyed map the
+    standard reserves for exactly this kind of client-specific extension).
+    `status` defaults to `unreviewed` if omitted, so low-trust content
+    doesn't read as equivalent to a reviewed pattern.
+
+  ### group vs. tags vs. folder
+
+
+  Three different axes of organization exist for a skill, easy to
+  conflate:
+
+
+  - **`folder`** — WHERE the skill physically lives on disk (which
+    configured skill source it's under). About storage location, not
+    categorization.
+  - **`tags`** — cross-cutting labels. A skill can carry several; they're
+    for keyword search (`skill_list`/`skill_search`), not for picking a
+    primary category.
+  - **`group`** (`metadata.group`) — the skill's single primary category,
+    e.g. `"frontend"` or `"deployment"`. Unlike tags, a skill has at most
+    one group — use it for a coarse, single-value cluster (the web UI
+    clusters skills by group, the way it already clusters memory docs by
+    `key`); reach for tags instead when a skill genuinely spans several
+    categories.
+
+  `skill_rename_group(old_group, new_group)` renames a group across every
+
+  skill currently in it in one call — for fixing a typo or merging two
+
+  group names without hand-editing each skill.
+
 
   Call `skill_create(name, description, body, ...)`. Pass `folder` to place
 
@@ -233,15 +261,26 @@ body: >-
   ```
 
 
-  Call `memory_create(key, key_type, doc_type, description, body, ...)`.
+  Call `memory_create(filename, key, key_type, doc_type, description, body,
+  ...)`.
 
-  One key commonly accumulates several docs over time — a plan, then a
+  `filename` is the doc's own on-disk identity — pick something descriptive,
 
-  spec, then SQL from a debugging session, then a session summary — all
+  e.g. `"RMXS-14-Bulk-edit-plan.md"`; a doc-type suffix like `-PLAN`/`-SPEC`/
 
-  retrievable together via `memory_get(key)`, or narrowed with
+  `-SQL`/`-DISCOVERY`/`-SESSION-SUMMARY` helps once a key has several docs
 
-  `memory_get(key, doc_type)`.
+  (`.md` is appended automatically if omitted, and a colliding filename is
+
+  auto-suffixed, never silently overwritten). `key` is a separate grouping
+
+  label, not the filename — one key commonly accumulates several docs over
+
+  time — a plan, then a spec, then SQL from a debugging session, then a
+
+  session summary — all retrievable together via `memory_get(key)`, or
+
+  narrowed with `memory_get(key, doc_type)`.
 
 
   **Never infer the key from environment state** (branch name, current
@@ -251,34 +290,9 @@ body: >-
   conversation, or ask if it's genuinely unclear.
 
 
-  **Tags are for cross-cutting labels, not grouping.** `key` is the one and
+  Picked a bad filename? `memory_rename(folder?, filename, new_filename)`
 
-  only grouping concept for memory docs — never add a doc's own key (or a
-
-  related doc's key) as a tag to link things together; that's what `key`
-
-  already does. Use `tags` for labels that cut across many keys (e.g.
-
-  `viz-team`, `datalab`), not as a second grouping axis.
-
-
-  **Before creating a doc under a `ticket`-type key, check for an existing
-
-  near-match first** — e.g. `memory_list("RMXS-15")` or `memory_search` —
-
-  rather than writing a fresh key that only differs in punctuation or
-
-  casing (`RMXS15` vs `RMXS-15` vs `Rmxs 15` are three different keys to
-
-  this system, even though they're clearly meant to be the same ticket).
-
-  Reuse the existing key's exact casing/format if one is found.
-
-  `memory_create`'s response includes a `key_warning` field if it detects a
-
-  likely near-duplicate after the fact — treat that as a signal to double
-
-  check, not to ignore.
+  renames the file in place — frontmatter, body, and attachments untouched.
 
 
   ### Saving a session
@@ -311,6 +325,19 @@ body: >-
     tools when you don't know (or don't care) which bucket something
     landed in. All three return snippets, not full bodies — follow up with
     `skill_get`/`memory_get` (or the bulk variants below) for the rest.
+  - **`search_by_date(start, end)`** — finds skills and memory docs whose
+    **body text mentions a date, or whose `created_at` falls,** within an
+    inclusive ISO `YYYY-MM-DD` range, e.g. "what did I work on this week"
+    once you've resolved "this week" into concrete start/end dates
+    yourself (it does not parse natural language). Both a date written
+    inside the content and the doc's `created_at` count as candidate
+    matches — whichever is earliest wins, no priority between them. Like
+    `bucket_search`, it covers both skills and memory docs at once (pass
+    `table` to restrict to one). Returns a highlighted snippet around the
+    matched date (or a note that it matched via `created_at`, when the
+    date isn't literally in the body), not the full body. `created_at` is
+    indexed as the server's local calendar date, so "today"/"this week"
+    ranges built from local time just work — no timezone conversion needed.
   - **`skill_get`/`memory_get`** — exact-key lookup when you already know
     the name/key. `memory_get` also falls back to a filename-substring match
     when no key matches — handy for a bare ticket ref (e.g. "RMXS-13") that
@@ -332,15 +359,15 @@ body: >-
 
 
   - `skill_bulk_get`/`memory_bulk_get` — fetch full bodies for a list of
-    names/(folder, filename) pairs in one call (memory's is by filename,
-    not key — search results return filenames, not keys).
+    names/ids in one call (memory's is by **id**, not key — search results
+    return ids).
   - `skill_bulk_create`/`memory_bulk_create` — create several docs in one
     call, each entry shaped like the singular `*_create` args.
   - `skill_bulk_update`/`memory_bulk_update` — apply the same change
     (add/remove tags, flip status, etc.) across many docs at once, e.g. to
     a batch found via search.
   - `skill_bulk_delete`/`memory_bulk_delete` — delete several docs by
-    name/filename in one call.
+    name/id in one call.
   - `relocate_bulk` — same idea for `relocate`, one entry per file.
 
 
@@ -479,11 +506,32 @@ Optional frontmatter this project also supports:
 - `license`, `compatibility` — standard fields, rarely needed.
 - `tags`, `trigger_phrases` — arrays of extra keywords `skill_list`'s
   keyword search matches against, beyond `description` itself.
-- `owner`, `status` (`stable`/`beta`/`unreviewed`), `extends` — stored
-  under `metadata` in the frontmatter (a string-keyed map the standard
-  reserves for exactly this kind of client-specific extension). `status`
-  defaults to `unreviewed` if omitted, so low-trust content doesn't read
-  as equivalent to a reviewed pattern.
+- `owner`, `status` (`stable`/`beta`/`unreviewed`), `extends`, `group` —
+  stored under `metadata` in the frontmatter (a string-keyed map the
+  standard reserves for exactly this kind of client-specific extension).
+  `status` defaults to `unreviewed` if omitted, so low-trust content
+  doesn't read as equivalent to a reviewed pattern.
+
+### group vs. tags vs. folder
+
+Three different axes of organization exist for a skill, easy to conflate:
+
+- **`folder`** — WHERE the skill physically lives on disk (which
+  configured skill source it's under). About storage location, not
+  categorization.
+- **`tags`** — cross-cutting labels. A skill can carry several; they're
+  for keyword search (`skill_list`/`skill_search`), not for picking a
+  primary category.
+- **`group`** (`metadata.group`) — the skill's single primary category,
+  e.g. `"frontend"` or `"deployment"`. Unlike tags, a skill has at most
+  one group — use it for a coarse, single-value cluster (the web UI
+  clusters skills by group, the way it already clusters memory docs by
+  `key`); reach for tags instead when a skill genuinely spans several
+  categories.
+
+`skill_rename_group(old_group, new_group)` renames a group across every
+skill currently in it in one call — for fixing a typo or merging two
+group names without hand-editing each skill.
 
 Call `skill_create(name, description, body, ...)`. Pass `folder` to place
 it under a subdirectory (e.g. `folder: "frontend"`) if the skill source

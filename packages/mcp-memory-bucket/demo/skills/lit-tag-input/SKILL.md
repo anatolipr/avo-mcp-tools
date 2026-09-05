@@ -34,6 +34,7 @@ metadata:
   owner: personal
   status: stable
   extends: null
+  group: anatoli
 created_at: '2026-08-19T14:38:23.302Z'
 body: >-
   ## Tag input in Lit
@@ -457,6 +458,10 @@ body: >-
     background: transparent;
   }
 
+  .create-option {
+    font-style: italic;
+  }
+
   ```
 
 
@@ -467,6 +472,10 @@ body: >-
   listbox/option roles on the menu items — is identical to
 
   [[lit-autocomplete-combobox]] and isn't repeated here.
+status: stable
+owner: personal
+extends: null
+group: anatoli
 ---
 ## Tag input in Lit
 

@@ -77,7 +77,7 @@ export interface TableSyncSpec<TFrontmatter> {
 // `paused` is deliberately absent from both lists: it's a local-only cache column (see
 // SkillRepository/MemoryRepository#setPaused) that never round-trips through frontmatter, so a
 // file add/change/rescan must never overwrite it via the INSERT/ON CONFLICT UPDATE below.
-const skillColumns = ['id', 'description', 'owner', 'status', 'tags', 'trigger_phrases', 'extends', 'deprecated', 'created_at', 'attachments'];
+const skillColumns = ['id', 'description', 'owner', 'status', 'tags', 'trigger_phrases', 'extends', 'skill_group', 'deprecated', 'created_at', 'attachments'];
 const memoryColumns = ['key', 'key_type', 'description', 'doc_type', 'tags', 'status', 'related_to', 'deprecated', 'created_at', 'attachments'];
 
 export function skillSyncSpec(sources: NamedFolder[]): TableSyncSpec<SkillFrontmatter> {
@@ -104,6 +104,7 @@ export function skillSyncSpec(sources: NamedFolder[]): TableSyncSpec<SkillFrontm
       tags: JSON.stringify(fm.tags ?? []),
       trigger_phrases: JSON.stringify(fm.trigger_phrases ?? []),
       extends: fm.metadata?.extends ?? null,
+      skill_group: fm.metadata?.group ?? null,
       deprecated: fm.deprecated ? 1 : 0,
       created_at: fm.created_at ?? new Date(mtimeMs).toISOString(),
       attachments: fm.attachments ? JSON.stringify(fm.attachments) : null,
@@ -263,7 +264,7 @@ export function upsertFile<TFrontmatter>(
     String(row.description ?? ''),
     parsed.body,
     flattenTags(String(row.tags ?? '[]')),
-    String(row.key ?? ''),
+    String(row.key ?? row.skill_group ?? ''),
     path.basename(filePath)
   );
 

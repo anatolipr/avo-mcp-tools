@@ -25,6 +25,7 @@ metadata:
   owner: personal
   status: stable
   extends: null
+  group: anatoli
 created_at: '2026-08-19T16:39:13.490Z'
 body: >-
   ## Making dropdowns
@@ -597,6 +598,16 @@ body: >-
         constructor.
   - [ ] Tested with more than 1–2 instances of the trigger on screen at once
         (see the Chromium bug above — it doesn't show up at low counts).
+  - [ ] The base (non-fallback) `.menu`/`.suggestions` rule pins only ONE
+        edge (`top: anchor(bottom)`, not also `bottom: ...`) — see "Start
+        here: the plain default" and "A bug this project actually hit."
+        Reserve dual-edge pinning for the "flip AND shrink" section, and
+        only after confirming real clipping.
+  - [ ] The visual gap between anchor and menu is set via
+        `.menu:popover-open { margin-top: ...px; }`, not baked into a
+        `@position-try` block's `margin-top`/`margin-bottom` — a gap that
+        only exists inside a fallback silently disappears on the base
+        (non-flipped) position.
   - [ ] Spot-checked in Safari and Firefox, not just Chrome — this project's
         implementation has been manually confirmed working in all three.
   - [ ] If open/closed state is synced through an avosignals `Signal`
@@ -615,6 +626,10 @@ body: >-
         reference.md first (clicking the trigger while open can fire native
         light-dismiss *before* your handler runs, so a naive
         `togglePopover()` call ends up reopening it).
+status: stable
+owner: personal
+extends: null
+group: anatoli
 ---
 ## Making dropdowns
 

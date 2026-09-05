@@ -21,6 +21,8 @@ metadata:
   owner: personal
   status: stable
   extends: null
+  group: anatoli
+created_at: '2026-08-18T15:03:38.941Z'
 body: |-
   ## When to use
 
@@ -135,6 +137,10 @@ body: |-
   component trees, or anything with many independently-changing pieces of
   state. `SignalWatcher` is the only integration point needed to make a
   plain `LitElement` reactive to signals; everything else is standard Lit.
+status: stable
+owner: personal
+extends: null
+group: anatoli
 ---
 ## When to use
 

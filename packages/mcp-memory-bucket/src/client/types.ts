@@ -13,6 +13,7 @@ export interface Entry {
   id: string;
   name: string; // skill name, or memory doc's own filename — the primary title
   key: string | null; // memory docs only — the grouping label, shown as a secondary line
+  group: string | null; // skills only — the grouping label, shown as a secondary line (mirrors memory's key)
   description: string;
   tags: string[];
   status: string;
@@ -34,6 +35,7 @@ export interface EntryDetail {
   doc_type?: string; // memory only
   related_to?: string | null; // memory only
   extends?: string | null; // skills only
+  group?: string | null; // skills only — this skill's primary category
   trigger_phrases?: string[]; // skills only
   description: string;
   tags: string[];
@@ -64,6 +66,7 @@ export interface Facets {
   doc_types: string[];
   key_types: string[];
   folders: string[];
+  groups: string[]; // skills only — distinct frontmatter.metadata.group values in use
 }
 
 export interface Folder {

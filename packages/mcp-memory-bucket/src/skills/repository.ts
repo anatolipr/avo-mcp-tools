@@ -25,6 +25,7 @@ interface SkillRow {
   tags: string; // JSON
   trigger_phrases: string; // JSON
   extends: string | null;
+  skill_group: string | null;
   source_path: string;
   folder: string;
   deprecated: number;
@@ -40,7 +41,7 @@ function rowToDoc(row: SkillRow): SkillDoc {
     description: row.description,
     tags: JSON.parse(row.tags),
     trigger_phrases: JSON.parse(row.trigger_phrases),
-    metadata: { owner: row.owner, status: row.status, extends: row.extends },
+    metadata: { owner: row.owner, status: row.status, extends: row.extends, group: row.skill_group },
     deprecated: !!row.deprecated,
     paused: !!row.paused,
     created_at: row.created_at ?? undefined,
@@ -59,6 +60,7 @@ export interface SkillListItem {
   tags: string[];
   folder: string;
   paused: boolean;
+  group: string | null;
 }
 
 export class SkillRepository {
@@ -194,6 +196,14 @@ export class SkillRepository {
     return [...this.remoteFolders];
   }
 
+  /** Distinct, non-empty group values currently in use, alphabetized — backs the web UI's group autocomplete/facet list. */
+  listGroups(): string[] {
+    const rows = this.db.prepare(`SELECT DISTINCT skill_group FROM skills WHERE skill_group IS NOT NULL AND skill_group != '' ORDER BY skill_group`).all() as Array<{
+      skill_group: string;
+    }>;
+    return rows.map((r) => r.skill_group);
+  }
+
   /** Same as listFolders(), but tags each entry with whether it's a remote (folderfoo) source — for the web UI's folder list, e.g. to render remote folders in a distinct color. Excludes remote folders that don't match the current login (see identity.ts). */
   listFoldersWithRemoteInfo(): Array<NamedFolder & { remote: boolean }> {
     return this.listFolders()
@@ -320,12 +330,16 @@ export class SkillRepository {
   }
 
   /** `includePaused` defaults to false: paused skills are hidden from discovery (see setPaused). */
-  list(query?: string, folder?: string, opts: { includePaused?: boolean } = {}): SkillListItem[] {
+  list(query?: string, folder?: string, opts: { includePaused?: boolean; group?: string } = {}): SkillListItem[] {
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (folder) {
       conditions.push('folder = ?');
       params.push(folder);
+    }
+    if (opts.group) {
+      conditions.push('skill_group = ?');
+      params.push(opts.group);
     }
     if (!opts.includePaused) {
       conditions.push('paused = 0');
@@ -337,8 +351,8 @@ export class SkillRepository {
     }
     const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
     const rows = this.db
-      .prepare(`SELECT id, description, owner, status, tags, trigger_phrases, folder, paused FROM skills${where}`)
-      .all(...params) as Array<Pick<SkillRow, 'id' | 'description' | 'owner' | 'status' | 'tags' | 'trigger_phrases' | 'folder' | 'paused'>>;
+      .prepare(`SELECT id, description, owner, status, tags, trigger_phrases, folder, paused, skill_group FROM skills${where}`)
+      .all(...params) as Array<Pick<SkillRow, 'id' | 'description' | 'owner' | 'status' | 'tags' | 'trigger_phrases' | 'folder' | 'paused' | 'skill_group'>>;
 
     const needle = query?.trim().toLowerCase();
     const items = rows.map((r) => ({
@@ -350,6 +364,7 @@ export class SkillRepository {
       triggerPhrases: JSON.parse(r.trigger_phrases) as string[],
       folder: r.folder,
       paused: !!r.paused,
+      group: r.skill_group,
     }));
 
     const filtered = needle
@@ -377,6 +392,7 @@ export class SkillRepository {
       status?: SkillStatus;
       owner?: string;
       tag?: string;
+      group?: string;
       limit?: number;
       offset?: number;
       /** Defaults to false: paused skills are hidden from discovery (see setPaused). */
@@ -391,7 +407,7 @@ export class SkillRepository {
     shared_owner?: string;
     shared_role?: 'member' | 'editor';
   }> {
-    const { folder, status, owner, tag, limit = 20, offset = 0, includePaused = false } = opts;
+    const { folder, status, owner, tag, group, limit = 20, offset = 0, includePaused = false } = opts;
     const conditions: string[] = [];
     const params: unknown[] = [sanitizeFtsQuery(query)];
     if (folder) {
@@ -409,6 +425,10 @@ export class SkillRepository {
     if (tag) {
       conditions.push('EXISTS (SELECT 1 FROM json_each(s.tags) WHERE value = ?)');
       params.push(tag);
+    }
+    if (group) {
+      conditions.push('s.skill_group = ?');
+      params.push(group);
     }
     if (!includePaused) {
       conditions.push('s.paused = 0');
@@ -525,6 +545,7 @@ export class SkillRepository {
       owner?: string | null;
       status?: SkillStatus;
       extends?: string | null;
+      group?: string | null;
     },
     body: string,
     subfolder?: string,
@@ -552,6 +573,7 @@ export class SkillRepository {
         owner: frontmatter.owner ?? null,
         status: frontmatter.status ?? 'unreviewed',
         extends: frontmatter.extends ?? null,
+        group: frontmatter.group ?? null,
       },
       deprecated: false,
       created_at: new Date().toISOString(),
@@ -590,6 +612,7 @@ export class SkillRepository {
         owner?: string | null;
         status?: SkillStatus;
         extends?: string | null;
+        group?: string | null;
       };
       body: string;
       subfolder?: string;
@@ -619,6 +642,7 @@ export class SkillRepository {
       owner?: string | null;
       status?: SkillStatus;
       extends?: string | null;
+      group?: string | null;
     },
     body?: string,
     bodyEdits?: BodyEdit[],
@@ -644,6 +668,7 @@ export class SkillRepository {
         owner: frontmatter?.owner !== undefined ? frontmatter.owner : existing.metadata.owner,
         status: frontmatter?.status ?? existing.metadata.status,
         extends: frontmatter?.extends !== undefined ? frontmatter.extends : existing.metadata.extends,
+        group: frontmatter?.group !== undefined ? frontmatter.group : existing.metadata.group,
       },
     };
     const newBody = bodyEdits ? applyBodyEdits(existing.body, bodyEdits).body : (body ?? existing.body);
@@ -728,6 +753,7 @@ export class SkillRepository {
       owner?: string | null;
       status?: SkillStatus;
       extends?: string | null;
+      group?: string | null;
       deprecated?: boolean;
     }
   ): Promise<Array<{ name: string; ok: boolean; error?: string }>> {
@@ -745,6 +771,7 @@ export class SkillRepository {
           owner: changes.owner,
           status: changes.status,
           extends: changes.extends,
+          group: changes.group,
           ...(changes.deprecated !== undefined && !builtin ? { deprecated: changes.deprecated } : {}),
         });
         results.push({ name, ok: true });
@@ -753,6 +780,18 @@ export class SkillRepository {
       }
     }
     return results;
+  }
+
+  /**
+   * Renames a group across every skill currently in it — the group-axis counterpart to
+   * MemoryRepository's key rename, since a group has no single owning file to rename the way a
+   * memory doc's key does. Scans every visible skill's current group rather than requiring the
+   * caller to enumerate names first. Returns per-skill results so one bad skill doesn't abort the
+   * rest of the batch; a `new_group` of `null`/`''` clears the group instead of renaming it.
+   */
+  async renameGroup(oldGroup: string, newGroup: string | null): Promise<Array<{ name: string; ok: boolean; error?: string }>> {
+    const names = this.list(undefined, undefined, { group: oldGroup, includePaused: true }).map((s) => s.name);
+    return this.bulkUpdate(names, { group: newGroup || null });
   }
 
   /**

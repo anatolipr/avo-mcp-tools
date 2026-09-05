@@ -27,6 +27,7 @@ metadata:
   owner: personal
   status: unreviewed
   extends: making-dropdowns
+  group: anatoli
 created_at: '2026-08-20T15:00:06.936Z'
 body: >-
   ## Making hover tooltips
@@ -353,8 +354,10 @@ body: >-
         in `static styles`, and the primary position + `position-try-fallbacks`
         list are built from the `placement` property and set inline per
         instance — not hardcoded to one direction.
+status: unreviewed
 owner: personal
 extends: making-dropdowns
+group: anatoli
 ---
 ## Making hover tooltips
 

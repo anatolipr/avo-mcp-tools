@@ -16,6 +16,7 @@ export function openCache(dbPath: string): Database.Database {
       tags TEXT NOT NULL,             -- JSON array
       trigger_phrases TEXT NOT NULL,  -- JSON array
       extends TEXT,
+      skill_group TEXT,               -- this skill's primary category, distinct from folder/tags ("group" is a SQL reserved word)
       source_path TEXT NOT NULL UNIQUE, -- path to SKILL.md
       folder TEXT NOT NULL DEFAULT '',  -- name of the configured folder this file lives under
       deprecated INTEGER NOT NULL DEFAULT 0,
@@ -54,7 +55,7 @@ export function openCache(dbPath: string): Database.Database {
       description,
       body,
       tags,
-      key,
+      key,             -- memory docs' key; also holds a skill's group (skills never had a key, so this is safe to share)
       filename,
       tokenize = 'porter unicode61'
     );
@@ -101,6 +102,7 @@ export function openCache(dbPath: string): Database.Database {
     ['paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['created_at', 'TEXT'],
     ['attachments', 'TEXT'],
+    ['skill_group', 'TEXT'],
   ]);
   ensureColumns(db, 'memory_docs', [
     ['folder', "TEXT NOT NULL DEFAULT ''"],
@@ -211,12 +213,13 @@ function backfillSearchIndex(db: Database.Database): void {
   const { count: indexed } = db.prepare(`SELECT COUNT(*) as count FROM search_index`).get() as { count: number };
   if (indexed > 0) return;
 
-  const skillRows = db.prepare(`SELECT id, folder, description, body, tags FROM skills`).all() as Array<{
+  const skillRows = db.prepare(`SELECT id, folder, description, body, tags, skill_group FROM skills`).all() as Array<{
     id: string;
     folder: string;
     description: string;
     body: string;
     tags: string;
+    skill_group: string | null;
   }>;
   const memoryRows = db.prepare(`SELECT source_path AS id, key, description, body, tags FROM memory_docs`).all() as Array<{
     id: string;
@@ -232,7 +235,7 @@ function backfillSearchIndex(db: Database.Database): void {
   );
   const insertAll = db.transaction(() => {
     for (const row of skillRows) {
-      insert.run('skills', row.id, row.folder, row.description, row.body, flattenTags(row.tags), '', '');
+      insert.run('skills', row.id, row.folder, row.description, row.body, flattenTags(row.tags), row.skill_group ?? '', '');
     }
     for (const row of memoryRows) {
       // row.id is source_path (see the SELECT above) — filename is its basename.

@@ -22,14 +22,16 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       ? {
           query: z.string().optional(),
           folder: z.string().optional().describe(`filter to one folder: ${folderNames}`),
+          group: z.string().optional().describe('filter to skills in this group (frontmatter.metadata.group) — a category distinct from folder and tags'),
           include_paused: z.boolean().optional().describe('include paused skills, which are hidden by default (see skill_set_paused)'),
         }
       : {
           query: z.string().optional(),
+          group: z.string().optional().describe('filter to skills in this group (frontmatter.metadata.group) — a category distinct from folder and tags'),
           include_paused: z.boolean().optional().describe('include paused skills, which are hidden by default (see skill_set_paused)'),
         },
-    async ({ query, folder, include_paused }: { query?: string; folder?: string; include_paused?: boolean }) => {
-      const items = repo.list(query, folder, { includePaused: include_paused });
+    async ({ query, folder, group, include_paused }: { query?: string; folder?: string; group?: string; include_paused?: boolean }) => {
+      const items = repo.list(query, folder, { includePaused: include_paused, group });
       return { content: [{ type: 'text', text: JSON.stringify(items, null, 2) }] };
     }
   );
@@ -42,14 +44,15 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       status: statusSchema(SKILL_STATUS_DEFAULTS).optional(),
       owner: z.string().optional(),
       tag: z.string().optional(),
+      group: z.string().optional().describe('filter to skills in this group (frontmatter.metadata.group) — a category distinct from folder and tags'),
       limit: z.number().int().positive().max(100).optional(),
       offset: z.number().int().nonnegative().optional(),
       include_paused: z.boolean().optional().describe('include paused skills, which are hidden by default (see skill_set_paused)'),
       ...(multiFolder ? { folder: z.string().optional().describe(`filter to one folder: ${folderNames}`) } : {}),
     },
-    async ({ query, status, owner, tag, limit, offset, folder, include_paused }: any) => {
+    async ({ query, status, owner, tag, group, limit, offset, folder, include_paused }: any) => {
       try {
-        const hits = repo.search(query, { folder, status, owner, tag, limit, offset, includePaused: include_paused });
+        const hits = repo.search(query, { folder, status, owner, tag, group, limit, offset, includePaused: include_paused });
         return { content: [{ type: 'text', text: JSON.stringify(hits, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
@@ -67,10 +70,11 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       owner: z.string().nullable().optional(),
       status: statusSchema(SKILL_STATUS_DEFAULTS).optional(),
       extends: z.string().nullable().optional(),
+      group: z.string().nullable().optional().describe('sets group (frontmatter.metadata.group) uniformly for all named skills; pass null to clear it'),
       deprecated: z.boolean().optional().describe('marks skills as deprecated (or un-deprecates when false) — independent of status'),
     },
-    async ({ names, add_tags, remove_tags, owner, status, extends: extendsId, deprecated }: any) => {
-      const results = await repo.bulkUpdate(names, { add_tags, remove_tags, owner, status, extends: extendsId, deprecated });
+    async ({ names, add_tags, remove_tags, owner, status, extends: extendsId, group, deprecated }: any) => {
+      const results = await repo.bulkUpdate(names, { add_tags, remove_tags, owner, status, extends: extendsId, group, deprecated });
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -119,13 +123,19 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       tags: z.array(z.string()).optional(),
       trigger_phrases: z.array(z.string()).optional(),
       extends: z.string().optional().describe('reserved for a future overlay mechanism — stored in frontmatter.metadata'),
+      group: z
+        .string()
+        .optional()
+        .describe(
+          'this skill\'s primary category, stored in frontmatter.metadata.group — distinct from folder (physical location) and tags (cross-cutting labels): pick the one group this skill belongs to, e.g. "frontend" or "deployment"'
+        ),
       subfolder: z.string().optional().describe('optional subdirectory under the skill folder, e.g. "frontend"'),
       ...(multiFolder ? { folder: z.string().describe(`which configured skill folder to write into: ${folderNames}`) } : {}),
     },
-    async ({ name, description, body, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId, subfolder, folder }: any) => {
+    async ({ name, description, body, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId, group, subfolder, folder }: any) => {
       try {
         const doc = await repo.create(
-          { name, description, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId },
+          { name, description, license, compatibility, owner, status, tags, trigger_phrases, extends: extendsId, group },
           body,
           subfolder,
           folder
@@ -148,6 +158,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     tags: z.array(z.string()).optional(),
     trigger_phrases: z.array(z.string()).optional(),
     extends: z.string().optional(),
+    group: z.string().optional().describe('this skill\'s primary category — stored in frontmatter.metadata.group'),
     subfolder: z.string().optional(),
     ...(multiFolder ? { folder: z.string().describe(`which configured skill folder to write into: ${folderNames}`) } : {}),
   });
@@ -169,6 +180,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
             tags: e.tags,
             trigger_phrases: e.trigger_phrases,
             extends: e.extends,
+            group: e.group,
           },
           body: e.body,
           subfolder: e.subfolder,
@@ -194,6 +206,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       tags: z.array(z.string()).optional(),
       trigger_phrases: z.array(z.string()).optional(),
       extends: z.string().optional(),
+      group: z.string().nullable().optional().describe('this skill\'s primary category — stored in frontmatter.metadata.group; pass null to clear it'),
       deprecated: z.boolean().optional().describe('marks the skill as deprecated (or un-deprecates when false) — independent of status'),
       ...(multiFolder ? { folder: z.string().optional().describe(`disambiguates when the name exists in more than one folder: ${folderNames}`) } : {}),
     },
@@ -256,6 +269,19 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
     },
     async ({ entries }: any) => {
       const results = await repo.bulkRename(entries);
+      return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+    }
+  );
+
+  mcp.tool(
+    'skill_rename_group',
+    'Renames a group across every skill currently in it (frontmatter.metadata.group), e.g. to fix a typo or merge two group names — the group-axis counterpart to skill_rename, which renames one skill\'s own name. Finds every skill in old_group itself, so you don\'t need to list them. Pass new_group as null (or omit) to clear the group instead of renaming it. Returns per-skill success/failure so one bad skill doesn\'t abort the rest of the batch.',
+    {
+      old_group: z.string().describe('the current group name to rename'),
+      new_group: z.string().nullable().optional().describe('the new group name; omit or pass null to clear the group from every matching skill instead'),
+    },
+    async ({ old_group, new_group }: any) => {
+      const results = await repo.renameGroup(old_group, new_group ?? null);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );

@@ -20,6 +20,8 @@ metadata:
   owner: personal
   status: stable
   extends: null
+  group: anatoli
+created_at: '2026-08-18T15:04:57.464Z'
 body: >-
   # Domain Modeling
 
@@ -158,6 +160,10 @@ body: >-
 
   If any of the three is missing, skip the ADR. Use the format in
   [ADR-FORMAT.md](./ADR-FORMAT.md).
+status: stable
+owner: personal
+extends: null
+group: anatoli
 ---
 # Domain Modeling
 

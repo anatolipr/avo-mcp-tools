@@ -26,6 +26,8 @@ metadata:
   owner: personal
   status: stable
   extends: null
+  group: anatoli
+created_at: '2026-08-18T15:01:55.958Z'
 body: >-
   ## Resizable split pane in Lit
 
@@ -227,7 +229,10 @@ body: >-
         selection while dragging.
   - [ ] Persisted value (if any) is written once in `#onDragEnd`, not on
         every `pointermove`.
+status: stable
 owner: personal
+extends: null
+group: anatoli
 ---
 ## Resizable split pane in Lit
 

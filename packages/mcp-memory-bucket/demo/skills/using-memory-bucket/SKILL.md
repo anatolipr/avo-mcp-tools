@@ -21,6 +21,8 @@ metadata:
   owner: personal
   status: stable
   extends: null
+  group: anatoli
+created_at: '2026-08-18T15:01:54.399Z'
 body: >-
   ## What this server gives you
 
@@ -102,7 +104,10 @@ body: >-
 
   Roots themselves are added/removed only through the web UI (`bucket_open_ui`),
   not through any tool call.
+status: stable
 owner: personal
+extends: null
+group: anatoli
 ---
 ## What this server gives you
 

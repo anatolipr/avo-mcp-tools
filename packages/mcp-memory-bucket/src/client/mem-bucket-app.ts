@@ -1334,6 +1334,7 @@ export class MemBucketApp extends LitElement {
           .selectedIds=${this.#selectedIds.value}
           .onToggleSelect=${(e: Entry) => this.#onToggleSelect(e)}
           .onKeyClick=${(key: string) => this.#setSearch(key)}
+          .onGroupClick=${(group: string) => this.#setSearch(group)}
         ></result-list>
         <div
           class="splitter ${this.#dragging.value ? 'dragging' : ''}"
@@ -1350,6 +1351,7 @@ export class MemBucketApp extends LitElement {
           .onFolderClick=${(f: string) => this.#addFolderFilter(f)}
           .onDateClick=${(d: string) => this.#setDateFilter(d)}
           .onKeyClick=${(key: string) => this.#setSearch(key)}
+          .onGroupClick=${(group: string) => this.#setSearch(group)}
           .onGone=${() => this.#selected.set(null)}
         ></detail-panel>
       </div>

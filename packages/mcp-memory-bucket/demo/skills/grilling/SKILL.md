@@ -17,6 +17,8 @@ metadata:
   owner: company
   status: stable
   extends: null
+  group: anatoli
+created_at: '2026-08-18T15:01:47.834Z'
 body: >-
   Interview the user relentlessly until you reach a shared understanding. Map
   this as a **design tree**: every decision branches into the decisions that
@@ -61,7 +63,10 @@ body: >-
   The session is done when the frontier is empty: every branch of the design
   tree visited, nothing left silently assumed. Do not act on it until the user
   confirms you have reached a shared understanding.
+status: stable
 owner: company
+extends: null
+group: anatoli
 ---
 Interview the user relentlessly until you reach a shared understanding. Map this as a **design tree**: every decision branches into the decisions that hang off it.
 

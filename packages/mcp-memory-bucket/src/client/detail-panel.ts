@@ -46,6 +46,8 @@ const FIELD_HELP = {
   name: "The skill's identifier — becomes its containing folder name on disk. Lowercase letters, numbers, and hyphens only.",
   owner: 'Who authored or maintains this skill — a person or team name, free text.',
   extends: "Name of another skill this one builds on or specializes, if any. Leave blank if it doesn't extend anything.",
+  group:
+    "This skill's primary category — distinct from folder (physical location) and tags (cross-cutting labels). Leave blank if it doesn't belong to a group.",
   trigger_phrases:
     "Extra keyword phrases beyond the description that should surface this skill in search — phrasings a user might type that don't literally appear in the description text.",
   key: 'The lookup handle for this memory doc — usually a ticket ID, sometimes a free-form name. One key can have several docs attached (a plan, a spec, session notes) all retrievable together.',
@@ -62,6 +64,7 @@ interface Draft {
   name: string;
   owner: string;
   extends: string;
+  group: string;
   trigger_phrases: string[];
   // memory
   key: string;
@@ -78,6 +81,7 @@ function draftFrom(d: EntryDetail): Draft {
     name: d.name ?? '',
     owner: d.owner ?? '',
     extends: d.extends ?? '',
+    group: d.group ?? '',
     trigger_phrases: d.trigger_phrases ?? [],
     key: d.key ?? '',
     key_type: d.key_type ?? '',
@@ -95,6 +99,7 @@ export class DetailPanel extends LitElement {
     onFolderClick: { attribute: false },
     onDateClick: { attribute: false },
     onKeyClick: { attribute: false },
+    onGroupClick: { attribute: false },
     onGone: { attribute: false },
     _doc: { state: true },
     _viewMode: { state: true },
@@ -118,6 +123,7 @@ export class DetailPanel extends LitElement {
   declare onFolderClick: ((folder: string) => void) | undefined;
   declare onDateClick: ((date: string) => void) | undefined;
   declare onKeyClick: ((key: string) => void) | undefined;
+  declare onGroupClick: ((group: string) => void) | undefined;
   declare onGone: (() => void) | undefined;
   private _doc?: EntryDetail | null;
   private _viewMode: 'markdown' | 'raw' =
@@ -748,6 +754,7 @@ export class DetailPanel extends LitElement {
     if (isSkill) {
       frontmatter.owner = this._draft.owner || null;
       frontmatter.extends = this._draft.extends || null;
+      frontmatter.group = this._draft.group || null;
       frontmatter.trigger_phrases = this._draft.trigger_phrases;
     } else {
       frontmatter.key = this._draft.key;
@@ -941,6 +948,14 @@ export class DetailPanel extends LitElement {
                 </div>
               </div>
               <div class="field">
+                <label>group <help-tooltip .text=${FIELD_HELP.group}></help-tooltip></label>
+                <status-select
+                  .options=${facets?.groups ?? []}
+                  .value=${d.group}
+                  .onChange=${(group: string) => this.#updateDraft({ group })}
+                ></status-select>
+              </div>
+              <div class="field">
                 <label>trigger_phrases <help-tooltip .text=${FIELD_HELP.trigger_phrases}></help-tooltip></label>
                 <tag-multiselect
                   .tags=${[]}
@@ -1026,6 +1041,14 @@ export class DetailPanel extends LitElement {
               ${d.extends
                 ? html`<dt>Extends</dt>
                     <dd>${d.extends}</dd>`
+                : nothing}
+              ${d.group
+                ? html`<dt>Group</dt>
+                    <dd>
+                      <button class="key-link" title="Search for this group" @click=${() => d.group && this.onGroupClick?.(d.group)}>
+                        ${d.group}
+                      </button>
+                    </dd>`
                 : nothing}
             `
           : html`

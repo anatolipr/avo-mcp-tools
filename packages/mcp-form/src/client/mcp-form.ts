@@ -241,6 +241,31 @@ export class McpForm extends LitElement {
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }
+    .list-card__actions {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+      flex-shrink: 0;
+    }
+    .list-card__move {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.5rem;
+      height: 1.5rem;
+      padding: 0;
+      flex-shrink: 0;
+      border-radius: 50%;
+      font-size: 0.7rem;
+      line-height: 1;
+      background: var(--chip-bg);
+      color: var(--text-muted);
+      border: none;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .list-card__move:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-strong); }
+    .list-card__move:disabled { opacity: 0.35; cursor: not-allowed; }
     .list-card__body {
       padding: 0.75rem 0.9rem;
       display: flex;
@@ -885,6 +910,23 @@ export class McpForm extends LitElement {
           const cleaned = Object.fromEntries(Object.entries(this._errors).filter(([k]) => !k.startsWith(prefix)));
           this._errors = cleaned;
         };
+        const moveRow = (idx: number, dir: -1 | 1) => {
+          const target = idx + dir;
+          if (target < 0 || target >= rows.length) return;
+          const next = [...rows];
+          [next[idx], next[target]] = [next[target], next[idx]];
+          this._onInput(f.name, JSON.stringify(next));
+          // errors are keyed by row index, so swap them along with the rows
+          const remap: Record<string, string> = {};
+          for (const [k, v] of Object.entries(this._errors)) {
+            const m = k.match(new RegExp(`^${f.name}\\[(\\d+)\\]\\.(.+)$`));
+            if (!m) { remap[k] = v; continue; }
+            const rowIdx = Number(m[1]);
+            const swapped = rowIdx === idx ? target : rowIdx === target ? idx : rowIdx;
+            remap[`${f.name}[${swapped}].${m[2]}`] = v;
+          }
+          this._errors = remap;
+        };
 
         const renderSubField = (sf: SubFieldDef, rowIdx: number, rowVal: Record<string, string>) => {
           const sfErrKey = `${f.name}[${rowIdx}].${sf.name}`;
@@ -1023,8 +1065,14 @@ export class McpForm extends LitElement {
                   ${rows.length > 1 ? html`
                     <div class="list-card__header">
                       <span class="list-card__title">${f.itemLabel ?? `Item ${idx + 1}`}</span>
-                      <button type="button" class="list-card__remove" title="Remove"
-                        ?disabled=${this._submitted} @click=${() => removeRow(idx)}>✕</button>
+                      <div class="list-card__actions">
+                        <button type="button" class="list-card__move" title="Move up"
+                          ?disabled=${this._submitted || idx === 0} @click=${() => moveRow(idx, -1)}>▲</button>
+                        <button type="button" class="list-card__move" title="Move down"
+                          ?disabled=${this._submitted || idx === rows.length - 1} @click=${() => moveRow(idx, 1)}>▼</button>
+                        <button type="button" class="list-card__remove" title="Remove"
+                          ?disabled=${this._submitted} @click=${() => removeRow(idx)}>✕</button>
+                      </div>
                     </div>` : ''}
                   <div class="list-card__body">
                     ${subFields.map((sf) => renderSubField(sf, idx, rowVal))}

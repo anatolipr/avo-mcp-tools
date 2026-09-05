@@ -14,30 +14,41 @@ function formatAge(createdAt: string | null): string {
 }
 
 interface EntryGroup {
-  key: string | null; // null groups all `skills` rows together, unlabeled (skills have no key)
+  label: string | null; // null renders as the trailing "Ungrouped" section, with no clickable header
+  icon: '🔑' | '📂';
   items: Entry[];
 }
 
-/** Groups memory_docs rows by key (their shared lookup handle), preserving each row's relative
- * order and using each group's first-seen position (i.e. the current sort order) as the group's
- * position. Skills have no key concept, so they're collected into one trailing unlabeled group. */
-function groupByKey(results: Entry[]): EntryGroup[] {
+/**
+ * Clusters rows under a clickable header: memory_docs by `key` (their shared lookup handle),
+ * skills by `group` (frontmatter.metadata.group) — both rendered with the same header UI, only
+ * the icon differs (🔑 vs 📂). Preserves each row's relative order and uses each cluster's
+ * first-seen position (i.e. the current sort order) as its position. A skill with no group, or a
+ * memory doc with no key (shouldn't normally happen), collects into one trailing "Ungrouped"
+ * section rather than being scattered with no header at all.
+ */
+function groupByKeyOrGroup(results: Entry[]): EntryGroup[] {
   const order: string[] = [];
   const groups = new Map<string, Entry[]>();
   const ungrouped: Entry[] = [];
   for (const r of results) {
-    if (r._table !== 'memory_docs' || !r.key) {
+    const label = r._table === 'memory_docs' ? r.key : r.group;
+    if (!label) {
       ungrouped.push(r);
       continue;
     }
-    if (!groups.has(r.key)) {
-      groups.set(r.key, []);
-      order.push(r.key);
+    if (!groups.has(label)) {
+      groups.set(label, []);
+      order.push(label);
     }
-    groups.get(r.key)!.push(r);
+    groups.get(label)!.push(r);
   }
-  const grouped: EntryGroup[] = order.map((key) => ({ key, items: groups.get(key)! }));
-  if (ungrouped.length > 0) grouped.push({ key: null, items: ungrouped });
+  const grouped: EntryGroup[] = order.map((label) => ({
+    label,
+    icon: groups.get(label)![0]!._table === 'memory_docs' ? '🔑' : '📂',
+    items: groups.get(label)!,
+  }));
+  if (ungrouped.length > 0) grouped.push({ label: null, icon: ungrouped[0]!._table === 'memory_docs' ? '🔑' : '📂', items: ungrouped });
   return grouped;
 }
 
@@ -49,6 +60,7 @@ export class ResultList extends LitElement {
     selectedIds: { attribute: false },
     onToggleSelect: { attribute: false },
     onKeyClick: { attribute: false },
+    onGroupClick: { attribute: false },
   };
 
   declare results: Entry[];
@@ -57,6 +69,7 @@ export class ResultList extends LitElement {
   declare selectedIds: Set<string>;
   declare onToggleSelect: (entry: Entry) => void;
   declare onKeyClick: ((key: string) => void) | undefined;
+  declare onGroupClick: ((group: string) => void) | undefined;
 
   static styles = css`
     :host { display: block; }
@@ -128,21 +141,25 @@ export class ResultList extends LitElement {
     }
     return html`
       <div class="count-header">${this.results.length} result${this.results.length === 1 ? '' : 's'}</div>
-      ${groupByKey(this.results).map(
+      ${groupByKeyOrGroup(this.results).map(
         (group) => html`
-          ${group.key
+          ${group.label
             ? html`<div class="key-group-header">
-                🔑
+                ${group.icon}
                 <button
                   class="key-group-link"
-                  title="Search for this key"
-                  @click=${() => this.onKeyClick?.(group.key!)}
+                  title=${group.icon === '🔑' ? 'Search for this key' : 'Search for this group'}
+                  @click=${() => (group.icon === '🔑' ? this.onKeyClick?.(group.label!) : this.onGroupClick?.(group.label!))}
                 >
-                  ${group.key}
+                  ${group.label}
                 </button>
                 <span class="key-group-count">(${group.items.length})</span>
               </div>`
-            : ''}
+            : group.items.length > 0 && group.icon === '📂'
+              ? html`<div class="key-group-header">
+                  📂 <span>Ungrouped</span> <span class="key-group-count">(${group.items.length})</span>
+                </div>`
+              : ''}
           ${group.items.map((r) => this.#renderRow(r))}
         `
       )}
@@ -175,6 +192,21 @@ export class ResultList extends LitElement {
             <span class="meta">${formatAge(r.created_at)} · ${r.owner ?? '—'} · ${r.status}</span>
           </div>
           ${r._table === 'memory_docs' && r.key ? html`<div class="key-line">🔑 ${r.key}</div>` : ''}
+          ${r._table === 'skills' && r.group
+            ? html`<div class="key-line">
+                📂
+                <button
+                  class="key-group-link"
+                  title="Search for this group"
+                  @click=${(e: Event) => {
+                    e.stopPropagation();
+                    this.onGroupClick?.(r.group!);
+                  }}
+                >
+                  ${r.group}
+                </button>
+              </div>`
+            : ''}
           ${this.showFolder && r.folder ? html`<div class="folder-path">📁 ${r.folder}</div>` : ''}
           <div class="desc">${r.description}</div>
           <div class="tags">

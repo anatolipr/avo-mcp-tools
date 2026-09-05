@@ -45,6 +45,7 @@ interface EntryRow {
   id: string; // skill name, or memory doc's source_path (globally unique; filename alone is only unique per-folder)
   name: string; // skill name, or memory doc's own filename — the primary title in the UI
   key: string | null; // memory docs only — the grouping label, shown as a secondary line under the filename
+  group: string | null; // skills only — this skill's primary category (frontmatter.metadata.group)
   description: string;
   tags: string[];
   status: string;
@@ -130,6 +131,7 @@ function queryEntries(db: Database.Database, skillRepo: SkillRepository, memoryR
   const docTypes = asArray(req.query.doc_type);
   const keyTypes = asArray(req.query.key_type);
   const folders = asArray(req.query.folder);
+  const groups = asArray(req.query.group);
   const q = (req.query.q as string | undefined)?.trim();
   const deprecatedParam = req.query.deprecated as string | undefined;
   const deprecated = deprecatedParam === '0' || deprecatedParam === '1' ? deprecatedParam : undefined;
@@ -166,7 +168,7 @@ function queryEntries(db: Database.Database, skillRepo: SkillRepository, memoryR
       ...queryTable(
         db,
         'skills',
-        { tags, statuses, owners, docTypes: [], keyTypes: [], folders, keys: [], deprecated, paused },
+        { tags, statuses, owners, docTypes: [], keyTypes: [], folders, keys: [], groups, deprecated, paused },
         intersectIds(matchedIds?.skills, dateIds?.skills),
         hiddenRemoteFolderNames(skillRepo, identity)
       )
@@ -177,7 +179,7 @@ function queryEntries(db: Database.Database, skillRepo: SkillRepository, memoryR
       ...queryTable(
         db,
         'memory_docs',
-        { tags, statuses, owners: [], docTypes, keyTypes, folders, deprecated, paused, keys: keyMatch ? [keyMatch.key] : [] },
+        { tags, statuses, owners: [], docTypes, keyTypes, folders, groups: [], deprecated, paused, keys: keyMatch ? [keyMatch.key] : [] },
         keyMatch ? undefined : intersectIds(matchedIds?.memory_docs, dateIds?.memory_docs),
         hiddenRemoteFolderNames(memoryRepo, identity)
       )
@@ -222,6 +224,7 @@ function queryTable(
     keyTypes: string[];
     folders: string[];
     keys: string[];
+    groups: string[];
     deprecated?: string;
     paused?: string;
   },
@@ -266,6 +269,10 @@ function queryTable(
     where += ` AND key IN (${filters.keys.map(() => '?').join(', ')})`;
     params.push(...filters.keys);
   }
+  if (table === 'skills' && filters.groups.length > 0) {
+    where += ` AND skill_group IN (${filters.groups.map(() => '?').join(', ')})`;
+    params.push(...filters.groups);
+  }
   if (filters.folders.length > 0) {
     where += ` AND folder IN (${filters.folders.map(() => '?').join(', ')})`;
     params.push(...filters.folders);
@@ -296,7 +303,7 @@ function queryTable(
 
   if (table === 'skills') {
     const rows = db
-      .prepare(`SELECT id, description, owner, status, tags, folder, mtime_ms, deprecated, paused, created_at FROM skills WHERE ${where}`)
+      .prepare(`SELECT id, description, owner, status, tags, folder, mtime_ms, deprecated, paused, created_at, skill_group FROM skills WHERE ${where}`)
       .all(...params) as Array<{
       id: string;
       description: string;
@@ -308,12 +315,14 @@ function queryTable(
       deprecated: number;
       paused: number;
       created_at: string | null;
+      skill_group: string | null;
     }>;
     return rows.map((r) => ({
       _table: 'skills',
       id: r.id,
       name: r.id,
       key: null,
+      group: r.skill_group,
       description: r.description,
       tags: JSON.parse(r.tags),
       status: r.status,
@@ -351,6 +360,7 @@ function queryTable(
     id: r.source_path,
     name: path.basename(r.source_path),
     key: r.key,
+    group: null,
     description: r.description,
     tags: JSON.parse(r.tags),
     status: r.status,
@@ -449,19 +459,22 @@ function buildFacets(db: Database.Database, type: EntryType) {
   const docTypes = new Set<string>();
   const keyTypes = new Set<string>();
   const folders = new Set<string>();
+  const groups = new Set<string>();
 
   if (type === 'skill' || type === 'all') {
-    const rows = db.prepare(`SELECT tags, status, owner, folder FROM skills`).all() as Array<{
+    const rows = db.prepare(`SELECT tags, status, owner, folder, skill_group FROM skills`).all() as Array<{
       tags: string;
       status: string;
       owner: string | null;
       folder: string;
+      skill_group: string | null;
     }>;
     for (const r of rows) {
       (JSON.parse(r.tags) as string[]).forEach((t) => tags.add(t));
       statuses.add(r.status);
       if (r.owner) owners.add(r.owner);
       if (r.folder) folders.add(r.folder);
+      if (r.skill_group) groups.add(r.skill_group);
     }
   }
   if (type === 'memory' || type === 'all') {
@@ -488,6 +501,7 @@ function buildFacets(db: Database.Database, type: EntryType) {
     doc_types: [...docTypes].sort(),
     key_types: [...keyTypes].sort(),
     folders: [...folders].sort(),
+    groups: [...groups].sort(),
   };
 }
 
@@ -633,9 +647,13 @@ export function buildWebRouter(
     // folderfoo-relative path (folderPath + filename, via mirrorDir-relative math), without the
     // client needing its own copy of RemoteFolder-resolution logic.
     const remote = (table === 'skills' ? skillRepo : memoryRepo).listRemoteFolders().find((f) => f.name === row.folder);
+    // `skill_group` is the raw column name (see SkillRow — "group" is a SQL reserved word); the
+    // client-facing EntryDetail field is `group`, matching frontmatter.metadata.group's own name.
+    const { skill_group, ...rowWithoutSkillGroup } = row;
     res.json({
-      ...row,
+      ...rowWithoutSkillGroup,
       id: responseId,
+      group: table === 'skills' ? (skill_group ?? null) : undefined,
       tags,
       trigger_phrases,
       attachments,

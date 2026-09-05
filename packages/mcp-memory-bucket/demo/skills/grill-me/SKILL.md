@@ -14,6 +14,12 @@ metadata:
   owner: company
   status: stable
   extends: null
+  group: anatoli
+created_at: '2026-08-18T15:04:55.817Z'
 body: Call the Skill tool with "grilling".
+status: stable
+owner: company
+extends: null
+group: anatoli
 ---
 Call the Skill tool with "grilling".

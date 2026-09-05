@@ -34,6 +34,8 @@ metadata:
   owner: personal
   status: stable
   extends: null
+  group: anatoli
+created_at: '2026-08-18T15:01:51.172Z'
 body: >-
   ## Autocomplete combobox in Lit
 
@@ -343,7 +345,10 @@ body: >-
         the click handler runs.
   - [ ] `change` event consumers handle a `null` option (from the clear
         button), not just a populated selection.
+status: stable
 owner: personal
+extends: null
+group: anatoli
 ---
 ## Autocomplete combobox in Lit
 
