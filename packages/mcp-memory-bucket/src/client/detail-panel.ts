@@ -5,6 +5,7 @@ import './tag-multiselect.js';
 import './status-select.js';
 import './help-tooltip.js';
 import type { EntryDetail, Selection, Facets, ClientAttachmentEntry } from './types.js';
+import { toast } from './toast.js';
 
 const VIEW_MODE_KEY = 'mem-bucket-detail-view-mode';
 
@@ -17,6 +18,62 @@ function isImageFilename(filename: string): boolean {
   const dot = filename.lastIndexOf('.');
   if (dot === -1) return false;
   return IMAGE_EXTENSIONS.has(filename.slice(dot).toLowerCase());
+}
+
+/** One node of the attachment tree built by `buildAttachmentTree` — either a directory (children
+ * only) or a leaf pointing back at the original attachment entry for click/download/remove. */
+interface AttachmentTreeNode {
+  name: string;
+  children: Map<string, AttachmentTreeNode>;
+  entry?: ClientAttachmentEntry;
+}
+
+/** Groups flat attachment entries (whose `filename` may itself be a `/`-separated relative path,
+ * e.g. "scripts/setup.sh" — see attachments/repository.ts, which creates nested subdirs on disk)
+ * into a directory tree for `#renderAttachments` to render with ASCII connectors. */
+function buildAttachmentTree(attachments: ClientAttachmentEntry[]): AttachmentTreeNode {
+  const root: AttachmentTreeNode = { name: '', children: new Map() };
+  for (const entry of attachments) {
+    const parts = entry.filename.split('/').filter(Boolean);
+    let node = root;
+    parts.forEach((part, i) => {
+      const isLeaf = i === parts.length - 1;
+      let child = node.children.get(part);
+      if (!child) {
+        child = { name: part, children: new Map() };
+        node.children.set(part, child);
+      }
+      if (isLeaf) child.entry = entry;
+      node = child;
+    });
+  }
+  return root;
+}
+
+/** Same shape as AttachmentTreeNode but for `EntryDetail.sourceFiles` (plain relative-path
+ * strings, no download/view/remove actions — see #renderSourceFileTreeLevel). */
+interface SourceFileTreeNode {
+  name: string;
+  children: Map<string, SourceFileTreeNode>;
+  isFile: boolean;
+}
+
+function buildSourceFileTree(paths: string[]): SourceFileTreeNode {
+  const root: SourceFileTreeNode = { name: '', children: new Map(), isFile: false };
+  for (const p of paths) {
+    const parts = p.split('/').filter(Boolean);
+    let node = root;
+    parts.forEach((part, i) => {
+      let child = node.children.get(part);
+      if (!child) {
+        child = { name: part, children: new Map(), isFile: false };
+        node.children.set(part, child);
+      }
+      if (i === parts.length - 1) child.isFile = true;
+      node = child;
+    });
+  }
+  return root;
 }
 
 /**
@@ -272,6 +329,17 @@ export class DetailPanel extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 4px;
+    }
+    .attachments-section ul.attachment-tree {
+      font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+      gap: 2px;
+    }
+    .attachments-section .tree-dir {
+      opacity: 0.7;
+    }
+    .attachments-section .tree-prefix {
+      opacity: 0.45;
+      white-space: pre;
     }
     .attachment-download {
       opacity: 0.55;
@@ -571,11 +639,15 @@ export class DetailPanel extends LitElement {
   async #toggleDeprecated() {
     const { table, id } = this.selected!;
     const deprecated = !this._doc?.deprecated;
-    await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/deprecated`, {
+    const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/deprecated`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ deprecated }),
     });
+    if (!res.ok) {
+      toast.danger('Failed to update status');
+      return;
+    }
     await this.#load();
     this.onChanged?.();
   }
@@ -583,11 +655,15 @@ export class DetailPanel extends LitElement {
   async #togglePaused() {
     const { table, id } = this.selected!;
     const paused = !this._doc?.paused;
-    await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/paused`, {
+    const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/paused`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ paused }),
     });
+    if (!res.ok) {
+      toast.danger('Failed to update status');
+      return;
+    }
     await this.#load();
     this.onChanged?.();
   }
@@ -619,7 +695,11 @@ export class DetailPanel extends LitElement {
   async #removeAttachment(filename: string) {
     if (!window.confirm(`Remove attachment "${filename}"? This can't be undone.`)) return;
     const { table, id } = this.selected!;
-    await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/attachments/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/attachments/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      toast.danger('Failed to remove attachment');
+      return;
+    }
     if (this._viewingAttachment?.filename === filename) this._viewingAttachment = null;
     await this.#load();
     this.onChanged?.();
@@ -686,8 +766,13 @@ export class DetailPanel extends LitElement {
   async #deleteDoc() {
     if (!window.confirm("Delete this doc? This can't be undone.")) return;
     const { table, id } = this.selected!;
-    await fetch(`/api/entries/${table}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      toast.danger('Delete failed');
+      return;
+    }
     this._doc = null;
+    toast.success('Deleted');
     this.onChanged?.();
   }
 
@@ -1141,39 +1226,99 @@ export class DetailPanel extends LitElement {
     `;
   }
 
+  /** Renders one attachment leaf's link/download/remove controls — shared by the flat list and
+   * the nested-tree view so both stay in sync. */
+  #renderAttachmentLeaf(d: EntryDetail, table: 'skills' | 'memory_docs', a: ClientAttachmentEntry, label: string) {
+    return html`
+      <a
+        href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}/view"
+        target="_blank"
+        rel="noopener"
+        @click=${(e: MouseEvent) => {
+          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          e.preventDefault();
+          this._viewingAttachment = a;
+        }}
+        >${label}</a
+      >
+      <a
+        class="attachment-download"
+        href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}"
+        title="Download"
+        >⇩</a
+      >
+      <button class="attachment-remove" title="Remove" @click=${() => this.#removeAttachment(a.filename)}>×</button>
+    `;
+  }
+
+  /** Renders one directory's children as ASCII-tree `<li>`s (├──/└── connectors, │ continuation
+   * bars for ancestor levels that aren't done yet), recursing into subdirectories. */
+  #renderAttachmentTreeLevel(
+    d: EntryDetail,
+    table: 'skills' | 'memory_docs',
+    node: AttachmentTreeNode,
+    ancestorBars: boolean[]
+  ): unknown[] {
+    const children = [...node.children.values()].sort((x, y) => x.name.localeCompare(y.name));
+    return children.map((child, i) => {
+      const isLast = i === children.length - 1;
+      const prefix = ancestorBars.map((open) => (open ? '│   ' : '    ')).join('') + (isLast ? '└── ' : '├── ');
+      const isDir = child.entry === undefined;
+      return html`
+        <li>
+          <span class="tree-prefix">${prefix}</span>${isDir
+            ? html`<span class="tree-dir">📁 ${child.name}</span>`
+            : this.#renderAttachmentLeaf(d, table, child.entry!, child.name)}
+        </li>
+        ${isDir ? this.#renderAttachmentTreeLevel(d, table, child, [...ancestorBars, !isLast]) : nothing}
+      `;
+    });
+  }
+
+  /** Renders one directory's children of a skill's own bundled files (scripts/, references/, etc.)
+   * as ASCII-tree `<li>`s — read-only, no download/view/remove (these aren't attachment_add
+   * entries, so there's no matching API route to link to). */
+  #renderSourceFileTreeLevel(node: SourceFileTreeNode, ancestorBars: boolean[]): unknown[] {
+    const children = [...node.children.values()].sort((x, y) => x.name.localeCompare(y.name));
+    return children.map((child, i) => {
+      const isLast = i === children.length - 1;
+      const prefix = ancestorBars.map((open) => (open ? '│   ' : '    ')).join('') + (isLast ? '└── ' : '├── ');
+      return html`
+        <li>
+          <span class="tree-prefix">${prefix}</span>${child.isFile
+            ? html`<span>${child.name}</span>`
+            : html`<span class="tree-dir">📁 ${child.name}</span>`}
+        </li>
+        ${!child.isFile ? this.#renderSourceFileTreeLevel(child, [...ancestorBars, !isLast]) : nothing}
+      `;
+    });
+  }
+
+  #renderSkillSourceFiles(d: EntryDetail) {
+    if (!d.sourceFiles?.length) return nothing;
+    const tree = buildSourceFileTree(d.sourceFiles);
+    return html`
+      <div class="attachments-section">
+        <h4>Skill files</h4>
+        <ul class="attachment-tree">${this.#renderSourceFileTreeLevel(tree, [])}</ul>
+      </div>
+    `;
+  }
+
   #renderAttachments(d: EntryDetail, table: 'skills' | 'memory_docs') {
+    const tree = d.attachments?.length ? buildAttachmentTree(d.attachments) : undefined;
+    const hasNesting = d.attachments?.some((a) => a.filename.includes('/')) ?? false;
     return html`
       <div class="attachments-section">
         <h4>Attachments</h4>
-        ${d.attachments?.length
-          ? html`
-              <ul>
-                ${d.attachments.map(
-                  (a) => html`
-                    <li>
-                      <a
-                        href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}/view"
-                        target="_blank"
-                        rel="noopener"
-                        @click=${(e: MouseEvent) => {
-                          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-                          e.preventDefault();
-                          this._viewingAttachment = a;
-                        }}
-                        >${a.filename}</a
-                      >
-                      <a
-                        class="attachment-download"
-                        href="/api/entries/${table}/${encodeURIComponent(d.id)}/attachments/${encodeURIComponent(a.filename)}"
-                        title="Download"
-                        >⇩</a
-                      >
-                      <button class="attachment-remove" title="Remove" @click=${() => this.#removeAttachment(a.filename)}>×</button>
-                    </li>
-                  `
-                )}
-              </ul>
-            `
+        ${tree
+          ? hasNesting
+            ? html`<ul class="attachment-tree">${this.#renderAttachmentTreeLevel(d, table, tree, [])}</ul>`
+            : html`
+                <ul>
+                  ${d.attachments!.map((a) => html`<li>${this.#renderAttachmentLeaf(d, table, a, a.filename)}</li>`)}
+                </ul>
+              `
           : nothing}
         <label class="attachment-add">
           + Add
@@ -1261,6 +1406,7 @@ export class DetailPanel extends LitElement {
               : nothing}
             ${this._sharing ? this.#renderShareForm() : nothing}
           `}
+      ${this.#renderSkillSourceFiles(d)}
       ${this.#renderAttachments(d, this.selected.table)}
       <div class="view-toggle">
         <button

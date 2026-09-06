@@ -402,6 +402,27 @@ export class MemoryRepository {
   }
 
   /**
+   * Every non-paused doc carrying `tag` in its tags array, full body included — unlike search(),
+   * this needs no FTS query text (Quick Prompts' palette lists everything tagged `quick-prompt`
+   * up front, before the user has typed anything to search for). Sorted by created_at desc (falls
+   * back to source_path for docs predating created_at) so the caller gets "most recent first" for
+   * free; Quick Prompts' pinned-on-top ordering is applied client-side on top of this.
+   */
+  listByTag(tag: string): MemoryDoc[] {
+    const hidden = this.hiddenFolderNames();
+    const conditions = ['paused = 0', `EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`];
+    const params: unknown[] = [tag];
+    if (hidden.length > 0) {
+      conditions.push(`folder NOT IN (${hidden.map(() => '?').join(', ')})`);
+      params.push(...hidden);
+    }
+    const rows = this.db
+      .prepare(`SELECT * FROM memory_docs WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC, source_path DESC`)
+      .all(...params) as MemoryRow[];
+    return rows.map(rowToDoc);
+  }
+
+  /**
    * Full-text search over memory description/body/tags via FTS5 — `query` is
    * raw FTS5 MATCH syntax (AND/OR/NOT, "phrases", prefix*). Ranked by bm25.
    * Optional metadata filters (doc_type/status/folder/tag) apply before limit/offset,

@@ -52,6 +52,10 @@ export interface EntryDetail {
    * `body`, which is always frontmatter-stripped. */
   raw_file?: string;
   attachments?: ClientAttachmentEntry[];
+  /** Skills only — relative paths (may include `/`) of a skill's own bundled files outside
+   * attachments/, e.g. "scripts/setup.sh". Display-only, from listSkillSourceFiles server-side;
+   * not part of the attachment_add/reconcile system. */
+  sourceFiles?: string[];
   /** Non-null only when this doc's folder is a folderfoo-connected remote source — the
    * coordinates detail-panel.ts's Share/Copy-link actions need, since those only make sense for
    * a doc that actually exists on folderfoo (a purely local doc has nothing for folderfoo's own
@@ -97,4 +101,18 @@ export interface ChannelDetail {
   name: string;
   content: string;
   lastActivityAt: number;
+}
+
+/** A quick prompt is an ordinary memory doc tagged `quick-prompt` server-side (see routes.ts) —
+ * this shape is already stripped of that tag and the `quick-prompt-pinned` marker tag, surfaced
+ * instead as the plain `pinned` boolean. */
+export interface QuickPrompt {
+  id: string; // source_path — same identity memory_docs use everywhere else in this client
+  title: string; // may be '' — title is optional for a quick prompt
+  body: string;
+  tags: string[];
+  pinned: boolean;
+  folder: string;
+  remote: boolean;
+  created_at: string | null;
 }

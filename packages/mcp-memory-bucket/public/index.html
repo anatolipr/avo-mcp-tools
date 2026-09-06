@@ -2,7 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>mem-bucket viewer</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icons/favicon-32.png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <meta name="theme-color" content="#2563eb" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="mem-bucket" />
   <style>
     :root {
       color-scheme: light dark;
@@ -17,6 +26,8 @@
       --accent-fg: #ffffff;
       --accent-tint: light-dark(#2563eb11, #3b82f622);
       --danger: light-dark(#dc2626, #fca5a5);
+      --success: light-dark(#16a34a, #4ade80);
+      --warning: light-dark(#ca8a04, #facc15);
       --purple: light-dark(#7c3aed, #a78bfa);
       --purple-fg: light-dark(#6d28d9, #d8caff);
       --purple-tint: #a78bfa33;
@@ -38,5 +49,10 @@
   <mem-bucket-app></mem-bucket-app>
 
   <script type="module" src="../src/client/main.ts"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
+    }
+  </script>
 </body>
 </html>

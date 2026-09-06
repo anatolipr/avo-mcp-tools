@@ -19,7 +19,7 @@ import { stripKey, type MemoryRepository } from '../memory/repository.js';
 import { initialScan, walkMarkdownFiles, type TableSyncSpec } from '../store/sync.js';
 import { sanitizeFtsQuery } from '../store/search.js';
 import { resolveWithinBase } from '../store/safe-path.js';
-import { attachmentsDirFor, guessMimeType, ATTACHMENT_MAX_BYTES } from '../attachments/storage.js';
+import { attachmentsDirFor, guessMimeType, ATTACHMENT_MAX_BYTES, listSkillSourceFiles } from '../attachments/storage.js';
 import type { AttachmentRepository } from '../attachments/repository.js';
 import { listFolders as listFolderfooFolders } from '../remote/folderfoo-client.js';
 import { setCredential } from '../remote/credentials.js';
@@ -650,6 +650,11 @@ export function buildWebRouter(
     // `skill_group` is the raw column name (see SkillRow — "group" is a SQL reserved word); the
     // client-facing EntryDetail field is `group`, matching frontmatter.metadata.group's own name.
     const { skill_group, ...rowWithoutSkillGroup } = row;
+    // Display-only listing of a skill's own bundled files (scripts/, references/, etc.) — see
+    // listSkillSourceFiles. Distinct from `attachments`: these are normal SKILL.md-adjacent
+    // content, not attachment_add entries, so the tree in detail-panel.ts renders them as a
+    // separate namespace rather than merging them into the attachments list.
+    const sourceFiles = table === 'skills' ? listSkillSourceFiles(path.dirname(row.source_path as string)) : undefined;
     res.json({
       ...rowWithoutSkillGroup,
       id: responseId,
@@ -657,6 +662,7 @@ export function buildWebRouter(
       tags,
       trigger_phrases,
       attachments,
+      sourceFiles,
       has_frontmatter,
       raw_file,
       remoteInfo: remote ? { server: remote.server, tenantId: remote.tenantId, folderPath: remote.folderPath, mirrorDir: remote.mirrorDir } : null,
@@ -1921,6 +1927,134 @@ export function buildWebRouter(
       res.json({ path: newDirPath, name });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Quick Prompts (client/quick-prompts-modal.ts): ordinary memory docs distinguished purely by
+  // tag, no schema change — QUICK_PROMPT_TAG marks membership, QUICK_PROMPT_PINNED_TAG floats a
+  // prompt above the default recency sort. Both are plain entries in the same `tags` array every
+  // other memory doc already has, so they're searchable via memory_search like any other tag and
+  // need no new column/table. A future LLM session filtering for these should match on
+  // QUICK_PROMPT_TAG exactly.
+  const QUICK_PROMPT_TAG = 'quick-prompt';
+  const QUICK_PROMPT_PINNED_TAG = 'quick-prompt-pinned';
+  // Quick prompts have no natural key (title is optional/freeform) — this derives a short, mostly-
+  // unique key from the first line of the body (or a fixed fallback for an empty/blank one) so
+  // create() always has something to normalizeKey(), without surfacing "key" as a concept in the
+  // Quick Prompts UI at all.
+  function deriveQuickPromptKey(title: string | undefined, body: string): string {
+    const source = title?.trim() || body.trim().split('\n')[0] || 'prompt';
+    const slug = source.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'prompt';
+    return `QP-${slug}-${Date.now().toString(36)}`;
+  }
+
+  router.get('/api/quick-prompts', (_req: Request, res: Response) => {
+    const docs = memoryRepo.listByTag(QUICK_PROMPT_TAG);
+    res.json(
+      docs.map((doc) => ({
+        id: doc.source_path,
+        // description IS the title here (may be '' — title is optional for a quick prompt, unlike
+        // every other memory doc where description is required/non-empty).
+        title: doc.description,
+        body: doc.body,
+        tags: doc.tags.filter((t) => t !== QUICK_PROMPT_TAG && t !== QUICK_PROMPT_PINNED_TAG),
+        pinned: doc.tags.includes(QUICK_PROMPT_PINNED_TAG),
+        folder: doc.folder,
+        remote: !!memoryRepo.listRemoteFolders().find((f) => f.name === doc.folder),
+        created_at: doc.created_at ?? null,
+      }))
+    );
+  });
+
+  router.post('/api/quick-prompts', async (req: Request, res: Response) => {
+    const { title, body, tags, folder } = req.body as { title?: string; body?: string; tags?: string[]; folder?: string };
+    if (typeof body !== 'string' || !body.trim()) {
+      res.status(400).json({ error: 'body is required' });
+      return;
+    }
+    try {
+      const key = deriveQuickPromptKey(title, body);
+      const doc = await memoryRepo.create({
+        filename: key,
+        key,
+        key_type: 'freeform',
+        doc_type: 'other',
+        description: title?.trim() ?? '',
+        body,
+        tags: [QUICK_PROMPT_TAG, ...(tags ?? [])],
+        folder,
+      });
+      res.json({ id: doc.source_path, title: doc.description, body: doc.body, tags: tags ?? [], pinned: false, folder: doc.folder });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  router.patch('/api/quick-prompts/:id', async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { title, body, tags } = req.body as { title?: string; body?: string; tags?: string[] };
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    try {
+      const { folder, filename } = splitMemoryId(id);
+      const existing = await memoryRepo.get(folder, filename);
+      if (!existing) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      const wasPinned = existing.tags.includes(QUICK_PROMPT_PINNED_TAG);
+      const nextTags = [QUICK_PROMPT_TAG, ...(tags ?? existing.tags.filter((t) => t !== QUICK_PROMPT_TAG && t !== QUICK_PROMPT_PINNED_TAG)), ...(wasPinned ? [QUICK_PROMPT_PINNED_TAG] : [])];
+      const updated = await memoryRepo.update(folder, filename, { description: title !== undefined ? title.trim() : existing.description, tags: nextTags }, body);
+      res.json({
+        id: updated.source_path,
+        title: updated.description,
+        body: updated.body,
+        tags: updated.tags.filter((t) => t !== QUICK_PROMPT_TAG && t !== QUICK_PROMPT_PINNED_TAG),
+        pinned: wasPinned,
+        folder: updated.folder,
+      });
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  router.patch('/api/quick-prompts/:id/pinned', async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { pinned } = req.body as { pinned?: boolean };
+    if (!id || typeof pinned !== 'boolean') {
+      res.status(400).json({ error: 'id and { pinned: boolean } are required' });
+      return;
+    }
+    try {
+      const { folder, filename } = splitMemoryId(id);
+      const existing = await memoryRepo.get(folder, filename);
+      if (!existing) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      const withoutPin = existing.tags.filter((t) => t !== QUICK_PROMPT_PINNED_TAG);
+      const nextTags = pinned ? [...withoutPin, QUICK_PROMPT_PINNED_TAG] : withoutPin;
+      await memoryRepo.update(folder, filename, { tags: nextTags });
+      res.json({ id, pinned });
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  router.delete('/api/quick-prompts/:id', async (req: Request, res: Response) => {
+    const { id } = req.params;
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    try {
+      const { folder, filename } = splitMemoryId(id);
+      await memoryRepo.delete(folder, filename);
+      res.json({ deleted: id });
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
     }
   });
 

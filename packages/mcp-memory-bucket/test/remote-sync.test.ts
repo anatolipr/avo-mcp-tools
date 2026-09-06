@@ -570,3 +570,43 @@ test('pollOne: reconcileDeletions prunes a skill sibling file once gone remotely
   assert.ok(!fs.existsSync(removedFile), 'a sibling removed remotely must be pruned from the local mirror');
   assert.ok(fs.existsSync(path.join(mirrorDir, 'my-skill', 'SKILL.md')), 'SKILL.md itself must be untouched');
 });
+
+test('pollOne: re-pulling a SKILL.md whose frontmatter name changed since it was last indexed does not throw a source_path UNIQUE violation', async (t) => {
+  const credsDir = tmpDir('mb-remote-sync-creds-');
+  const mirrorDir = tmpDir('mb-remote-sync-mirror-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const spec = skillSyncSpec([{ name: 'team-qa', path: mirrorDir }]);
+  const folder = makeFolder(mirrorDir);
+  const skillMirrorFile = path.join(mirrorDir, 'my-skill', 'SKILL.md');
+
+  // First poll indexes the file under its original frontmatter name.
+  const originalFm =
+    '---\nname: my-skill\ndescription: A portable skill\ntags: []\ntrigger_phrases: []\nmetadata:\n  owner: null\n  status: unreviewed\n  extends: null\n---\nBody.';
+  t.mock.method(
+    globalThis,
+    'fetch',
+    mockFolderfoo({ lastChanged: 100, files: [{ name: 'SKILL', folderPath: 'plans/my-skill', mtime: 100, content: originalFm }] })
+  );
+  await pollOne(db, spec, folder, credsDir);
+  assert.ok(db.prepare(`SELECT * FROM skills WHERE source_path = ?`).get(skillMirrorFile));
+
+  // Second poll (forced): same mirror file, but the skill was renamed remotely — same source_path,
+  // different frontmatter `name`, so the row now belongs under a different (folder, id) primary key.
+  const renamedFm =
+    '---\nname: my-renamed-skill\ndescription: A portable skill\ntags: []\ntrigger_phrases: []\nmetadata:\n  owner: null\n  status: unreviewed\n  extends: null\n---\nBody.';
+  t.mock.method(
+    globalThis,
+    'fetch',
+    mockFolderfoo({ lastChanged: 200, files: [{ name: 'SKILL', folderPath: 'plans/my-skill', mtime: 200, content: renamedFm }] })
+  );
+  await assert.doesNotReject(pollOne(db, spec, folder, credsDir, { force: true }));
+
+  assert.equal(
+    db.prepare(`SELECT * FROM skills WHERE id = ?`).get('my-skill'),
+    undefined,
+    'the stale row under the old name must not linger alongside the new one'
+  );
+  const renamedRow = db.prepare(`SELECT * FROM skills WHERE id = ?`).get('my-renamed-skill') as { source_path: string } | undefined;
+  assert.equal(renamedRow?.source_path, skillMirrorFile);
+});

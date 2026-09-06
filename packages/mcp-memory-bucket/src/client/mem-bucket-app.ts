@@ -9,12 +9,15 @@ import './channel-view.js';
 import './folder-view.js';
 import './app-toolbar.js';
 import './shared-with-me-panel.js';
+import './quick-prompts-modal.js';
 import type { Entry, Facets, Selection, TypeFilter, FoldersResponse, Folder, ChannelSummary, ChannelDetail } from './types.js';
 import type { SharedItemRow } from './shared-with-me-panel.js';
 import { TENANT_ID, getFolderfooConfig } from './server-config.js';
 import { parseFolderfooAddress } from './folderfoo-address.js';
 import { currentIdentity, startIdentityStream } from './identity-stream.js';
 import { startShareAccept } from './share-accept.js';
+import { toast } from './toast.js';
+import './toast.js';
 
 // Set once the folderfoo-profile-circle widget module has been dynamically imported (module
 // execution, including its customElements.define, only happens once per URL) - lets later mount
@@ -345,9 +348,19 @@ export class MemBucketApp extends LitElement {
   #sharedItems = new Signal<SharedItemRow[]>([]);
   #sharedRefreshing = new Signal<boolean>(false);
   #sharedRefreshSummary = new Signal<{ added: number; updated: number; revoked: number; unchanged: number } | null>(null);
+  #quickPromptsOpen = new Signal<boolean>(false);
+  // One-shot flag consumed by quick-prompts-modal's connectedCallback (see its openToAdd prop) —
+  // set right before mounting the modal so Cmd/Ctrl+Enter from the main window opens straight into
+  // the add-form instead of just the search palette.
+  #quickPromptsStartAdding = new Signal<boolean>(false);
+  // Tracks the previous double-Shift keydown's timestamp so a second Shift press within the
+  // window counts as the "double" - no other key may land in between (checked in #onGlobalKeydown
+  // by resetting this on any non-Shift keydown), per the double-shift hotkey spec.
+  #lastShiftAt = 0;
 
   #boundOnDragMove = (e: PointerEvent) => this.#onDragMove(e);
   #boundOnDragEnd = () => this.#onDragEnd();
+  #boundOnGlobalKeydown = (e: KeyboardEvent) => this.#onGlobalKeydown(e);
 
   constructor() {
     super();
@@ -370,10 +383,41 @@ export class MemBucketApp extends LitElement {
     if (this.#reindexing.value) return;
     this.#reindexing.set(true);
     try {
-      await fetch('/api/rebuild-cache', { method: 'POST' });
+      const res = await fetch('/api/rebuild-cache', { method: 'POST' });
+      if (!res.ok) throw new Error('rebuild-cache request failed');
       await Promise.all([this.#refetchFolders(), this.#refetchFacets(), this.#refetch()]);
+      toast.success('Reindex complete');
+    } catch {
+      toast.danger('Reindex failed');
     } finally {
       this.#reindexing.set(false);
+    }
+  }
+
+  // Double-Shift (two Shift keydowns within 450ms, nothing else in between) toggles the Quick
+  // Prompts palette open/closed — an overlay on top of whatever view is showing, not a navigation,
+  // so closing it never loses the underlying view's scroll position/state. Any non-Shift keydown
+  // resets the timer so e.g. "Shift+A, then Shift" doesn't falsely count as a double-press.
+  #onGlobalKeydown(e: KeyboardEvent) {
+    // Cmd/Ctrl+Enter from anywhere in the main window (palette not open yet) opens the Quick
+    // Prompts palette straight into its add-form — the palette's own @keydown only covers this once
+    // it's already open/mounted, so the main-window case needs its own listener here.
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !this.#quickPromptsOpen.value) {
+      e.preventDefault();
+      this.#quickPromptsStartAdding.set(true);
+      this.#quickPromptsOpen.set(true);
+      return;
+    }
+    if (e.key !== 'Shift') {
+      this.#lastShiftAt = 0;
+      return;
+    }
+    const now = Date.now();
+    if (now - this.#lastShiftAt < 450) {
+      this.#lastShiftAt = 0;
+      this.#quickPromptsOpen.set(!this.#quickPromptsOpen.value);
+    } else {
+      this.#lastShiftAt = now;
     }
   }
 
@@ -448,6 +492,10 @@ export class MemBucketApp extends LitElement {
     this.#refetchFolders().then(() => this.#onFocus());
     window.addEventListener('focus', this.#boundOnFocus);
     document.addEventListener('visibilitychange', this.#boundOnFocus);
+    // Registered here on the root shell (not any per-view component) so double-Shift opens the
+    // Quick Prompts palette regardless of which view is currently showing - genuinely new hotkey
+    // infrastructure, there is no prior keydown-listener precedent in this codebase to follow.
+    window.addEventListener('keydown', this.#boundOnGlobalKeydown);
     // Runs the same force-resync #onFocus does on a real focus transition,
     // for the initial page load itself - otherwise a tab opened once and
     // left open/visible (no focus/visibilitychange event ever refires) only
@@ -640,6 +688,7 @@ export class MemBucketApp extends LitElement {
     super.disconnectedCallback();
     window.removeEventListener('focus', this.#boundOnFocus);
     document.removeEventListener('visibilitychange', this.#boundOnFocus);
+    window.removeEventListener('keydown', this.#boundOnGlobalKeydown);
     document.removeEventListener('folderfoo-file-open', this.#boundOnFolderfooFileOpen);
     document.removeEventListener('folderfoo-folder-changed', this.#boundOnFolderfooFolderChanged);
     window.removeEventListener('folderfoo-auth-change', this.#boundOnFolderfooAuthChange);
@@ -878,9 +927,13 @@ export class MemBucketApp extends LitElement {
     if (confirmed !== folder.name) return;
     this.#removingFolder.set(folder.name);
     try {
-      await fetch(`/api/folders/${folder.kind}/${encodeURIComponent(folder.name)}`, { method: 'DELETE' });
+      const res = await fetch(`/api/folders/${folder.kind}/${encodeURIComponent(folder.name)}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('remove folder request failed');
       this.#activeFolders.set(this.#activeFolders.value.filter((f) => f !== folder.name));
       await Promise.all([this.#refetchFolders(), this.#refetchFacets(), this.#refetch()]);
+      toast.success('Folder removed');
+    } catch {
+      toast.danger('Failed to remove folder');
     } finally {
       this.#removingFolder.set('');
     }
@@ -891,6 +944,7 @@ export class MemBucketApp extends LitElement {
     this.#refetchFolders();
     this.#refetchFacets();
     this.#refetch();
+    toast.success('Folder connected');
     // Best-effort "did you pick the wrong kind" heuristic from POST /api/remote-folders (see
     // routes.ts's detectKindMismatch) — a dismissible warning, not a block, since the connect
     // already succeeded and the folder is already usable either way.
@@ -1015,7 +1069,8 @@ export class MemBucketApp extends LitElement {
 
   async #bulkSetDeprecated(deprecated: boolean) {
     const byTable = this.#selectedByTable();
-    await Promise.all(
+    const count = this.#selectedIds.value.size;
+    const results = await Promise.all(
       [...byTable.entries()].map(([table, ids]) =>
         fetch(`/api/entries/${table}/bulk/deprecated`, {
           method: 'POST',
@@ -1026,11 +1081,14 @@ export class MemBucketApp extends LitElement {
     );
     this.#selectedIds.set(new Set());
     await this.#refetch();
+    if (results.every((r) => r.ok)) toast.success(`${count} item${count === 1 ? '' : 's'} updated`);
+    else toast.danger('Bulk update failed');
   }
 
   async #bulkSetPaused(paused: boolean) {
     const byTable = this.#selectedByTable();
-    await Promise.all(
+    const count = this.#selectedIds.value.size;
+    const results = await Promise.all(
       [...byTable.entries()].map(([table, ids]) =>
         fetch(`/api/entries/${table}/bulk/paused`, {
           method: 'POST',
@@ -1041,12 +1099,15 @@ export class MemBucketApp extends LitElement {
     );
     this.#selectedIds.set(new Set());
     await this.#refetch();
+    if (results.every((r) => r.ok)) toast.success(`${count} item${count === 1 ? '' : 's'} updated`);
+    else toast.danger('Bulk update failed');
   }
 
   async #bulkDelete() {
     if (!window.confirm(`Delete ${this.#selectedIds.value.size} doc(s)? This can't be undone.`)) return;
     const byTable = this.#selectedByTable();
-    await Promise.all(
+    const count = this.#selectedIds.value.size;
+    const results = await Promise.all(
       [...byTable.entries()].map(([table, ids]) =>
         fetch(`/api/entries/${table}/bulk/delete`, {
           method: 'POST',
@@ -1057,6 +1118,8 @@ export class MemBucketApp extends LitElement {
     );
     this.#selectedIds.set(new Set());
     await this.#refetch();
+    if (results.every((r) => r.ok)) toast.success(`${count} item${count === 1 ? '' : 's'} deleted`);
+    else toast.danger('Bulk delete failed');
   }
 
   // Rendered exactly once, at a fixed position in the top-level template (see render()) rather
@@ -1108,7 +1171,21 @@ export class MemBucketApp extends LitElement {
   // visually with each mode's own header row (folders-bar / toolbar-bar / folder-view's mode-row),
   // which all share the same height and padding (see their CSS).
   render() {
-    return html` <div class="header-toolbar">${this.#renderToolbar()}</div>${this.#renderBody()} `;
+    return html`
+      <div class="header-toolbar">${this.#renderToolbar()}</div>
+      ${this.#renderBody()}
+      ${this.#quickPromptsOpen.value
+        ? html`<quick-prompts-modal
+            .onClose=${() => {
+              this.#quickPromptsOpen.set(false);
+              this.#quickPromptsStartAdding.set(false);
+            }}
+            .memoryFolders=${this.#folders.value.memory}
+            .openToAdd=${this.#quickPromptsStartAdding.value}
+          ></quick-prompts-modal>`
+        : ''}
+      <toast-stack></toast-stack>
+    `;
   }
 
   #renderBody() {

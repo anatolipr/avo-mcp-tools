@@ -143,6 +143,31 @@ export function listAttachmentFiles(dir: string): string[] {
 }
 
 /**
+ * Lists a skill's own bundled files — plain subdirectories like `scripts/`, `references/`,
+ * `examples/` that ship alongside SKILL.md per the agentskills.io standard (see
+ * writing-skills/memory-bucket-authoring skills). Display-only: unlike listAttachmentFiles, these
+ * are NOT part of the attachments/ system (attachment_add/reconcile/remote-sync never see them) —
+ * this exists purely so the details-panel tree can show a skill's full on-disk shape. Skips
+ * SKILL.md itself and the `attachments` subdirectory (already covered by listAttachmentFiles/
+ * isUnderAttachmentsDir). Returns paths relative to `skillDir`.
+ */
+export function listSkillSourceFiles(skillDir: string): string[] {
+  if (!fs.existsSync(skillDir)) return [];
+  const out: string[] = [];
+  const walk = (dir: string, relPrefix: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (relPrefix === '' && (entry.name === 'attachments' || entry.name === 'SKILL.md')) continue;
+      const full = path.join(dir, entry.name);
+      const rel = relPrefix ? path.join(relPrefix, entry.name) : entry.name;
+      if (entry.isDirectory()) walk(full, rel);
+      else if (entry.isFile()) out.push(rel);
+    }
+  };
+  walk(skillDir, '');
+  return out;
+}
+
+/**
  * Reconciles a memory doc's attachments wrapper directory after an EXTERNAL rename (the file was
  * renamed outside this tool — Finder, `mv`, another agent editing the filesystem directly — not
  * via `memory_rename`, which already moves the wrapper dir itself as part of the rename). The

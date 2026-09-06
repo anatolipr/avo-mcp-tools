@@ -232,6 +232,22 @@ export function upsertFile<TFrontmatter>(
       );
       return;
     }
+
+    // source_path carries its OWN separate UNIQUE constraint (see db.ts), independent of this
+    // table's (folder, id) primary key — so a file whose frontmatter name or folder changed since
+    // it was last indexed now targets a DIFFERENT (folder, id) than its existing row, and the plain
+    // INSERT below would violate source_path's own uniqueness before ON CONFLICT(folder, id) ever
+    // gets a chance to apply (ON CONFLICT only resolves conflicts on the target it names). Evict the
+    // stale row (and its search_index/doc_dates) first, exactly like removeFile would for a real
+    // delete, so the fresh insert under the new key lands cleanly.
+    if (existingBySourcePath) {
+      const staleRow = db.prepare(`SELECT id, folder FROM ${spec.table} WHERE source_path = ?`).get(filePath) as
+        | { id: string; folder: string }
+        | undefined;
+      if (staleRow && (staleRow.id !== id || staleRow.folder !== folder)) {
+        removeFile(db, spec.table, filePath);
+      }
+    }
   }
 
   const cols = [...spec.columns, 'source_path', 'folder', 'body', 'mtime_ms'];
