@@ -179,66 +179,21 @@ test('dashboard REST routes surface a browser-side rejection as 422', async () =
   }
 });
 
-test('buildDashboardSnapshot includes pendingApprovals, empty by default and populated once requestApproval is called', () => {
+test('buildDashboardSnapshot includes recentToolRegistrations, empty by default and populated once logToolRegistration is called', () => {
   const t = new Tenant('t1', undefined, {});
-  tenants.set('approvals-channel', t);
+  tenants.set('registrations-channel', t);
   try {
-    const before = buildDashboardSnapshot().find((c) => c.channel === 'approvals-channel');
-    assert.deepEqual(before?.pendingApprovals, []);
+    const before = buildDashboardSnapshot().find((c) => c.channel === 'registrations-channel');
+    assert.deepEqual(before?.recentToolRegistrations, []);
 
-    void t.requestApproval('explore', 'discovery', 'return 1;');
-    const after = buildDashboardSnapshot().find((c) => c.channel === 'approvals-channel');
-    assert.equal(after?.pendingApprovals.length, 1);
-    assert.equal(after?.pendingApprovals[0]!.name, 'explore');
-    assert.equal(after?.pendingApprovals[0]!.description, 'discovery');
-    assert.equal(after?.pendingApprovals[0]!.code, 'return 1;');
+    t.logToolRegistration('explore', 'discovery', 'return 1;');
+    const after = buildDashboardSnapshot().find((c) => c.channel === 'registrations-channel');
+    assert.equal(after?.recentToolRegistrations.length, 1);
+    assert.equal(after?.recentToolRegistrations[0]!.name, 'explore');
+    assert.equal(after?.recentToolRegistrations[0]!.description, 'discovery');
+    assert.equal(after?.recentToolRegistrations[0]!.code, 'return 1;');
   } finally {
     t.dispose();
-    tenants.delete('approvals-channel');
-  }
-});
-
-test('POST .../approvals/:id resolves a pending approval and is a 404 for an unknown id', async () => {
-  const port = 18906;
-  const httpServer = createHttpServer({
-    port,
-    staticDir: os.tmpdir(),
-    initialSchema: undefined,
-    initialValues: {},
-    identity: { name: 'test', version: '0.0.1' },
-    registerFn: () => {},
-  });
-  attachWebSocketServer(httpServer, port, undefined, {});
-  await new Promise<void>((resolve) => httpServer.listen(port, resolve));
-  const t = new Tenant('t1', undefined, {});
-  tenants.set('approve-route-test', t);
-
-  try {
-    const approvalPromise = t.requestApproval('explore', 'discovery', 'return 1;');
-    const [approvalId] = [...t.pendingApprovals.keys()];
-
-    const base = `http://localhost:${port}/api/dashboard/channels/approve-route-test/approvals`;
-
-    const unknownRes = await fetch(`${base}/no-such-id`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approved: true }),
-    });
-    assert.equal(unknownRes.status, 404);
-
-    const res = await fetch(`${base}/${approvalId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approved: true }),
-    });
-    assert.equal(res.status, 200);
-    const body: any = await res.json();
-    assert.equal(body.ok, true);
-    assert.equal(await approvalPromise, true);
-    assert.equal(t.pendingApprovals.size, 0, 'resolved approval should be removed from the pending map');
-  } finally {
-    t.dispose();
-    tenants.delete('approve-route-test');
-    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    tenants.delete('registrations-channel');
   }
 });

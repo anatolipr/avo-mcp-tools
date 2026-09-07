@@ -28,6 +28,9 @@ function notifyDashboard() {
  */
 const RECONNECT_GRACE_MS = 4_000;
 
+/** Cap on Tenant.recentToolRegistrations — a rolling log, not a full history. */
+const RECENT_REGISTRATIONS_LIMIT = 50;
+
 /**
  * One WS connection's own tool manifest/summary/label, addressable
  * independently of other connections sharing the same tenant (e.g. two
@@ -127,20 +130,21 @@ export class Tenant<TSchema, TValues> {
   lastActivityAt: number;
   pendingCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   /**
-   * Pending human-approval requests, surfaced on the dashboard (not the
-   * bridged tab itself) — see requestApproval below. Sibling to
-   * pendingCalls (same resolve/reject-by-id lifecycle idiom) but carries
-   * the context a dashboard popup needs to render (name/description/code)
-   * and is resolved by a NEW dashboard REST action (approve/decline), not
-   * by a browser call_result message.
+   * Recent dynamic tool registrations (register_page_tool_by_path/_by_code),
+   * newest last — a passive log for the dashboard to render as sticky
+   * toasts, NOT a gate. Registration happens immediately when an agent
+   * calls the tool; this just records that it happened so a human watching
+   * the dashboard finds out, same idea as a build log rather than a
+   * confirmation prompt. Capped at RECENT_REGISTRATIONS_LIMIT so a chatty
+   * agent session can't grow this unboundedly.
    */
-  pendingApprovals = new Map<string, {
+  recentToolRegistrations: {
+    id: string;
     name: string;
     description: string;
-    code: string;
+    code: string | undefined;
     createdAt: number;
-    resolve: (approved: boolean) => void;
-  }>();
+  }[] = [];
   /**
    * One entry per MCP session currently bound to this tenant (each session
    * builds its own McpServer + registry via registerFn — see register.ts).
@@ -370,38 +374,18 @@ export class Tenant<TSchema, TValues> {
   }
 
   /**
-   * Registers a pending human-approval request (currently only used for
-   * register_page_tool_by_code — see manifest-tools.ts) and returns a
-   * promise resolving to `true`/`false` once a human answers via
-   * resolveApproval, or `false` on timeout. Fires notifyDashboard() so the
-   * SSE stream picks it up immediately (buildDashboardSnapshot now
-   * includes pendingApprovals) — the dashboard is the ONLY place this
-   * approval is meant to be answered; the bridged page itself never shows
-   * its own confirmation prompt for this.
+   * Records that a dynamic tool was just registered (register_page_tool_by_path
+   * /_by_code — see manifest-tools.ts) and fires notifyDashboard() so any open
+   * dashboard tab's SSE stream picks it up and renders a sticky toast. Purely
+   * informational — the registration itself has already happened by the time
+   * this is called; there is no approval/gate here, just a log entry.
    */
-  requestApproval(name: string, description: string, code: string, timeoutMs = 120_000): Promise<boolean> {
-    const id = randomUUID();
-    const promise = new Promise<boolean>((resolve) => {
-      this.pendingApprovals.set(id, { name, description, code, createdAt: Date.now(), resolve });
-      const timer = setTimeout(() => {
-        if (this.pendingApprovals.delete(id)) {
-          resolve(false);
-          notifyDashboard();
-        }
-      }, timeoutMs);
-      timer.unref();
-    });
+  logToolRegistration(name: string, description: string, code?: string): void {
+    this.recentToolRegistrations.push({ id: randomUUID(), name, description, code, createdAt: Date.now() });
+    if (this.recentToolRegistrations.length > RECENT_REGISTRATIONS_LIMIT) {
+      this.recentToolRegistrations.splice(0, this.recentToolRegistrations.length - RECENT_REGISTRATIONS_LIMIT);
+    }
     notifyDashboard();
-    return promise;
-  }
-
-  resolveApproval(id: string, approved: boolean): boolean {
-    const pending = this.pendingApprovals.get(id);
-    if (!pending) return false;
-    this.pendingApprovals.delete(id);
-    pending.resolve(approved);
-    notifyDashboard();
-    return true;
   }
 
   touch() {
@@ -487,10 +471,6 @@ export class Tenant<TSchema, TValues> {
       pending.reject(new Error('tenant disposed'));
     }
     this.pendingCalls.clear();
-    for (const [, pending] of this.pendingApprovals) {
-      pending.resolve(false);
-    }
-    this.pendingApprovals.clear();
     for (const client of this.wsClients) client.close();
     this.wsClients.clear();
     this.connections.clear();

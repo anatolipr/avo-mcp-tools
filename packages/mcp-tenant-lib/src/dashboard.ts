@@ -13,14 +13,14 @@ export interface DashboardChannel {
   channel: string;
   lastActivityAt: number;
   connections: DashboardConnection[];
-  pendingApprovals: DashboardPendingApproval[];
+  recentToolRegistrations: DashboardToolRegistration[];
 }
 
-export interface DashboardPendingApproval {
+export interface DashboardToolRegistration {
   id: string;
   name: string;
   description: string;
-  code: string;
+  code: string | undefined;
   createdAt: number;
 }
 
@@ -42,17 +42,11 @@ export function buildDashboardSnapshot(): DashboardChannel[] {
         toolCount: c.manifest.length,
         summary: c.summary ?? null,
       })),
-      // Pending register_page_tool_by_code approval requests for this
-      // channel — near-zero cost when empty (the common case), same
-      // "rebuild fresh from an in-memory map" pattern as `connections`
-      // above. See Tenant.requestApproval/resolveApproval (tenant.ts).
-      pendingApprovals: [...t.pendingApprovals.entries()].map(([id, p]) => ({
-        id,
-        name: p.name,
-        description: p.description,
-        code: p.code,
-        createdAt: p.createdAt,
-      })),
+      // Recent register_page_tool_by_path/_by_code registrations for this
+      // channel — a passive log the dashboard renders as sticky toasts, near-
+      // zero cost when empty (the common case). See Tenant.logToolRegistration
+      // (tenant.ts) — registration already happened by the time this exists.
+      recentToolRegistrations: t.recentToolRegistrations.map((r) => ({ ...r })),
     }))
     .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
 }
@@ -96,10 +90,9 @@ function readBody(req: IncomingMessage): Promise<string> {
  * SAME Tenant.call(...) reserved-name mechanism the register_page_tool_by_path
  * /_by_code MCP tools use (manifest-tools.ts) — one implementation, two
  * front doors (a human via this REST route, an agent via the MCP tool).
- * 422 signals "the browser rejected the call" (bad path, failed compile, a
- * declined confirm() for the code variant) — distinct from 400 (malformed
- * request) and 404 (channel/connection gone), giving the dashboard UI a
- * clean signal for which toast to show.
+ * 422 signals "the browser rejected the call" (bad path or failed compile) —
+ * distinct from 400 (malformed request) and 404 (channel/connection gone),
+ * giving the dashboard UI a clean signal for which toast to show.
  */
 async function handleRegisterRoute(
   req: IncomingMessage, res: ServerResponse, channel: string, connectionId: string,
@@ -127,11 +120,6 @@ async function handleRegisterRoute(
     }
   }
   try {
-    // Same longer timeout as register_page_tool_by_code's MCP tool for the
-    // code variant (blocks on a human confirm() dialog, not just network
-    // latency) — harmless to apply uniformly to register-by-path too, which
-    // will always resolve well under 10s anyway since nothing blocks on
-    // human input there.
     const result = await t.call(connectionId, callName, body, 60_000);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, result }));
@@ -223,47 +211,14 @@ export async function handleDashboardRoutes(req: IncomingMessage, res: ServerRes
   }
 
   // Registers a new tool by compiling fresh code — same underlying mechanism
-  // as the register_page_tool_by_code MCP tool. The browser shows a
-  // confirm() dialog before this actually registers (see js-bridge-mcp's
-  // main.ts) — this route just relays the request and its eventual
-  // success/failure, it does not itself gate anything.
+  // as the register_page_tool_by_code MCP tool. Registers immediately, no
+  // approval gate — this route just relays the request and its eventual
+  // success/failure; the dashboard's own SSE stream separately surfaces a
+  // sticky toast once Tenant.logToolRegistration records it.
   const registerByCodeMatch = url.pathname.match(/^\/api\/dashboard\/channels\/([^/]+)\/connections\/([^/]+)\/tools\/register-by-code$/);
   if (registerByCodeMatch && req.method === 'POST') {
     const [, channel, connectionId] = registerByCodeMatch as unknown as [string, string, string];
     return handleRegisterRoute(req, res, decodeURIComponent(channel), decodeURIComponent(connectionId), REMOTE_REGISTER_BY_CODE_CALL, ['name', 'description', 'code']);
-  }
-
-  // Answers a pending register_page_tool_by_code approval request (see
-  // Tenant.requestApproval/resolveApproval) — the dashboard's own popup
-  // posts here when a human clicks Approve/Decline. Not tied to a specific
-  // connection (approvals are channel-scoped, not connection-scoped), so
-  // this route only needs the channel + the approval's own id.
-  const approvalMatch = url.pathname.match(/^\/api\/dashboard\/channels\/([^/]+)\/approvals\/([^/]+)$/);
-  if (approvalMatch && req.method === 'POST') {
-    const [, channel, approvalId] = approvalMatch as unknown as [string, string, string];
-    const t = tenants.get(decodeURIComponent(channel));
-    if (!t) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'channel not found' }));
-      return true;
-    }
-    let body: any;
-    try {
-      body = JSON.parse(await readBody(req));
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
-      return true;
-    }
-    if (typeof body.approved !== 'boolean') {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'missing required boolean field "approved"' }));
-      return true;
-    }
-    const ok = t.resolveApproval(decodeURIComponent(approvalId), body.approved);
-    res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok }));
-    return true;
   }
 
   // Unregisters a previously dynamically-added tool by name — same

@@ -26,24 +26,29 @@ export interface Toast {
   type: ToastType;
   message: string;
   timeout: number;
+  sticky: boolean;
 }
 
 export const TOAST_EVENT = 'js-bridge-mcp-toast';
 
 /** The `detail` shape of a `js-bridge-mcp-toast` CustomEvent — `type`/`timeoutMs` are optional so a
- * caller dispatching the raw event (rather than using the `toast.*` helpers) can omit either. */
+ * caller dispatching the raw event (rather than using the `toast.*` helpers) can omit either.
+ * `sticky: true` skips the auto-dismiss timer entirely and shows a close (✕) button instead — for
+ * things a human should actively acknowledge (e.g. a dynamic tool registration log entry) rather
+ * than a fire-and-forget confirmation. */
 export interface ToastEventDetail {
   message: string;
   type?: ToastType;
   timeoutMs?: number;
+  sticky?: boolean;
 }
 
 const MAX_VISIBLE = 3;
 const DEFAULT_TIMEOUT_MS = 2200;
 
-function dispatch(message: string, type: ToastType = 'default', timeoutMs: number = DEFAULT_TIMEOUT_MS): void {
+function dispatch(message: string, type: ToastType = 'default', timeoutMs: number = DEFAULT_TIMEOUT_MS, sticky = false): void {
   window.dispatchEvent(
-    new CustomEvent<ToastEventDetail>(TOAST_EVENT, { detail: { message, type, timeoutMs }, bubbles: true, composed: true })
+    new CustomEvent<ToastEventDetail>(TOAST_EVENT, { detail: { message, type, timeoutMs, sticky }, bubbles: true, composed: true })
   );
 }
 
@@ -56,6 +61,8 @@ export const toast = {
   danger: (message: string, timeoutMs?: number) => dispatch(message, 'danger', timeoutMs),
   warning: (message: string, timeoutMs?: number) => dispatch(message, 'warning', timeoutMs),
   info: (message: string, timeoutMs?: number) => dispatch(message, 'info', timeoutMs),
+  /** Sticky variant: stays until the human clicks its close button. No timeoutMs — it never auto-dismisses. */
+  sticky: (message: string, type: ToastType = 'info') => dispatch(message, type, 0, true),
 };
 
 const TYPE_COLOR_VAR: Record<ToastType, string> = {
@@ -88,16 +95,22 @@ export class ToastStack extends LitElement {
   }
 
   #onToastEvent(e: CustomEvent<ToastEventDetail>) {
-    const { message, type = 'default', timeoutMs = DEFAULT_TIMEOUT_MS } = e.detail;
+    const { message, type = 'default', timeoutMs = DEFAULT_TIMEOUT_MS, sticky = false } = e.detail;
     const id = Math.random().toString(36).slice(2, 11);
-    const next = [...this.#queue.value, { id, type, message, timeout: timeoutMs }];
+    const next = [...this.#queue.value, { id, type, message, timeout: timeoutMs, sticky }];
     // Drop the OLDEST excess entries rather than refusing new ones — a burst of toasts still all
     // queue up, but the stack only ever shows the most recent MAX_VISIBLE at once (matches the
-    // reference's `result.shift()` behavior).
+    // reference's `result.shift()` behavior). Sticky toasts count against this cap too, so a burst
+    // of registrations doesn't grow the stack unboundedly — the dashboard's own recentToolRegistrations
+    // log (not this stack) is the durable record; the stack is just the "just now" pulse.
     this.#queue.set(next.length > MAX_VISIBLE ? next.slice(next.length - MAX_VISIBLE) : next);
-    setTimeout(() => {
-      this.#queue.set(this.#queue.value.filter((t) => t.id !== id));
-    }, timeoutMs);
+    if (!sticky) {
+      setTimeout(() => this.#dismiss(id), timeoutMs);
+    }
+  }
+
+  #dismiss(id: string) {
+    this.#queue.set(this.#queue.value.filter((t) => t.id !== id));
   }
 
   static styles = css`
@@ -126,8 +139,15 @@ export class ToastStack extends LitElement {
       font-size: 13px;
       max-width: min(420px, 90vw);
       animation: toast-in 180ms ease-out;
+      pointer-events: auto;
     }
     .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+    .msg { flex: 1 1 auto; min-width: 0; }
+    .close-btn {
+      flex: 0 0 auto; border: none; background: none; color: inherit; opacity: 0.6;
+      cursor: pointer; font-size: 13px; line-height: 1; padding: 2px;
+    }
+    .close-btn:hover { opacity: 1; }
     @keyframes toast-in {
       from { opacity: 0; transform: translateY(-8px); }
       to { opacity: 1; transform: translateY(0); }
@@ -140,7 +160,8 @@ export class ToastStack extends LitElement {
         (t) => html`
           <div class="toast">
             <span class="dot" style=${`background: var(${TYPE_COLOR_VAR[t.type]})`}></span>
-            <span>${t.message}</span>
+            <span class="msg">${t.message}</span>
+            ${t.sticky ? html`<button class="close-btn" title="Dismiss" @click=${() => this.#dismiss(t.id)}>✕</button>` : ''}
           </div>
         `
       )}

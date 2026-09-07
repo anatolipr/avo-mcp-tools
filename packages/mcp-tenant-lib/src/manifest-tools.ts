@@ -203,7 +203,9 @@ export function createManifestToolRegistry<TSchema, TValues>(
           'browser to confirm registration succeeded; a bad path (does not resolve, or resolves to ' +
           'something that is not a function) surfaces as a tool error, not a silent no-op. The new ' +
           'tool becomes callable immediately but (per the MCP tools/list_changed caveat noted on ' +
-          'describe_tools) some MCP clients may need a session restart to see it.',
+          'describe_tools) some MCP clients may need a session restart to see it. Registration is ' +
+          'logged as a sticky toast on this MCP server\'s dashboard so a human can review what got ' +
+          'registered, but does not block on any approval.',
         inputSchema: {
           id: z.string().optional().describe('Connection id from describe_tools\' `connections` array. Omit when only one connection is live.'),
           name: z.string().describe('Tool name to register — must be unique on this connection.'),
@@ -217,6 +219,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
         if (!targetId) return { content: [{ type: 'text', text: 'No live connection on this channel to register a tool on.' }], isError: true };
         try {
           const result = await t.call(targetId, REMOTE_REGISTER_BY_PATH_CALL, { name, description, path });
+          t.logToolRegistration(name, description);
           return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
         } catch (err) {
           return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };
@@ -238,16 +241,10 @@ export function createManifestToolRegistry<TSchema, TValues>(
           'the body of `new Function(\'args\', \'document\', \'window\', code)` — return a value (or a ' +
           'Promise) from `code`; it becomes this tool\'s result. Good for exploration too: a ' +
           'discovery/inspection function (e.g. "list every window.* key matching /save/i") can inform ' +
-          'what other tools to register next. UNLIKE register_page_tool_by_path, this requires a HUMAN ' +
-          'APPROVAL step before it runs — the request appears as a popup on this MCP server\'s dashboard ' +
-          '(the same page a human would open to see connected browser tabs; not the bridged page itself), ' +
-          'showing the name/description/code with Approve/Decline. TELL THE USER TO OPEN THE DASHBOARD ' +
-          '(they can also open it themselves at any time — no js-bridge-mcp-side action needed to trigger ' +
-          'it, it is always the localhost port this MCP server is running on) so they see the prompt; this ' +
-          'call will not resolve until they answer there (or ~2 minutes pass with no answer, treated as a ' +
-          'decline). If declined, the result is an error reading "User declined to register this tool" — ' +
-          'treat that as a real no (don\'t retry silently), not a transient failure to work around. A ' +
-          'throwing/invalid snippet (once approved) surfaces as a real tool error too, not a silent failure.',
+          'what other tools to register next. Registers immediately, no approval step — the ' +
+          'name/description/code are logged as a sticky toast on this MCP server\'s dashboard so a human ' +
+          'can review what got registered after the fact. A throwing/invalid snippet surfaces as a real ' +
+          'tool error, not a silent failure.',
         inputSchema: {
           id: z.string().optional().describe('Connection id from describe_tools\' `connections` array. Omit when only one connection is live.'),
           name: z.string().describe('Tool name to register — must be unique on this connection.'),
@@ -260,18 +257,12 @@ export function createManifestToolRegistry<TSchema, TValues>(
         const targetId = id ?? [...t.connections.keys()][0];
         if (!targetId) return { content: [{ type: 'text', text: 'No live connection on this channel to register a tool on.' }], isError: true };
         try {
-          // Approval happens on the DASHBOARD, not the bridged page itself
-          // — requestApproval() creates a pending entry the dashboard's SSE
-          // stream picks up and renders as a popup; this call blocks until
-          // a human answers there (resolveApproval, via a new REST action)
-          // or the request times out. Only on approval does the actual
-          // Tenant.call reach the bridged page - which then just compiles
-          // and registers, no confirmation of its own.
-          const approved = await t.requestApproval(name, description, code);
-          if (!approved) {
-            return { content: [{ type: 'text', text: 'User declined to register this tool' }], isError: true };
-          }
+          // Registers immediately against the bridged page, no human gate —
+          // logToolRegistration below is purely informational: it surfaces
+          // a sticky toast on the dashboard's SSE stream so a human can see
+          // what was registered after the fact, same as a build log.
           const result = await t.call(targetId, REMOTE_REGISTER_BY_CODE_CALL, { name, description, code });
+          t.logToolRegistration(name, description, code);
           return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
         } catch (err) {
           return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };

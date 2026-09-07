@@ -96,14 +96,17 @@ test('call(undefined, ...) broadcasts to every socket on the tenant (legacy path
   assert.equal(received, 1);
 });
 
-test('unsupported param type throws a clear error', () => {
+test('unsupported param type skips just that tool, others still register', () => {
   const t = new Tenant('t1', undefined, {});
   t.setToolManifest([
     { name: 'bad', description: 'x', params: { thing: { type: 'object' as any } } },
+    { name: 'insert_title', description: 'd', params: {} },
   ]);
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
-  assert.throws(() => registry.sync(), /unsupported param type/i);
+  assert.doesNotThrow(() => registry.sync());
+  assert.ok(!registry.handles.has('bad'));
+  assert.ok(registry.handles.has('insert_title'));
 });
 
 test('re-registering a manifest removes stale tools and adds new ones', () => {
@@ -378,7 +381,7 @@ test('register_page_tool_by_path sends a "__register_tool_by_path__" call and re
   assert.match(result.content[0].text, /registered "save"/);
 });
 
-test('register_page_tool_by_code requests approval FIRST (via Tenant.requestApproval), only reaching the browser once approved', async () => {
+test('register_page_tool_by_code reaches the browser immediately (no approval gate) and logs the registration', async () => {
   const t = new Tenant('t1', undefined, {});
   let sawCall = false;
   t.registerConnection('a', fakeSocket((msg) => {
@@ -392,46 +395,16 @@ test('register_page_tool_by_code requests approval FIRST (via Tenant.requestAppr
   registry.sync();
 
   const handle = registry.handles.get('register_page_tool_by_code')!;
-  const resultPromise = (handle as any).handler({ name: 'explore', description: 'discovery', code: 'return 1;' }, {});
+  const result: any = await (handle as any).handler({ name: 'explore', description: 'discovery', code: 'return 1;' }, {});
 
-  // The handler must NOT have reached the browser yet - it's blocked on
-  // Tenant.requestApproval, which only a human's resolveApproval (below)
-  // can unblock. Simulates the dashboard's own approve/decline REST route.
-  await new Promise((r) => setImmediate(r));
-  assert.equal(sawCall, false, 'should not call the browser before approval is granted');
-  assert.equal(t.pendingApprovals.size, 1);
-  const [approvalId] = [...t.pendingApprovals.keys()];
-  assert.equal(t.resolveApproval(approvalId!, true), true);
-
-  const result: any = await resultPromise;
-  assert.equal(sawCall, true, 'should call the browser once approval is granted');
+  assert.equal(sawCall, true, 'should call the browser immediately, with no approval step');
   assert.equal(result.isError, undefined);
   assert.match(result.content[0].text, /registered "explore" from code/);
+  assert.equal(t.recentToolRegistrations.length, 1);
+  assert.equal(t.recentToolRegistrations[0]!.name, 'explore');
 });
 
-test('register_page_tool_by_code surfaces a declined approval as isError, never reaching the browser', async () => {
-  const t = new Tenant('t1', undefined, {});
-  let sawCall = false;
-  t.registerConnection('a', fakeSocket(() => { sawCall = true; }));
-
-  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
-  const registry = createManifestToolRegistry(mcp, () => t);
-  registry.sync();
-
-  const handle = registry.handles.get('register_page_tool_by_code')!;
-  const resultPromise = (handle as any).handler({ name: 'explore', description: 'discovery', code: 'return 1;' }, {});
-
-  await new Promise((r) => setImmediate(r));
-  const [approvalId] = [...t.pendingApprovals.keys()];
-  assert.equal(t.resolveApproval(approvalId!, false), true);
-
-  const result: any = await resultPromise;
-  assert.equal(sawCall, false, 'a declined approval must never reach the browser');
-  assert.equal(result.isError, true);
-  assert.match(result.content[0].text, /User declined to register this tool/);
-});
-
-test('register_page_tool_by_code surfaces a browser-side rejection (e.g. bad code) as isError, once approved', async () => {
+test('register_page_tool_by_code surfaces a browser-side rejection (e.g. bad code) as isError, and does not log it', async () => {
   const t = new Tenant('t1', undefined, {});
   t.registerConnection('a', fakeSocket((msg) => {
     assert.equal(msg.name, '__register_tool_by_code__');
@@ -443,15 +416,11 @@ test('register_page_tool_by_code surfaces a browser-side rejection (e.g. bad cod
   registry.sync();
 
   const handle = registry.handles.get('register_page_tool_by_code')!;
-  const resultPromise = (handle as any).handler({ name: 'explore', description: 'discovery', code: '((' }, {});
+  const result: any = await (handle as any).handler({ name: 'explore', description: 'discovery', code: '((' }, {});
 
-  await new Promise((r) => setImmediate(r));
-  const [approvalId] = [...t.pendingApprovals.keys()];
-  t.resolveApproval(approvalId!, true);
-
-  const result: any = await resultPromise;
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /code failed to compile/);
+  assert.equal(t.recentToolRegistrations.length, 0, 'a failed registration must not be logged');
 });
 
 test('unregister_page_tool sends a "__unregister_tool__" call and surfaces a non-dynamic-tool rejection as isError', async () => {

@@ -156,12 +156,10 @@ const socket = connectStateSocket<undefined, undefined>(
           const bus = (window as any).__mcpToolBus;
           if (!bus) throw new Error('window.__mcpToolBus failed to load on this page - cannot register a tool');
           const { name: toolName, description, code } = args as { name: string; description: string; code: string };
-          // Human approval for code-based registration happens on the
-          // js-bridge-mcp DASHBOARD (Tenant.requestApproval, surfaced as a
-          // popup there), BEFORE the server ever sends this call — this
-          // page only ever receives an already-approved request and just
-          // compiles/registers it, no confirmation of its own. See
-          // manifest-tools.ts's register_page_tool_by_code handler.
+          // Registers immediately, no confirmation of its own — the
+          // js-bridge-mcp dashboard separately logs this as a sticky toast
+          // (Tenant.logToolRegistration) so a human can review it after the
+          // fact. See manifest-tools.ts's register_page_tool_by_code handler.
           let compiled: (a: unknown, doc: Document, win: Window) => unknown;
           try {
             compiled = new Function('args', 'document', 'window', code) as any;

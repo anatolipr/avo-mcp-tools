@@ -5,7 +5,6 @@ import { parseChannelInput, VALID_CHANNEL_NAME, sanitizeToValidChannelName } fro
 import { toast } from './toast.js';
 import './docs-section.js';
 import './tools-modal.js';
-import './approval-popup.js';
 
 function formatAge(ms: number): string {
   const diff = Date.now() - ms;
@@ -77,6 +76,15 @@ export class DashboardApp extends LitElement {
   #source?: EventSource;
   #justSent = new Signal<Set<string>>(new Set());
   #openModal = new Signal<{ channel: string; connectionId: string } | undefined>(undefined);
+  // Ids of recentToolRegistrations entries already surfaced as a sticky
+  // toast — the SSE snapshot resends the whole rolling log on every push,
+  // so without this a page reconnect (or any unrelated change firing
+  // another snapshot) would re-toast every entry in the log again.
+  #toastedRegistrationIds = new Set<string>();
+  // True once the first SSE snapshot has been processed — entries already
+  // in the log on that first snapshot are pre-existing history, not new
+  // events, so they're recorded as seen without toasting.
+  #seenFirstSnapshot = false;
 
   constructor() {
     super();
@@ -88,11 +96,30 @@ export class DashboardApp extends LitElement {
     this.#source = new EventSource('/api/dashboard/stream');
     this.#source.onmessage = (event) => {
       try {
-        this.#channels.set(JSON.parse(event.data) as DashboardChannel[]);
+        const channels = JSON.parse(event.data) as DashboardChannel[];
+        this.#channels.set(channels);
+        this.#toastNewRegistrations(channels);
       } catch {
         // malformed event — ignore, next push will self-correct
       }
     };
+  }
+
+  // Fires one sticky toast per not-yet-seen entry across all channels' logs
+  // (see Tenant.logToolRegistration) — on first connect this seeds
+  // #toastedRegistrationIds from whatever's already in the log without
+  // toasting it, so opening the dashboard doesn't replay every past
+  // registration as a fresh notification.
+  #toastNewRegistrations(channels: DashboardChannel[]) {
+    const isFirstSnapshot = !this.#seenFirstSnapshot;
+    this.#seenFirstSnapshot = true;
+    for (const c of channels) {
+      for (const r of c.recentToolRegistrations) {
+        if (this.#toastedRegistrationIds.has(r.id)) continue;
+        this.#toastedRegistrationIds.add(r.id);
+        if (!isFirstSnapshot) toast.sticky(`New tool registered on "${c.channel}": ${r.name} — ${r.description}`);
+      }
+    }
   }
 
   disconnectedCallback() {
@@ -160,7 +187,6 @@ export class DashboardApp extends LitElement {
   render() {
     const channels = this.#channels.value;
     const modal = this.#openModal.value;
-    const pendingApprovals = channels.flatMap((c) => c.pendingApprovals.map((approval) => ({ channel: c.channel, approval })));
     return html`
       <div class="header-row">
         <div>
@@ -180,7 +206,6 @@ export class DashboardApp extends LitElement {
             @close=${() => this.#openModal.set(undefined)}
           ></tools-modal>`
         : ''}
-      <approval-popup .approvals=${pendingApprovals}></approval-popup>
       <toast-stack></toast-stack>
     `;
   }

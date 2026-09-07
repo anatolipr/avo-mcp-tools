@@ -12,17 +12,18 @@ export interface DashboardChannel {
   channel: string;
   lastActivityAt: number;
   connections: DashboardConnection[];
-  pendingApprovals: DashboardPendingApproval[];
+  recentToolRegistrations: DashboardToolRegistration[];
 }
 
-// Mirrors mcp-tenant-lib's DashboardPendingApproval (dashboard.ts) — a
-// register_page_tool_by_code request awaiting a human's Approve/Decline on
-// this dashboard, pushed via the same SSE snapshot as `connections` above.
-export interface DashboardPendingApproval {
+// Mirrors mcp-tenant-lib's DashboardToolRegistration (dashboard.ts) — a
+// register_page_tool_by_path/_by_code registration that already happened,
+// logged for the dashboard to show as a sticky toast, pushed via the same
+// SSE snapshot as `connections` above.
+export interface DashboardToolRegistration {
   id: string;
   name: string;
   description: string;
-  code: string;
+  code: string | undefined;
   createdAt: number;
 }
 
