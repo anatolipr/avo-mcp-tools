@@ -229,10 +229,22 @@ const socket = connectStateSocket<undefined, undefined>(
 // askedOnce and only relevant to the very first register_tools call; a
 // resend reuses whatever appLabel is already in scope, same as __mcpRename
 // below does for its own direct send.
-(window as any).__mcpToolBus?.onChange(() => {
-  ({ manifest, fnByName } = splitPageTools(currentPageTools()));
-  socket.send({ type: 'register_tools', tools: manifest, summary: pageSummary, appLabel });
-  console.log(`[js-bridge-mcp] tool bus changed — re-sent ${manifest.length} tool(s)`);
+//
+// Subscribed only AFTER toolBusReady resolves - window.__mcpToolBus is
+// undefined at this point on a page that never imported tool-bus.js itself
+// (e.g. formalin's manual-snippet-paste flow, where main.ts's own
+// self-load above is the only thing that will ever create it). Subscribing
+// synchronously here with `?.` used to silently no-op on such a page - the
+// bus's own notify() (fired by registerTool/registerProvider, including
+// from the register_page_tool_by_path/_by_code branches above) would then
+// have no listener at all, so a newly-registered tool never got re-sent to
+// the server even though registerTool() itself succeeded with no error.
+toolBusReady.then(() => {
+  (window as any).__mcpToolBus?.onChange(() => {
+    ({ manifest, fnByName } = splitPageTools(currentPageTools()));
+    socket.send({ type: 'register_tools', tools: manifest, summary: pageSummary, appLabel });
+    console.log(`[js-bridge-mcp] tool bus changed — re-sent ${manifest.length} tool(s)`);
+  });
 });
 
 // Lets a human rename this connection later from DevTools, after the
