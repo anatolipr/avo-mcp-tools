@@ -57,11 +57,14 @@ export class DocsSection extends LitElement {
       <pre>${REGISTER_TOOL_EXAMPLE}</pre>
       <button class="copy-btn" @click=${() => this.#copyExample()}>Copy example</button>
       <p class="future">
-        Coming later — a visual tool-mapper UI (browse <code>window.*</code> for candidate
-        functions, map to a tool name via a click-through picker instead of hand-typing
-        <code>registerTool</code> calls) is planned but not built yet. It will be its own
-        separate, explicitly-triggered lazy load — nothing today auto-loads it, so don't assume it
-        exists or try to invoke it.
+        Prefer a guided UI over hand-typing <code>registerTool</code> calls? Click a connection's
+        tool count above to open its tools panel — browse what's registered (tagged host vs.
+        dynamic), add a new tool by pointing at an existing <code>window.*</code> function or
+        pasting fresh code, and remove any dynamically-added tool you no longer need. Host-defined
+        tools can never be removed this way. The same registration/unregistration is also
+        available to agents as three MCP tools: <code>register_page_tool_by_path</code>,
+        <code>register_page_tool_by_code</code>, and <code>unregister_page_tool</code> —
+        code-based registration shows the human a browser confirmation dialog before it runs.
       </p>
     `;
   }

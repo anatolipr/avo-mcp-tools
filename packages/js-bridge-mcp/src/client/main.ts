@@ -1,4 +1,11 @@
-import { connectStateSocket, splitPageTools, type PageToolDef } from 'mcp-tenant-lib/client';
+import {
+  connectStateSocket,
+  splitPageTools,
+  type PageToolDef,
+  REMOTE_REGISTER_BY_PATH_CALL,
+  REMOTE_REGISTER_BY_CODE_CALL,
+  REMOTE_UNREGISTER_CALL,
+} from 'mcp-tenant-lib/client';
 
 // The page itself defines its tools (function + manifest entry together,
 // see legacy-page/hello-world.html's inline <script>) and exposes them as
@@ -11,9 +18,14 @@ import { connectStateSocket, splitPageTools, type PageToolDef } from 'mcp-tenant
 // window.__mcpToolBus's current tools (if the bus is present) - called
 // both at initial connect and again on every bus onChange (see below), so
 // a provider (or a single registerTool() call) that registers after this
-// page has already connected still reaches the server.
+// page has already connected still reaches the server. `own` entries are
+// tagged source:'host' (unless the page already set one itself, unlikely
+// but respected if so) - the bus's own getTools() already tags everything
+// it returns source:'dynamic'. This distinction is load-bearing for
+// unregister_page_tool's "can never touch a host tool" safety guarantee.
 function currentPageTools(): PageToolDef[] {
-  const own: PageToolDef[] = (window as any).__mcpTools ?? [];
+  const rawOwn: PageToolDef[] = (window as any).__mcpTools ?? [];
+  const own = rawOwn.map((t) => ({ ...t, source: t.source ?? 'host' as const }));
   const bus: PageToolDef[] = (window as any).__mcpToolBus?.getTools() ?? [];
   return [...own, ...bus];
 }
@@ -76,6 +88,20 @@ const scriptUrl = new URL(import.meta.url);
 const serverUrl = scriptUrl.searchParams.get('server') ?? undefined;
 const tenant = scriptUrl.searchParams.get('tenant') ?? undefined;
 
+// Tracks the unregister function returned by window.__mcpToolBus.registerTool
+// for each tool THIS bridge dynamically registered via a reserved-name call
+// (register_page_tool_by_path/_by_code) — separate from any dynamic tool a
+// human registered directly from DevTools, which this map does NOT need to
+// track: __unregister_tool__ only needs to unregister tools THIS mechanism
+// added, and a human-pasted registerTool call already has its own unregister
+// fn discarded at the DevTools console (nothing to look up). Populated on
+// every successful __register_tool_by_*__ call below; a name collision
+// (registering over an existing dynamic entry of the same name) overwrites
+// the map entry — the bus's own registerProvider already replaces the prior
+// provider slot for that name (same-key re-registration), so the old
+// unregister closure would be stale/no-op anyway.
+const dynamicUnregisterByName = new Map<string, () => void>();
+
 const socket = connectStateSocket<undefined, undefined>(
   {
     onConnect() {
@@ -85,6 +111,58 @@ const socket = connectStateSocket<undefined, undefined>(
     },
     async onCall(id, name, args) {
       try {
+        if (name === REMOTE_REGISTER_BY_PATH_CALL) {
+          const { name: toolName, description, path } = args as { name: string; description: string; path: string };
+          const segments = path.split('.');
+          const lastKey = segments.pop()!;
+          const parent = segments.reduce((obj: any, key) => obj?.[key], window as any);
+          const fn = parent?.[lastKey];
+          if (typeof fn !== 'function') {
+            throw new Error(`"${path}" does not resolve to a function on window`);
+          }
+          // .call(parent, a) preserves `this` the same way a human pasting
+          // `window.myApp.save()` in DevTools would get it, rather than an
+          // unbound call that could break a method relying on its own `this`.
+          const bound = (a: unknown) => fn.call(parent, a);
+          const unregister = (window as any).__mcpToolBus.registerTool(toolName, bound, { description });
+          dynamicUnregisterByName.set(toolName, unregister);
+          socket.send({ type: 'call_result', id, result: `registered "${toolName}" -> window.${path}` });
+          return;
+        }
+
+        if (name === REMOTE_REGISTER_BY_CODE_CALL) {
+          const { name: toolName, description, code } = args as { name: string; description: string; code: string };
+          // Human approval for code-based registration happens on the
+          // js-bridge-mcp DASHBOARD (Tenant.requestApproval, surfaced as a
+          // popup there), BEFORE the server ever sends this call — this
+          // page only ever receives an already-approved request and just
+          // compiles/registers it, no confirmation of its own. See
+          // manifest-tools.ts's register_page_tool_by_code handler.
+          let compiled: (a: unknown, doc: Document, win: Window) => unknown;
+          try {
+            compiled = new Function('args', 'document', 'window', code) as any;
+          } catch (err) {
+            throw new Error(`code failed to compile: ${(err as Error).message}`);
+          }
+          const wrapped = async (a: unknown) => compiled(a, document, window);
+          const unregister = (window as any).__mcpToolBus.registerTool(toolName, wrapped, { description });
+          dynamicUnregisterByName.set(toolName, unregister);
+          socket.send({ type: 'call_result', id, result: `registered "${toolName}" from code` });
+          return;
+        }
+
+        if (name === REMOTE_UNREGISTER_CALL) {
+          const { toolName } = args as { toolName: string };
+          const unregister = dynamicUnregisterByName.get(toolName);
+          if (!unregister) {
+            throw new Error(`"${toolName}" is not a currently-tracked dynamically-registered tool on this connection (already removed, never dynamic, or a host tool — host tools can never be unregistered remotely)`);
+          }
+          unregister();
+          dynamicUnregisterByName.delete(toolName);
+          socket.send({ type: 'call_result', id, result: `unregistered "${toolName}"` });
+          return;
+        }
+
         const fn = fnByName.get(name);
         if (!fn) throw new Error(`no page tool named "${name}" — was it in window.__mcpTools when this script loaded?`);
         // Page tools may be async (e.g. ones that fetch another document) —

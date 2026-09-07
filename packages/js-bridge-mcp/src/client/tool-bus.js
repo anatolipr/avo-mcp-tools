@@ -39,7 +39,7 @@ window.__mcpToolBus ??= (() => {
         } else {
           claimedBy.set(name, providerName);
         }
-        out.push({ ...tool, name });
+        out.push({ ...tool, name, source: 'dynamic' });
       }
     }
     return out;

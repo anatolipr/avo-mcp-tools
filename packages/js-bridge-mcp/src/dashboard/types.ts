@@ -12,4 +12,26 @@ export interface DashboardChannel {
   channel: string;
   lastActivityAt: number;
   connections: DashboardConnection[];
+  pendingApprovals: DashboardPendingApproval[];
+}
+
+// Mirrors mcp-tenant-lib's DashboardPendingApproval (dashboard.ts) — a
+// register_page_tool_by_code request awaiting a human's Approve/Decline on
+// this dashboard, pushed via the same SSE snapshot as `connections` above.
+export interface DashboardPendingApproval {
+  id: string;
+  name: string;
+  description: string;
+  code: string;
+  createdAt: number;
+}
+
+// Mirrors mcp-tenant-lib's DashboardToolEntry (dashboard.ts) — the
+// tools-visualizer modal's per-connection browse-list entry shape, fetched
+// on demand from GET .../connections/:id/tools, not part of the SSE
+// snapshot above.
+export interface DashboardToolEntry {
+  name: string;
+  description: string;
+  source: 'dynamic' | 'host';
 }

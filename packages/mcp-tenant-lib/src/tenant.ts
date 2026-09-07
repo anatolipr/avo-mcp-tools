@@ -127,6 +127,21 @@ export class Tenant<TSchema, TValues> {
   lastActivityAt: number;
   pendingCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   /**
+   * Pending human-approval requests, surfaced on the dashboard (not the
+   * bridged tab itself) — see requestApproval below. Sibling to
+   * pendingCalls (same resolve/reject-by-id lifecycle idiom) but carries
+   * the context a dashboard popup needs to render (name/description/code)
+   * and is resolved by a NEW dashboard REST action (approve/decline), not
+   * by a browser call_result message.
+   */
+  pendingApprovals = new Map<string, {
+    name: string;
+    description: string;
+    code: string;
+    createdAt: number;
+    resolve: (approved: boolean) => void;
+  }>();
+  /**
    * One entry per MCP session currently bound to this tenant (each session
    * builds its own McpServer + registry via registerFn — see register.ts).
    * Under defaultTenantMode: 'shared' (http.ts), multiple concurrent MCP
@@ -354,6 +369,41 @@ export class Tenant<TSchema, TValues> {
     pending.reject(new Error(error));
   }
 
+  /**
+   * Registers a pending human-approval request (currently only used for
+   * register_page_tool_by_code — see manifest-tools.ts) and returns a
+   * promise resolving to `true`/`false` once a human answers via
+   * resolveApproval, or `false` on timeout. Fires notifyDashboard() so the
+   * SSE stream picks it up immediately (buildDashboardSnapshot now
+   * includes pendingApprovals) — the dashboard is the ONLY place this
+   * approval is meant to be answered; the bridged page itself never shows
+   * its own confirmation prompt for this.
+   */
+  requestApproval(name: string, description: string, code: string, timeoutMs = 120_000): Promise<boolean> {
+    const id = randomUUID();
+    const promise = new Promise<boolean>((resolve) => {
+      this.pendingApprovals.set(id, { name, description, code, createdAt: Date.now(), resolve });
+      const timer = setTimeout(() => {
+        if (this.pendingApprovals.delete(id)) {
+          resolve(false);
+          notifyDashboard();
+        }
+      }, timeoutMs);
+      timer.unref();
+    });
+    notifyDashboard();
+    return promise;
+  }
+
+  resolveApproval(id: string, approved: boolean): boolean {
+    const pending = this.pendingApprovals.get(id);
+    if (!pending) return false;
+    this.pendingApprovals.delete(id);
+    pending.resolve(approved);
+    notifyDashboard();
+    return true;
+  }
+
   touch() {
     this.lastActivityAt = Date.now();
   }
@@ -437,6 +487,10 @@ export class Tenant<TSchema, TValues> {
       pending.reject(new Error('tenant disposed'));
     }
     this.pendingCalls.clear();
+    for (const [, pending] of this.pendingApprovals) {
+      pending.resolve(false);
+    }
+    this.pendingApprovals.clear();
     for (const client of this.wsClients) client.close();
     this.wsClients.clear();
     this.connections.clear();

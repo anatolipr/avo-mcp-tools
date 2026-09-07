@@ -155,7 +155,7 @@ export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSch
       return;
     }
 
-    if (url.pathname.startsWith('/api/dashboard') && handleDashboardRoutes(req, res, port)) return;
+    if (url.pathname.startsWith('/api/dashboard') && (await handleDashboardRoutes(req, res, port))) return;
 
     if (url.pathname === '/upload' && req.method === 'POST') {
       const contentType = req.headers['content-type'] ?? '';

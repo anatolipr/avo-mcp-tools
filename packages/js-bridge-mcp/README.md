@@ -491,12 +491,47 @@ Vue app's exposed instance method) to a tool name with zero source changes
 to the host app — paste it in DevTools, and (subject to the MCP-client
 caveat immediately above) the tool becomes callable without reconnecting.
 
-**Coming later, not built yet**: a visual tool-mapper UI (browse `window.*`
-for candidate functions, map to a tool name via a click-through picker
-instead of hand-typing `registerTool` calls) is planned but deliberately
-deferred — it will be its own separate, explicitly-triggered lazy import
-when it ships, never auto-loaded, so a page that never opts in pays zero
-extra bytes for it today.
+**Prefer a guided UI over hand-typing `registerTool` calls?** The dashboard
+(`localhost:8766/`) has a tools panel for exactly this — click a
+connection's tool count to open it, browse what's registered (tagged host
+vs. dynamic), add a new tool by pointing at an existing `window.*` function
+or pasting fresh code, and remove any dynamically-added tool you no longer
+need. Host-defined tools can never be removed this way.
+
+### Remote registration via MCP tools
+
+The same registration/unregistration mechanism above is also available to
+agents, not just humans at the dashboard — three MCP tools (defined in
+`mcp-tenant-lib`, available to any tenant-lib consumer, not js-bridge-mcp-
+specific):
+
+- **`register_page_tool_by_path(id?, name, description, path)`** — points
+  at an existing `window.*` function (e.g. `path: "myApp.save"` resolves
+  `window.myApp.save`). Use when something the page already does just
+  needs exposing.
+- **`register_page_tool_by_code(id?, name, description, code)`** — agent
+  authors a brand-new function body, compiled and run as
+  `new Function('args', 'document', 'window', code)` — the same trust model
+  as pasting code into DevTools, but this is standing/persistent, not
+  one-shot. Because of that, **the browser shows the human a confirmation
+  dialog** with the name/description/code before it actually registers —
+  registration only proceeds if they click OK. If declined, the tool call
+  errors with `"User declined to register this tool"`. Good for
+  exploration too: a discovery/inspection function can inform what other
+  tools to register next — this is the closest an agent gets to "do what a
+  human can do at DevTools."
+- **`unregister_page_tool(id?, toolName)`** — removes a previously
+  dynamically-added tool by name. Can NEVER remove a host-defined tool
+  (one the page itself defined in `window.__mcpTools`) — errors clearly
+  instead of silently no-op'ing if the name isn't a currently-tracked
+  dynamic registration.
+
+All three accept an optional connection `id` (from `describe_tools`'
+`connections` array — omit when only one connection is live, same
+convention as `identify_connection`) and wait for the browser to confirm
+success/failure before returning, so a bad path, a failed compile, or a
+declined confirmation surfaces as a real tool error, not a silent no-op.
+
 - Two tabs of the *same* page connected to the same tenant get
   ordinal-suffixed prefixes (`tab__`, `tab2__`, ...) unless
   `window.__mcpAppName`/`document.title` differ between them — call

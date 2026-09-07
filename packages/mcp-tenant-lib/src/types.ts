@@ -85,6 +85,19 @@ export interface ToolManifestEntry {
   description: string;
   params: Record<string, ToolParamSpec>;
   example?: Record<string, unknown>;
+  /**
+   * Origin of this tool: 'host' for a tool the page defined itself
+   * (window.__mcpTools, present since before the tool bus existed),
+   * 'dynamic' for one registered at runtime via window.__mcpToolBus
+   * (including via the remote register_page_tool_by_path/_by_code MCP
+   * tools or a human's own registerTool DevTools paste). Absent/undefined
+   * is treated as 'host' for backward compat with pages running an older
+   * bridge that never sent this field. Load-bearing for the "a host tool
+   * can never be remotely unregistered" safety guarantee - see
+   * unregister_page_tool in manifest-tools.ts and js-bridge-mcp's
+   * tools-modal.ts.
+   */
+  source?: 'dynamic' | 'host';
 }
 
 export interface RegisterToolsMessage {

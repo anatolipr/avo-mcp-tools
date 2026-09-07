@@ -18,7 +18,26 @@ export interface PageToolDef {
   params: Record<string, ToolParamSpec>;
   example?: Record<string, unknown>;
   fn: (args: any) => unknown | Promise<unknown>;
+  /** See ToolManifestEntry's own doc comment (types.ts) - carried through splitPageTools unchanged. */
+  source?: 'dynamic' | 'host';
 }
+
+/**
+ * Reserved Tenant.call `name` values used by the remote tool
+ * registration/unregistration feature (register_page_tool_by_path/_by_code,
+ * unregister_page_tool - see manifest-tools.ts). These ride on the existing
+ * generic call/call_result round trip rather than adding new wire-protocol
+ * message types - a page's onCall handler special-cases these three names
+ * (never real page tools, never sent in a register_tools manifest) instead
+ * of dispatching to fnByName. Exported here (the confirmed browser-safe
+ * boundary both server code and page bridge code can import) so the server
+ * side (manifest-tools.ts) and the browser side (e.g. js-bridge-mcp's
+ * main.ts) share one source of truth for the three magic strings instead of
+ * each hand-typing them and risking drift.
+ */
+export const REMOTE_REGISTER_BY_PATH_CALL = '__register_tool_by_path__';
+export const REMOTE_REGISTER_BY_CODE_CALL = '__register_tool_by_code__';
+export const REMOTE_UNREGISTER_CALL = '__unregister_tool__';
 
 /**
  * Strips `fn` from each PageToolDef to produce the wire-safe

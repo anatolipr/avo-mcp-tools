@@ -40,10 +40,13 @@ test('createManifestToolRegistry registers a tool per manifest entry with correc
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
-  assert.equal(registry.handles.size, 3);
+  assert.equal(registry.handles.size, 6);
   assert.ok(registry.handles.has('insert_title'));
   assert.ok(registry.handles.has('describe_tools'));
   assert.ok(registry.handles.has('identify_connection'));
+  assert.ok(registry.handles.has('register_page_tool_by_path'));
+  assert.ok(registry.handles.has('register_page_tool_by_code'));
+  assert.ok(registry.handles.has('unregister_page_tool'));
 });
 
 test('calling a manifest tool sends a "call" WS message (by tool name) and resolves via resolveCall', async () => {
@@ -132,7 +135,7 @@ test('describe_tools returns the page summary and a compact tool index, and shad
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
 
-  assert.equal(registry.handles.size, 3, 'the colliding page tool name should not add a second handle');
+  assert.equal(registry.handles.size, 6, 'the colliding page tool name should not add a second handle');
 
   const handle = registry.handles.get('describe_tools')!;
   const result: any = await (handle as any).handler({}, {});
@@ -355,4 +358,146 @@ test('call() to a connection id that no longer exists resolves against a connect
   setTimeout(() => t.registerConnection('revived', socket), 50);
 
   assert.equal(await callPromise, 'ok');
+});
+
+test('register_page_tool_by_path sends a "__register_tool_by_path__" call and resolves via resolveCall', async () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket((msg) => {
+    assert.equal(msg.name, '__register_tool_by_path__');
+    assert.deepEqual(msg.args, { name: 'save', description: 'saves', path: 'myApp.save' });
+    t.resolveCall(msg.id, 'registered "save" -> window.myApp.save');
+  }));
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  const handle = registry.handles.get('register_page_tool_by_path')!;
+  const result: any = await (handle as any).handler({ name: 'save', description: 'saves', path: 'myApp.save' }, {});
+  assert.equal(result.isError, undefined);
+  assert.match(result.content[0].text, /registered "save"/);
+});
+
+test('register_page_tool_by_code requests approval FIRST (via Tenant.requestApproval), only reaching the browser once approved', async () => {
+  const t = new Tenant('t1', undefined, {});
+  let sawCall = false;
+  t.registerConnection('a', fakeSocket((msg) => {
+    sawCall = true;
+    assert.equal(msg.name, '__register_tool_by_code__');
+    t.resolveCall(msg.id, 'registered "explore" from code');
+  }));
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  const handle = registry.handles.get('register_page_tool_by_code')!;
+  const resultPromise = (handle as any).handler({ name: 'explore', description: 'discovery', code: 'return 1;' }, {});
+
+  // The handler must NOT have reached the browser yet - it's blocked on
+  // Tenant.requestApproval, which only a human's resolveApproval (below)
+  // can unblock. Simulates the dashboard's own approve/decline REST route.
+  await new Promise((r) => setImmediate(r));
+  assert.equal(sawCall, false, 'should not call the browser before approval is granted');
+  assert.equal(t.pendingApprovals.size, 1);
+  const [approvalId] = [...t.pendingApprovals.keys()];
+  assert.equal(t.resolveApproval(approvalId!, true), true);
+
+  const result: any = await resultPromise;
+  assert.equal(sawCall, true, 'should call the browser once approval is granted');
+  assert.equal(result.isError, undefined);
+  assert.match(result.content[0].text, /registered "explore" from code/);
+});
+
+test('register_page_tool_by_code surfaces a declined approval as isError, never reaching the browser', async () => {
+  const t = new Tenant('t1', undefined, {});
+  let sawCall = false;
+  t.registerConnection('a', fakeSocket(() => { sawCall = true; }));
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  const handle = registry.handles.get('register_page_tool_by_code')!;
+  const resultPromise = (handle as any).handler({ name: 'explore', description: 'discovery', code: 'return 1;' }, {});
+
+  await new Promise((r) => setImmediate(r));
+  const [approvalId] = [...t.pendingApprovals.keys()];
+  assert.equal(t.resolveApproval(approvalId!, false), true);
+
+  const result: any = await resultPromise;
+  assert.equal(sawCall, false, 'a declined approval must never reach the browser');
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /User declined to register this tool/);
+});
+
+test('register_page_tool_by_code surfaces a browser-side rejection (e.g. bad code) as isError, once approved', async () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket((msg) => {
+    assert.equal(msg.name, '__register_tool_by_code__');
+    t.rejectCall(msg.id, 'code failed to compile: Unexpected token');
+  }));
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  const handle = registry.handles.get('register_page_tool_by_code')!;
+  const resultPromise = (handle as any).handler({ name: 'explore', description: 'discovery', code: '((' }, {});
+
+  await new Promise((r) => setImmediate(r));
+  const [approvalId] = [...t.pendingApprovals.keys()];
+  t.resolveApproval(approvalId!, true);
+
+  const result: any = await resultPromise;
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /code failed to compile/);
+});
+
+test('unregister_page_tool sends a "__unregister_tool__" call and surfaces a non-dynamic-tool rejection as isError', async () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket((msg) => {
+    assert.equal(msg.name, '__unregister_tool__');
+    assert.deepEqual(msg.args, { toolName: 'get_document' });
+    t.rejectCall(msg.id, '"get_document" is not a currently-tracked dynamically-registered tool on this connection (already removed, never dynamic, or a host tool — host tools can never be unregistered remotely)');
+  }));
+
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  const handle = registry.handles.get('unregister_page_tool')!;
+  const result: any = await (handle as any).handler({ toolName: 'get_document' }, {});
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /host tools can never be unregistered/);
+});
+
+test('register_page_tool_by_path/by_code/unregister_page_tool report a clear error with no live connection', async () => {
+  const t = new Tenant('t1', undefined, {});
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  const byPath: any = await (registry.handles.get('register_page_tool_by_path') as any).handler({ name: 'x', description: 'd', path: 'a.b' }, {});
+  assert.equal(byPath.isError, true);
+  assert.match(byPath.content[0].text, /No live connection/);
+
+  const byCode: any = await (registry.handles.get('register_page_tool_by_code') as any).handler({ name: 'x', description: 'd', code: 'return 1;' }, {});
+  assert.equal(byCode.isError, true);
+  assert.match(byCode.content[0].text, /No live connection/);
+
+  const unreg: any = await (registry.handles.get('unregister_page_tool') as any).handler({ toolName: 'x' }, {});
+  assert.equal(unreg.isError, true);
+  assert.match(unreg.content[0].text, /No live connection/);
+});
+
+test('identify_connection reports a clear error with no live connection (same convention, previously untested)', async () => {
+  const t = new Tenant('t1', undefined, {});
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+
+  const result: any = await (registry.handles.get('identify_connection') as any).handler({}, {});
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /No live connection/);
 });

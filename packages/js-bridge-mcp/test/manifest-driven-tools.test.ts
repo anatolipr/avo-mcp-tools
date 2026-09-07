@@ -84,7 +84,18 @@ async function waitForTool(client: Client, name: string, timeoutMs = 3000) {
 test('a fresh session only has the base tools until a page pushes its manifest', async () => {
   const a = await connectClient();
   const names = await toolNames(a.client);
-  assert.deepEqual(names.sort(), ['channel_find', 'describe_channel', 'describe_tools', 'get_embed_snippet', 'identify_connection', 'join_channel', 'list_channels']);
+  assert.deepEqual(names.sort(), [
+    'channel_find',
+    'describe_channel',
+    'describe_tools',
+    'get_embed_snippet',
+    'identify_connection',
+    'join_channel',
+    'list_channels',
+    'register_page_tool_by_code',
+    'register_page_tool_by_path',
+    'unregister_page_tool',
+  ]);
   await a.client.close();
 });
 
@@ -172,4 +183,172 @@ test('two unpinned MCP sessions share the default tenant — a manifest register
   wsA.close();
   await a.client.close();
   await b.client.close();
+});
+
+test('register_page_tool_by_path round-trips through the server-side reserved-name plumbing', async () => {
+  const a = await connectClient();
+  const tenantId = 'default';
+
+  const ws = await connectWs(tenantId);
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.type === 'call' && msg.name === '__register_tool_by_path__') {
+      ws.send(JSON.stringify({ type: 'call_result', id: msg.id, result: `registered "${msg.args.name}" -> window.${msg.args.path}` }));
+    }
+  });
+  ws.send(JSON.stringify({ type: 'register_tools', tools: [] }));
+  await new Promise((r) => setTimeout(r, 100));
+
+  const result = await a.client.callTool({
+    name: 'register_page_tool_by_path',
+    arguments: { name: 'save', description: 'saves', path: 'myApp.save' },
+  });
+  assert.equal(result.isError, undefined);
+  assert.match(textOf(result), /registered "save" -> window.myApp.save/);
+
+  ws.close();
+  await a.client.close();
+});
+
+async function waitForPendingApproval(channel: string, timeoutMs = 3000): Promise<string> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const snapshot: any[] = await (await fetch(`${BASE_URL}/api/dashboard`)).json();
+    const c = snapshot.find((ch) => ch.channel === channel);
+    const approval = c?.pendingApprovals?.[0];
+    if (approval) return approval.id;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`no pending approval appeared on channel "${channel}" within ${timeoutMs}ms`);
+}
+
+test('register_page_tool_by_code requires approval via the dashboard REST route before reaching the browser', async () => {
+  const a = await connectClient();
+  const tenantId = 'default';
+
+  const ws = await connectWs(tenantId);
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.type === 'call' && msg.name === '__register_tool_by_code__') {
+      ws.send(JSON.stringify({ type: 'call_result', id: msg.id, result: `registered "${msg.args.name}" from code` }));
+    }
+  });
+  ws.send(JSON.stringify({ type: 'register_tools', tools: [] }));
+  await new Promise((r) => setTimeout(r, 100));
+
+  const resultPromise = a.client.callTool({
+    name: 'register_page_tool_by_code',
+    arguments: { name: 'explore', description: 'discovery', code: 'return 1;' },
+  });
+
+  // Simulates a human approving via the dashboard's own REST route — the
+  // same one its approval-popup.ts posts to.
+  const approvalId = await waitForPendingApproval(tenantId);
+  const approveRes = await fetch(`${BASE_URL}/api/dashboard/channels/${tenantId}/approvals/${approvalId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approved: true }),
+  });
+  assert.equal(approveRes.status, 200);
+
+  const result = await resultPromise;
+  assert.equal(result.isError, undefined);
+  assert.match(textOf(result), /registered "explore" from code/);
+
+  ws.close();
+  await a.client.close();
+});
+
+test('register_page_tool_by_code surfaces a declined approval as an MCP tool error, never reaching the browser', async () => {
+  const a = await connectClient();
+  const tenantId = 'default';
+
+  const ws = await connectWs(tenantId);
+  let sawCall = false;
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.type === 'call' && msg.name === '__register_tool_by_code__') sawCall = true;
+  });
+  ws.send(JSON.stringify({ type: 'register_tools', tools: [] }));
+  await new Promise((r) => setTimeout(r, 100));
+
+  const resultPromise = a.client.callTool({
+    name: 'register_page_tool_by_code',
+    arguments: { name: 'explore2', description: 'discovery', code: 'return 1;' },
+  });
+
+  const approvalId = await waitForPendingApproval(tenantId);
+  const declineRes = await fetch(`${BASE_URL}/api/dashboard/channels/${tenantId}/approvals/${approvalId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approved: false }),
+  });
+  assert.equal(declineRes.status, 200);
+
+  const result = await resultPromise;
+  assert.equal(sawCall, false, 'a declined approval must never reach the browser');
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /User declined to register this tool/);
+
+  ws.close();
+  await a.client.close();
+});
+
+test('register_page_tool_by_code (once approved) surfaces a browser-side rejection as an MCP tool error', async () => {
+  const a = await connectClient();
+  const tenantId = 'default';
+
+  const ws = await connectWs(tenantId);
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.type === 'call' && msg.name === '__register_tool_by_code__') {
+      ws.send(JSON.stringify({ type: 'call_result', id: msg.id, error: 'code failed to compile: Unexpected token' }));
+    }
+  });
+  ws.send(JSON.stringify({ type: 'register_tools', tools: [] }));
+  await new Promise((r) => setTimeout(r, 100));
+
+  const resultPromise = a.client.callTool({
+    name: 'register_page_tool_by_code',
+    arguments: { name: 'explore3', description: 'discovery', code: '((' },
+  });
+
+  const approvalId = await waitForPendingApproval(tenantId);
+  await fetch(`${BASE_URL}/api/dashboard/channels/${tenantId}/approvals/${approvalId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approved: true }),
+  });
+
+  const result = await resultPromise;
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /code failed to compile/);
+
+  ws.close();
+  await a.client.close();
+});
+
+test('unregister_page_tool surfaces a "not a tracked dynamic tool" rejection as an MCP tool error', async () => {
+  const a = await connectClient();
+  const tenantId = 'default';
+
+  const ws = await connectWs(tenantId);
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.type === 'call' && msg.name === '__unregister_tool__') {
+      ws.send(JSON.stringify({ type: 'call_result', id: msg.id, error: `"${msg.args.toolName}" is not a currently-tracked dynamically-registered tool on this connection (already removed, never dynamic, or a host tool — host tools can never be unregistered remotely)` }));
+    }
+  });
+  ws.send(JSON.stringify({ type: 'register_tools', tools: [] }));
+  await new Promise((r) => setTimeout(r, 100));
+
+  const result = await a.client.callTool({
+    name: 'unregister_page_tool',
+    arguments: { toolName: 'get_embed_snippet' },
+  });
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /host tools can never be unregistered/);
+
+  ws.close();
+  await a.client.close();
 });

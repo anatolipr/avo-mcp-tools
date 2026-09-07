@@ -4,6 +4,8 @@ import type { DashboardChannel } from './types.js';
 import { parseChannelInput, VALID_CHANNEL_NAME, sanitizeToValidChannelName } from '../client/connect.js';
 import { toast } from './toast.js';
 import './docs-section.js';
+import './tools-modal.js';
+import './approval-popup.js';
 
 function formatAge(ms: number): string {
   const diff = Date.now() - ms;
@@ -55,7 +57,11 @@ export class DashboardApp extends LitElement {
       font-size: 12px; opacity: 0.6; flex: 1 1 auto; min-width: 0;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .connection-tools { font-size: 11px; opacity: 0.6; flex: 0 0 auto; }
+    .view-tools-btn {
+      font-size: 11px; opacity: 0.7; flex: 0 0 auto; border: none; background: none;
+      color: inherit; cursor: pointer; padding: 2px 4px; border-radius: 4px;
+    }
+    .view-tools-btn:hover { opacity: 1; background: var(--hover); }
     .no-connections { padding: 10px 14px; font-size: 12px; opacity: 0.5; font-style: italic; }
     .identify-btn {
       flex: 0 0 auto; font-size: 11px; padding: 4px 10px; border-radius: 6px;
@@ -70,6 +76,7 @@ export class DashboardApp extends LitElement {
   #channels = new Signal<DashboardChannel[]>([]);
   #source?: EventSource;
   #justSent = new Signal<Set<string>>(new Set());
+  #openModal = new Signal<{ channel: string; connectionId: string } | undefined>(undefined);
 
   constructor() {
     super();
@@ -152,6 +159,8 @@ export class DashboardApp extends LitElement {
 
   render() {
     const channels = this.#channels.value;
+    const modal = this.#openModal.value;
+    const pendingApprovals = channels.flatMap((c) => c.pendingApprovals.map((approval) => ({ channel: c.channel, approval })));
     return html`
       <div class="header-row">
         <div>
@@ -164,6 +173,14 @@ export class DashboardApp extends LitElement {
         ? html`<div class="empty">No channels yet. A channel appears here once an agent calls join_channel, or a page connects and lands on the default channel.</div>`
         : channels.map((c) => this.#renderChannel(c))}
       <docs-section></docs-section>
+      ${modal
+        ? html`<tools-modal
+            .channel=${modal.channel}
+            .connectionId=${modal.connectionId}
+            @close=${() => this.#openModal.set(undefined)}
+          ></tools-modal>`
+        : ''}
+      <approval-popup .approvals=${pendingApprovals}></approval-popup>
       <toast-stack></toast-stack>
     `;
   }
@@ -189,7 +206,13 @@ export class DashboardApp extends LitElement {
                     <span class="connection-dot"></span>
                     <span class="connection-label">${conn.label ?? '(unlabeled)'}</span>
                     <span class="connection-summary">${conn.summary ?? ''}</span>
-                    <span class="connection-tools">${conn.toolCount} tool${conn.toolCount === 1 ? '' : 's'}</span>
+                    <button
+                      class="view-tools-btn"
+                      title="View tools"
+                      @click=${() => this.#openModal.set({ channel: c.channel, connectionId: conn.id })}
+                    >
+                      ${conn.toolCount} tool${conn.toolCount === 1 ? '' : 's'}
+                    </button>
                     <button
                       class="identify-btn ${sent ? 'sent' : ''}"
                       @click=${() => this.#identify(c.channel, conn.id)}

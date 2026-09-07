@@ -4,7 +4,7 @@ export { createHttpServer, type CreateHttpServerOptions } from './http.js';
 export { attachWebSocketServer } from './ws.js';
 export { createManifestToolRegistry, type ManifestToolRegistry } from './manifest-tools.js';
 export { registerChannelTools } from './channel-tools.js';
-export { handleDashboardRoutes, buildDashboardSnapshot, type DashboardChannel, type DashboardConnection } from './dashboard.js';
+export { handleDashboardRoutes, buildDashboardSnapshot, getConnectionToolList, type DashboardChannel, type DashboardConnection, type DashboardToolEntry } from './dashboard.js';
 export { findChannelMatches, scoreChannelMatch, type ChannelMatch } from './channel-search.js';
 export { enablePersistence } from './persistence.js';
 export * from './types.js';
