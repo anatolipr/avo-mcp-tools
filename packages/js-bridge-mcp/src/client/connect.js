@@ -42,10 +42,16 @@ const JSBRIDGE_HOST = 'http://localhost:8766';
 // Must match js-bridge-mcp's own isValidChannelName (mcp-tenant-lib/src/tenant.ts)
 // exactly - channel names become the WS `?tenant=` query param, and the
 // server rejects anything outside this set with a 4404 close before a
-// Tenant is ever created.
-const VALID_CHANNEL_NAME = /^[a-zA-Z0-9_-]+$/;
+// Tenant is ever created. Exported (along with parseChannelInput/
+// sanitizeToValidChannelName below) so the dashboard's own copy-snippet
+// button (dashboard-app.ts) can reuse the exact same validation instead of
+// duplicating it - the dashboard is bundled via vite.dashboard.config.ts,
+// so it CAN statically import this file at build time, unlike a
+// cross-origin host page which only ever reaches this module via a
+// runtime URL fetch.
+export const VALID_CHANNEL_NAME = /^[a-zA-Z0-9_-]+$/;
 
-function sanitizeToValidChannelName(raw) {
+export function sanitizeToValidChannelName(raw) {
   return raw.replace(/[^a-zA-Z0-9_-]+/g, '-');
 }
 
@@ -53,7 +59,7 @@ function sanitizeToValidChannelName(raw) {
  * Splits a user-typed "channel" or "channel:app" string into its parts.
  * A bare name (no colon) is just the channel, with no app-label override.
  */
-function parseChannelInput(input) {
+export function parseChannelInput(input) {
   const idx = input.indexOf(':');
   if (idx === -1) return { channel: input, appLabel: undefined };
   const channel = input.slice(0, idx).trim();

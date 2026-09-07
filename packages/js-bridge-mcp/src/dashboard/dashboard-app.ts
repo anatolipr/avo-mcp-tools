@@ -1,6 +1,9 @@
 import { LitElement, html, css } from 'lit';
 import { Signal, SignalWatcher } from 'avosignals';
 import type { DashboardChannel } from './types.js';
+import { parseChannelInput, VALID_CHANNEL_NAME, sanitizeToValidChannelName } from '../client/connect.js';
+import { toast } from './toast.js';
+import './docs-section.js';
 
 function formatAge(ms: number): string {
   const diff = Date.now() - ms;
@@ -16,8 +19,15 @@ function formatAge(ms: number): string {
 export class DashboardApp extends LitElement {
   static styles = css`
     :host { display: block; min-height: 100vh; padding: 24px; box-sizing: border-box; }
+    .header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
     h1 { font-size: 16px; margin: 0 0 4px; }
     .subtitle { font-size: 12px; opacity: 0.6; margin: 0 0 20px; }
+    .copy-snippet-btn {
+      flex: 0 0 auto; font-size: 12px; padding: 6px 12px; border-radius: 6px;
+      border: 1px solid var(--border-strong); background: var(--bg); color: inherit; cursor: pointer;
+    }
+    .copy-snippet-btn:hover { background: var(--hover); border-color: var(--accent); }
+    .copy-snippet-btn:active { background: var(--accent-tint); }
     .empty {
       padding: 40px 20px; text-align: center; opacity: 0.6; font-size: 13px;
       border: 1px dashed var(--border-strong); border-radius: 8px;
@@ -83,6 +93,44 @@ export class DashboardApp extends LitElement {
     this.#source?.close();
   }
 
+  // Human-triggered counterpart to the get_embed_snippet MCP tool
+  // (hello-tools.ts) — same bare `import("<server>/main.js?...")`
+  // one-liner shape, same "channel" / "channel:app-name" input convention
+  // and validation as connect.js's own handleConnectClick, just invoked
+  // from this dashboard button instead of by an agent. Unlike
+  // get_embed_snippet (which needs the `port` handler arg since it runs in
+  // an arbitrary MCP client process), this reads window.location.origin
+  // directly — the dashboard IS served by js-bridge-mcp's own server, so
+  // its own origin already IS the right server URL, no port-threading
+  // needed. `parsed.appLabel` is validated for input-convention
+  // consistency with connect.js but deliberately NOT encoded into the
+  // snippet URL — get_embed_snippet's own snippet has no appLabel query
+  // param either; the appLabel-setting mechanism for a pasted connection
+  // is main.ts's own connect-time labelForFirstRegister() prompt, unchanged.
+  async #copyEmbedSnippet() {
+    let input = prompt('Channel to connect (or "channel:app-name" to set an explicit app label):', '');
+    if (!input) return;
+    let parsed = parseChannelInput(input);
+    while (parsed.channel && !VALID_CHANNEL_NAME.test(parsed.channel)) {
+      input = prompt(
+        `"${parsed.channel}" isn't a valid channel name — only letters, digits, underscore, and hyphen are allowed (no spaces). Try again:`,
+        `${sanitizeToValidChannelName(parsed.channel)}${parsed.appLabel ? `:${parsed.appLabel}` : ''}`
+      );
+      if (!input) return;
+      parsed = parseChannelInput(input);
+    }
+    if (!parsed.channel) return;
+    const serverUrl = window.location.origin;
+    const moduleUrl = `${serverUrl}/main.js?server=${encodeURIComponent(serverUrl)}&tenant=${encodeURIComponent(parsed.channel)}`;
+    const snippet = `import(${JSON.stringify(moduleUrl)});`;
+    try {
+      await navigator.clipboard.writeText(snippet);
+      toast.success('Embed snippet copied');
+    } catch {
+      toast.danger('Could not copy to clipboard');
+    }
+  }
+
   async #identify(channel: string, connectionId: string) {
     const key = `${channel}::${connectionId}`;
     try {
@@ -105,11 +153,18 @@ export class DashboardApp extends LitElement {
   render() {
     const channels = this.#channels.value;
     return html`
-      <h1>Connected apps</h1>
-      <p class="subtitle">Live channels and bridged browser tabs — updates automatically.</p>
+      <div class="header-row">
+        <div>
+          <h1>Connected apps</h1>
+          <p class="subtitle">Live channels and bridged browser tabs — updates automatically.</p>
+        </div>
+        <button class="copy-snippet-btn" @click=${() => this.#copyEmbedSnippet()}>Copy embed snippet…</button>
+      </div>
       ${channels.length === 0
         ? html`<div class="empty">No channels yet. A channel appears here once an agent calls join_channel, or a page connects and lands on the default channel.</div>`
         : channels.map((c) => this.#renderChannel(c))}
+      <docs-section></docs-section>
+      <toast-stack></toast-stack>
     `;
   }
 

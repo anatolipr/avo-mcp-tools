@@ -6,8 +6,22 @@ import { connectStateSocket, splitPageTools, type PageToolDef } from 'mcp-tenant
 // just reads that array, keeps the real function references locally, and
 // relays the serializable parts (name/description/params/example) to the
 // server so they can be registered as MCP tools.
-const pageTools: PageToolDef[] = (window as any).__mcpTools ?? [];
-const { manifest, fnByName } = splitPageTools(pageTools);
+//
+// currentPageTools() re-reads window.__mcpTools fresh and merges in
+// window.__mcpToolBus's current tools (if the bus is present) - called
+// both at initial connect and again on every bus onChange (see below), so
+// a provider (or a single registerTool() call) that registers after this
+// page has already connected still reaches the server.
+function currentPageTools(): PageToolDef[] {
+  const own: PageToolDef[] = (window as any).__mcpTools ?? [];
+  const bus: PageToolDef[] = (window as any).__mcpToolBus?.getTools() ?? [];
+  return [...own, ...bus];
+}
+
+// let, not const: reassigned wholesale (not mutated in place) on every bus
+// onChange below - onCall's closure reads fnByName live, so a reassignment
+// here is visible there without any extra plumbing.
+let { manifest, fnByName } = splitPageTools(currentPageTools());
 
 // Optional page-authored manifest-level context (what kind of page this is,
 // cross-tool sequencing rules, shared domain concepts) - distinct from each
@@ -88,6 +102,36 @@ const socket = connectStateSocket<undefined, undefined>(
   },
   { serverUrl, tenant }
 );
+
+// Live/late tool registration: a page-authored provider (e.g. via
+// window.__mcpToolBus.registerTool from DevTools, or a lazily-loaded
+// provider module) can register tools at ANY point during an
+// already-connected session, not just before the first connect. Every bus
+// onChange re-merges window.__mcpTools + the bus's current tools and
+// re-sends register_tools - mcp-tenant-lib's updateConnectionManifest
+// (tenant.ts) + syncManifestToolRegistries (manifest-tools.ts) are both
+// safe to call repeatedly and already emit the MCP SDK's own
+// tools/list_changed notification on every call, so no server-side change
+// was needed for this.
+//
+// CAVEAT, documented in this package's own README ("Common mistakes"):
+// some MCP clients (Claude Code included, observed against js-bridge-mcp)
+// fetch tools/list ONCE at initialize and do not re-poll on
+// tools/list_changed mid-session - a tool registered after that client's
+// session started may need a full MCP client restart to become callable,
+// even though this resend succeeds and the server registers it correctly.
+// This is a known, already-documented client limitation, not a bug in
+// this resend path.
+//
+// Does NOT re-trigger labelForFirstRegister()'s prompt - that's gated by
+// askedOnce and only relevant to the very first register_tools call; a
+// resend reuses whatever appLabel is already in scope, same as __mcpRename
+// below does for its own direct send.
+(window as any).__mcpToolBus?.onChange(() => {
+  ({ manifest, fnByName } = splitPageTools(currentPageTools()));
+  socket.send({ type: 'register_tools', tools: manifest, summary: pageSummary, appLabel });
+  console.log(`[js-bridge-mcp] tool bus changed — re-sent ${manifest.length} tool(s)`);
+});
 
 // Lets a human rename this connection later from DevTools, after the
 // connect-time prompt above already ran (e.g. they dismissed it, or want

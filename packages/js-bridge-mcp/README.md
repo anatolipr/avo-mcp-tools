@@ -192,6 +192,36 @@ DevTools: `join_channel("myapp")`, then call tools by name (or their
 prefixed form if more than one connection shares the channel — see
 "Multiple tabs on one tenant" below).
 
+## Multiple entrypoints (`js-bridge-mcp` vs `js-bridge-mcp/client` vs `/bus` vs `/connect`)
+
+Four ways to consume this package, depending on what you're building:
+
+1. **`js-bridge-mcp`** (npm dependency, server) — `npx js-bridge-mcp` or
+   programmatic server usage. Unchanged, this is the same package entrypoint
+   as always.
+2. **`js-bridge-mcp/client`** (npm sub-path, bundler-based host app) —
+   `import { connectMcpBridge, defineTool } from 'js-bridge-mcp/client'`.
+   The ergonomic all-in-one entrypoint for a normal Vite/TS app: composes
+   `createMcpConnect` with an automatic tool-bus load, replacing the
+   hand-rolled `JSBRIDGE_HOST` + dynamic-`import()` boilerplate a consumer
+   would otherwise write itself.
+3. **`<server>/tool-bus.js`** (URL import, DevTools-pasteable, zero
+   baggage) — `window.__mcpToolBus.registerTool(...)`. Works standing
+   alone, no other piece of this package required.
+4. **`<server>/connect.js`** (URL import) — used internally by
+   `js-bridge-mcp/client`, and still directly importable for a page with no
+   bundler at all (e.g. a plain `<script type="module">` app).
+
+A jsDelivr URL to the published npm package's `client` sub-path (e.g.
+`https://cdn.jsdelivr.net/npm/js-bridge-mcp@<version>/dist/client/sdk.js`)
+is a fifth, equivalent way to reach path 2 without installing anything —
+useful for a no-bundler host that still wants `connectMcpBridge`/`defineTool`'s
+ergonomics. `tool-bus.js`/`connect.js` are deliberately **not** added as npm
+`exports` sub-paths (no `"./bus"`/`"./connect"` in `package.json`) — their
+whole reason for existing is runtime-URL-import (jsDelivr or a local
+server fetch), not bundler resolution; don't "fix" this by adding them to
+`exports` later.
+
 ## Bridge any other project's static HTML to this MCP server
 
 `js-bridge-mcp` doesn't care what the page is — `legacy-page/hello-world.html`
@@ -425,14 +455,48 @@ session transcript.
   Reusing a `name` across two *different* pages/tabs sharing a tenant is
   fine now — see "Multiple tabs on one tenant" below, each gets an
   automatic per-connection prefix.
-- Expecting a live-edited `window.__mcpTools` to take effect without a page
-  reload — it's read once per connect, not watched.
+- Expecting a plain, direct edit to `window.__mcpTools` itself to take
+  effect without a page reload — that array is still only read fresh when
+  something triggers a re-send (see "Live/late tool registration" below);
+  editing it in place with nothing watching for the change is a no-op
+  until the next reload.
 - Pasting the embed snippet into the page **after** your MCP client already
   connected: some clients (Claude Code included, observed against
   `js-bridge-mcp`) fetch `tools/list` once at `initialize` and won't re-poll
   on the server's `tools/list_changed` notification mid-session. New tools
   may need a full MCP client restart to appear, even though the browser
-  tenant is connected and the server registered them correctly.
+  tenant is connected and the server registered them correctly. This is the
+  SAME caveat that applies to live/late registration below — the server
+  always registers correctly and always emits `tools/list_changed`; whether
+  your MCP *client* notices is a separate, per-client question.
+
+### Live/late tool registration
+
+A page's tools no longer have to all exist before the very first connect.
+`window.__mcpToolBus` (see `tool-bus.js` above) supports registering a tool
+at ANY point during an already-connected session — main.js subscribes to
+the bus's `onChange` directly and re-sends the full merged tool list
+(`window.__mcpTools` + the bus's current tools) every time it fires, no
+page reload required. The single-tool primitive for this is
+`registerTool`, a DevTools-pasteable sibling to `registerProvider`:
+
+```js
+window.__mcpToolBus.registerTool('save_current_note', () => window.myApp.save(), {
+  description: 'Saves the currently open note',
+});
+```
+
+This is the mechanism behind mapping an ad-hoc `window.*` function (e.g. a
+Vue app's exposed instance method) to a tool name with zero source changes
+to the host app — paste it in DevTools, and (subject to the MCP-client
+caveat immediately above) the tool becomes callable without reconnecting.
+
+**Coming later, not built yet**: a visual tool-mapper UI (browse `window.*`
+for candidate functions, map to a tool name via a click-through picker
+instead of hand-typing `registerTool` calls) is planned but deliberately
+deferred — it will be its own separate, explicitly-triggered lazy import
+when it ships, never auto-loaded, so a page that never opts in pays zero
+extra bytes for it today.
 - Two tabs of the *same* page connected to the same tenant get
   ordinal-suffixed prefixes (`tab__`, `tab2__`, ...) unless
   `window.__mcpAppName`/`document.title` differ between them — call

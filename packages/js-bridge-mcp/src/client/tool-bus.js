@@ -12,6 +12,11 @@
 //   2. import every provider script (each one calls registerProvider()),
 //   3. merge window.__mcpToolBus.getTools() into window.__mcpTools itself,
 //   4. only then import main.js.
+// main.ts (this package's own client/main.ts) also subscribes to onChange
+// directly and re-sends the merged manifest on every change, so a provider
+// (or a single registerTool() call) that registers AFTER main.js has
+// already connected still reaches an already-open session - not just the
+// "ready before the first connect" case the four-step recipe above covers.
 // Usage: <script type="module" src="http://<js-bridge-mcp host>/tool-bus.js"></script>
 window.__mcpToolBus ??= (() => {
   const providers = new Map(); // providerName -> tool[]
@@ -50,6 +55,27 @@ window.__mcpToolBus ??= (() => {
         providers.delete(providerName);
         notify();
       };
+    },
+    // DevTools-pasteable sibling to registerProvider for a single ad-hoc
+    // tool - e.g. mapping some window.myApp.doThing() to a tool name with
+    // no source changes to the host page. Sugar over registerProvider
+    // (own synthetic provider slot keyed by tool name, "tool:<name>") so
+    // getTools()'s collision-prefixing and onChange notification are
+    // reused unchanged rather than reimplemented.
+    //
+    // DevTools paste example:
+    //   window.__mcpToolBus.registerTool('save_current_note', () => window.myApp.save(), {
+    //     description: 'Saves the currently open note',
+    //   });
+    registerTool(name, fn, opts = {}) {
+      const tool = {
+        name,
+        description: opts.description ?? '',
+        params: opts.params ?? {},
+        example: opts.example,
+        fn,
+      };
+      return this.registerProvider(`tool:${name}`, [tool]);
     },
     getTools,
     onChange(cb) {
