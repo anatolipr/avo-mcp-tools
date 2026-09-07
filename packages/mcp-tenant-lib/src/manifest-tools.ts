@@ -43,7 +43,7 @@ export function buildDescribePayload<TSchema, TValues>(t: Tenant<TSchema, TValue
   if (conns.length <= 1) {
     return {
       summary: t.toolManifestSummary ?? null,
-      tools: t.toolManifest.map((e) => ({ name: e.name, description: e.description })),
+      tools: t.toolManifest.map((e) => ({ name: e.name, description: e.description, origin: e.origin })),
     };
   }
 
@@ -57,6 +57,7 @@ export function buildDescribePayload<TSchema, TValues>(t: Tenant<TSchema, TValue
       tools: c.manifest.map((e) => ({
         name: `${slugFor.get(c.id)}__${e.name}`,
         description: e.description,
+        origin: e.origin,
       })),
     })),
   };
@@ -85,6 +86,12 @@ const DESCRIBE_TOOLS_DESCRIPTION =
   'connection (e.g. "formalin__submit_form", "htmlpaint__clear_canvas") and this tool\'s ' +
   'response includes a `connections` array listing each connection\'s id, label, and ' +
   'prefix — call it whenever you\'re unsure which prefix routes to which tab. ' +
+  'A dynamic tool (one previously registered via register_page_tool_by_path/_by_code) includes an ' +
+  '`origin` field showing what it actually does — `{kind:"code",code}` with its full JS source, or ' +
+  '`{kind:"path",path}` with the window.* function it wraps — so you can inspect what a prior session ' +
+  '(yours or another agent\'s) already built before deciding whether to reuse, redefine, or save it as a ' +
+  'skill. Absent for host tools and for dynamic tools with no captured origin (e.g. a human\'s own ' +
+  'window.__mcpToolBus.registerTool() DevTools paste). ' +
   'IMPORTANT — an empty or unexpected result here does NOT mean no page is bridged: this session may ' +
   'simply be on the wrong channel (see join_channel). If the user expects a specific bridged app/page by ' +
   'name (e.g. "the bulletino tab") and it\'s missing, call list_channels to check for a matching channel ' +

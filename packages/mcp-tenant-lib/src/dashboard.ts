@@ -55,6 +55,8 @@ export interface DashboardToolEntry {
   name: string;
   description: string;
   source: 'dynamic' | 'host';
+  /** See ToolManifestEntry.origin (types.ts) — absent for 'host' tools and older/DevTools-pasted dynamic ones. */
+  origin?: { kind: 'code'; code: string } | { kind: 'path'; path: string };
 }
 
 /**
@@ -72,6 +74,7 @@ export function getConnectionToolList(channel: string, connectionId: string): Da
     name: e.name,
     description: e.description,
     source: e.source ?? 'host',
+    origin: e.origin,
   }));
 }
 

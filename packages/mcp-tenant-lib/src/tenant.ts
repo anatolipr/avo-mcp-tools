@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import type { SubmitPayload, ToolManifestEntry, CallMessage } from './types.js';
+import { REMOTE_REGISTER_BY_PATH_CALL, REMOTE_REGISTER_BY_CODE_CALL } from './client-bridge.js';
 
 /**
  * Fires whenever the *shape* of the tenants map changes in a way a
@@ -159,6 +160,24 @@ export class Tenant<TSchema, TValues> {
    * used to happen) fans out to all of them.
    */
   #manifestToolRegistries = new Set<{ sync(): void }>();
+  /**
+   * In-memory-only stash of a just-closed connection's dynamic (origin-
+   * bearing) tools, keyed by connection `label` — lets a page that reloads
+   * (fresh JS runtime, so window.__mcpToolBus starts empty and its next
+   * register_tools carries only its host tools) get its previously
+   * dynamically-registered tools transparently re-added once it reconnects
+   * under the same label. Deliberately keyed by label (a stable,
+   * page-chosen name like "MyApp1"), not the dying connection's random
+   * UUID `id`, since a fresh connection has no way to know its predecessor's
+   * id. Does NOT survive a server restart (this Map is wiped along with
+   * everything else in `tenants`) — a live browser tab surviving a restart
+   * already resends its own in-memory manifest with `origin` intact on
+   * reconnect (ws.ts's `recreated` path), no stash needed for that case.
+   * Only stashed/replayed when the label is unambiguous — see
+   * #stashDynamicTools/#replayDynamicTools — an unlabeled or
+   * currently-shared label is too ambiguous to safely key on.
+   */
+  #dynamicToolsByLabel = new Map<string, ToolManifestEntry[]>();
 
   /**
    * Back-compat view over the per-connection manifests below: single flat
@@ -225,6 +244,13 @@ export class Tenant<TSchema, TValues> {
     conn.summary = summary;
     conn.label = label;
     this.syncManifestToolRegistries();
+    // A page's FIRST register_tools after connecting is exactly the moment
+    // to check for a same-labeled predecessor's stashed dynamic tools (see
+    // #replayDynamicTools) — most commonly a page reload reconnecting under
+    // the same appLabel. Each replayed register_page_tool_by_*__ call
+    // triggers its own updateConnectionManifest re-send from the browser,
+    // which re-enters here with the stash already cleared, so this can't loop.
+    this.#replayDynamicTools(id, label);
   }
 
   /**
@@ -243,11 +269,65 @@ export class Tenant<TSchema, TValues> {
 
   removeConnection(id: string) {
     const conn = this.connections.get(id);
-    if (conn) this.wsClients.delete(conn.socket);
+    if (conn) {
+      this.wsClients.delete(conn.socket);
+      this.#stashDynamicTools(conn);
+    }
     this.connections.delete(id);
     if (this.connections.size === 0) this.emptyAt ??= Date.now();
     this.syncManifestToolRegistries();
     notifyDashboard();
+  }
+
+  /**
+   * Squirrels away a just-closed connection's dynamic tools (ones with a
+   * captured `origin`) under its label, so a same-labeled reconnect (most
+   * commonly: the same page reloading) can get them replayed back in — see
+   * #replayDynamicTools. Skipped entirely when the label is missing/empty
+   * (the default "tab" slug — see slugify in manifest-tools.ts — is shared
+   * by every unlabeled page, so stashing under it would let one page's
+   * tools leak onto an unrelated one) or when another connection is still
+   * live under the same label (ambiguous which one the stash belongs to).
+   */
+  #stashDynamicTools(conn: TenantConnection) {
+    const label = conn.label;
+    if (!label) return;
+    const dynamicTools = conn.manifest.filter((e) => e.source === 'dynamic' && e.origin);
+    if (dynamicTools.length === 0) return;
+    const stillLive = [...this.connections.values()].some((c) => c.id !== conn.id && c.label === label);
+    if (stillLive) return;
+    this.#dynamicToolsByLabel.set(label, dynamicTools);
+  }
+
+  /**
+   * Replays any dynamic tools stashed under this connection's label (see
+   * #stashDynamicTools) back onto it, via the exact same reserved Tenant.call
+   * mechanism register_page_tool_by_path/_by_code use — one implementation,
+   * whether the caller is an agent, the dashboard, or this reconnect path.
+   * The stash entry is consumed (deleted) after one replay attempt
+   * regardless of success, so a page that reconnects under a label that no
+   * longer resolves the same way (e.g. the underlying window.* function was
+   * removed) doesn't get retried forever on every future reconnect. Skipped
+   * when the label is currently shared by more than one live connection —
+   * same ambiguity guard as the stash side.
+   */
+  #replayDynamicTools(id: string, label: string | undefined) {
+    if (!label) return;
+    const stashed = this.#dynamicToolsByLabel.get(label);
+    if (!stashed || stashed.length === 0) return;
+    const sharedByOthers = [...this.connections.values()].some((c) => c.id !== id && c.label === label);
+    if (sharedByOthers) return;
+    this.#dynamicToolsByLabel.delete(label);
+    for (const entry of stashed) {
+      if (!entry.origin) continue;
+      const callName = entry.origin.kind === 'code' ? REMOTE_REGISTER_BY_CODE_CALL : REMOTE_REGISTER_BY_PATH_CALL;
+      const args = entry.origin.kind === 'code'
+        ? { name: entry.name, description: entry.description, code: entry.origin.code }
+        : { name: entry.name, description: entry.description, path: entry.origin.path };
+      this.call(id, callName, args).catch((err) => {
+        console.error(`[mcp-tenant-lib] failed to replay dynamic tool "${entry.name}" onto reconnected connection "${id}" (label "${label}"): ${(err as Error).message}`);
+      });
+    }
   }
 
   addManifestToolRegistry(registry: { sync(): void }) {

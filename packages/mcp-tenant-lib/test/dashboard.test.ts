@@ -32,8 +32,8 @@ test('getConnectionToolList maps a connection\'s manifest, defaulting an absent 
   try {
     const tools = getConnectionToolList('known-channel', 'conn1');
     assert.deepEqual(tools, [
-      { name: 'insert_title', description: 'sets title', source: 'host' },
-      { name: 'save_current_note', description: 'saves', source: 'dynamic' },
+      { name: 'insert_title', description: 'sets title', source: 'host', origin: undefined },
+      { name: 'save_current_note', description: 'saves', source: 'dynamic', origin: undefined },
     ]);
   } finally {
     tenants.delete('known-channel');

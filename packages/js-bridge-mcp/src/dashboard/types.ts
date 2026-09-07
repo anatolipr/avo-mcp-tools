@@ -35,4 +35,7 @@ export interface DashboardToolEntry {
   name: string;
   description: string;
   source: 'dynamic' | 'host';
+  // See mcp-tenant-lib's ToolManifestEntry.origin (types.ts) — absent for
+  // 'host' tools and older/DevTools-pasted dynamic ones.
+  origin?: { kind: 'code'; code: string } | { kind: 'path'; path: string };
 }

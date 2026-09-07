@@ -73,6 +73,7 @@ window.__mcpToolBus ??= (() => {
         description: opts.description ?? '',
         params: opts.params ?? {},
         example: opts.example,
+        origin: opts.origin,
         fn,
       };
       return this.registerProvider(`tool:${name}`, [tool]);

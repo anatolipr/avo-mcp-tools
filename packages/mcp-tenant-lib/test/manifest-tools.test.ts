@@ -470,3 +470,91 @@ test('identify_connection reports a clear error with no live connection (same co
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /No live connection/);
 });
+
+test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed via register_page_tool_by_code', () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [
+    { name: 'insert_title', description: 'host tool', params: {} },
+    { name: 'save_note', description: 'dynamic by code', params: {}, source: 'dynamic', origin: { kind: 'code', code: 'return 1;' } },
+  ], undefined, 'mypage');
+
+  t.removeConnection('a');
+
+  const calls: any[] = [];
+  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)));
+  // Simulates the reloaded page's first register_tools: fresh JS runtime,
+  // so only its host tool survives — no dynamic tools of its own yet.
+  t.updateConnectionManifest('b', [{ name: 'insert_title', description: 'host tool', params: {} }], undefined, 'mypage');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, '__register_tool_by_code__');
+  assert.deepEqual(calls[0].args, { name: 'save_note', description: 'dynamic by code', code: 'return 1;' });
+});
+
+test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed via register_page_tool_by_path', () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [
+    { name: 'save_note', description: 'dynamic by path', params: {}, source: 'dynamic', origin: { kind: 'path', path: 'myApp.save' } },
+  ], undefined, 'mypage');
+
+  t.removeConnection('a');
+
+  const calls: any[] = [];
+  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)));
+  t.updateConnectionManifest('b', [], undefined, 'mypage');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, '__register_tool_by_path__');
+  assert.deepEqual(calls[0].args, { name: 'save_note', description: 'dynamic by path', path: 'myApp.save' });
+});
+
+test('replay is skipped for an unlabeled connection, and for a label still shared by another live connection', () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [
+    { name: 'save_note', description: 'dynamic', params: {}, source: 'dynamic', origin: { kind: 'path', path: 'myApp.save' } },
+  ]); // no label
+
+  t.removeConnection('a');
+
+  const calls: any[] = [];
+  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)));
+  t.updateConnectionManifest('b', []); // no label either — nothing to stash under
+  assert.equal(calls.length, 0, 'unlabeled connections must not stash/replay dynamic tools');
+
+  // Two live connections sharing a label: closing one should not stash
+  // (the label is still ambiguous while the other is live).
+  t.registerConnection('c', fakeSocket(() => {}));
+  t.updateConnectionManifest('c', [
+    { name: 'save_note2', description: 'dynamic', params: {}, source: 'dynamic', origin: { kind: 'path', path: 'myApp.save2' } },
+  ], undefined, 'shared');
+  t.registerConnection('d', fakeSocket(() => {}));
+  t.updateConnectionManifest('d', [], undefined, 'shared');
+
+  t.removeConnection('c');
+  const calls2: any[] = [];
+  t.registerConnection('e', fakeSocket((msg) => calls2.push(msg)));
+  t.updateConnectionManifest('e', [], undefined, 'shared');
+  assert.equal(calls2.length, 0, 'a label still in use by another live connection must not stash/replay');
+});
+
+test('replaying a dynamic tool consumes the stash so a later reconnect under the same label is not replayed twice', () => {
+  const t = new Tenant('t1', undefined, {});
+  t.registerConnection('a', fakeSocket(() => {}));
+  t.updateConnectionManifest('a', [
+    { name: 'save_note', description: 'dynamic', params: {}, source: 'dynamic', origin: { kind: 'path', path: 'myApp.save' } },
+  ], undefined, 'mypage');
+  t.removeConnection('a');
+
+  const calls: any[] = [];
+  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)));
+  t.updateConnectionManifest('b', [], undefined, 'mypage');
+  assert.equal(calls.length, 1);
+
+  t.removeConnection('b');
+  t.registerConnection('c', fakeSocket((msg) => calls.push(msg)));
+  t.updateConnectionManifest('c', [], undefined, 'mypage');
+  assert.equal(calls.length, 1, 'stash should have been consumed by the first replay, nothing left for a second reconnect');
+});

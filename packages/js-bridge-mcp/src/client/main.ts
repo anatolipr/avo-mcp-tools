@@ -145,7 +145,7 @@ const socket = connectStateSocket<undefined, undefined>(
           // `window.myApp.save()` in DevTools would get it, rather than an
           // unbound call that could break a method relying on its own `this`.
           const bound = (a: unknown) => fn.call(parent, a);
-          const unregister = bus.registerTool(toolName, bound, { description });
+          const unregister = bus.registerTool(toolName, bound, { description, origin: { kind: 'path', path } });
           dynamicUnregisterByName.set(toolName, unregister);
           socket.send({ type: 'call_result', id, result: `registered "${toolName}" -> window.${path}` });
           return;
@@ -167,7 +167,7 @@ const socket = connectStateSocket<undefined, undefined>(
             throw new Error(`code failed to compile: ${(err as Error).message}`);
           }
           const wrapped = async (a: unknown) => compiled(a, document, window);
-          const unregister = bus.registerTool(toolName, wrapped, { description });
+          const unregister = bus.registerTool(toolName, wrapped, { description, origin: { kind: 'code', code } });
           dynamicUnregisterByName.set(toolName, unregister);
           socket.send({ type: 'call_result', id, result: `registered "${toolName}" from code` });
           return;

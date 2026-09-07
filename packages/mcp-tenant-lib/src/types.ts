@@ -98,6 +98,18 @@ export interface ToolManifestEntry {
    * tools-modal.ts.
    */
   source?: 'dynamic' | 'host';
+  /**
+   * How a 'dynamic' tool was defined — the JS source it was compiled from
+   * (register_page_tool_by_code) or the window.* dot-path it wraps
+   * (register_page_tool_by_path). Absent for 'host' tools and for 'dynamic'
+   * ones registered before this field existed, or via a raw
+   * window.__mcpToolBus.registerTool() DevTools paste (no code/path to
+   * capture). Lets a human (js-bridge-mcp's dashboard) or an LLM in a fresh
+   * session (describe_tools/describe_channel) see what a previously
+   * dynamically-registered tool actually does, instead of it being opaque
+   * once the registering session has ended.
+   */
+  origin?: { kind: 'code'; code: string } | { kind: 'path'; path: string };
 }
 
 export interface RegisterToolsMessage {

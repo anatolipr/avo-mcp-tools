@@ -7,7 +7,11 @@ type FormMode = 'path' | 'code';
 
 /**
  * Per-connection tools-visualizer modal: browse a bridged tab's registered
- * tools (name + description, tagged host vs. dynamic), register a new one
+ * tools (name + description, tagged host vs. dynamic), view the JS source
+ * (or window.* path) a dynamic tool was defined from via a "</>" button
+ * that opens a small code-view sub-dialog (see #renderCodeView — no button
+ * when `origin` is absent, e.g. tools registered via a raw
+ * window.__mcpToolBus.registerTool() DevTools paste), register a new one
  * (pointing at an existing window.* function, or supplying fresh code), and
  * unregister a previously dynamically-added tool. `channel`/`connectionId`
  * are set as plain properties by whoever opens it (dashboard-app.ts).
@@ -61,6 +65,25 @@ export class ToolsModal extends LitElement {
       opacity: 0.7; flex: 0 0 auto; padding: 0 2px;
     }
     .unregister-btn:hover { opacity: 1; }
+    .view-code-btn {
+      font-size: 12px; border: none; background: none; color: inherit; cursor: pointer;
+      opacity: 0.6; flex: 0 0 auto; padding: 0 2px;
+    }
+    .view-code-btn:hover { opacity: 1; }
+    .code-backdrop {
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 1001;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .code-modal {
+      background: var(--bg); border: 1px solid var(--border-strong); border-radius: 10px;
+      width: min(640px, 92vw); max-height: 80vh; display: flex; flex-direction: column; overflow: hidden;
+      box-shadow: 0 20px 60px var(--shadow);
+    }
+    .code-modal pre {
+      margin: 0; padding: 14px 18px; overflow: auto; font-family: ui-monospace, monospace;
+      font-size: 12px; white-space: pre-wrap; word-break: break-word;
+    }
+    .code-modal .path-view { padding: 14px 18px; font-family: ui-monospace, monospace; font-size: 12px; }
     .add-form { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
     .add-form h3 { font-size: 13px; margin: 0 0 10px; }
     .mode-toggle { display: flex; gap: 12px; margin-bottom: 10px; font-size: 12px; }
@@ -85,6 +108,7 @@ export class ToolsModal extends LitElement {
   #tools = new Signal<DashboardToolEntry[] | undefined>(undefined);
   #mode = new Signal<FormMode>('path');
   #submitting = new Signal(false);
+  #viewingCode = new Signal<DashboardToolEntry | undefined>(undefined);
 
   constructor() {
     super();
@@ -182,6 +206,9 @@ export class ToolsModal extends LitElement {
                       <span class="badge ${t.source}">${t.source}</span>
                       <span class="tool-name">${t.name}</span>
                       <span class="tool-desc">${t.description}</span>
+                      ${t.source === 'dynamic' && t.origin
+                        ? html`<button class="view-code-btn" title="View code" @click=${() => this.#viewingCode.set(t)}>&lt;/&gt;</button>`
+                        : ''}
                       ${t.source === 'dynamic'
                         ? html`<button class="unregister-btn" title="Unregister" @click=${() => this.#unregister(t.name)}>✕</button>`
                         : ''}
@@ -210,6 +237,25 @@ export class ToolsModal extends LitElement {
               </button>
             </form>
           </div>
+        </div>
+      </div>
+      ${this.#renderCodeView()}
+    `;
+  }
+
+  #renderCodeView() {
+    const t = this.#viewingCode.value;
+    if (!t || !t.origin) return '';
+    return html`
+      <div class="code-backdrop" @click=${(e: Event) => { if (e.target === e.currentTarget) this.#viewingCode.set(undefined); }}>
+        <div class="code-modal">
+          <div class="modal-header">
+            <strong>${t.name}</strong>
+            <button class="close-btn" @click=${() => this.#viewingCode.set(undefined)}>✕</button>
+          </div>
+          ${t.origin.kind === 'code'
+            ? html`<pre>${t.origin.code}</pre>`
+            : html`<div class="path-view">window.${t.origin.path}</div>`}
         </div>
       </div>
     `;

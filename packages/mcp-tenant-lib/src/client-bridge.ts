@@ -20,6 +20,8 @@ export interface PageToolDef {
   fn: (args: any) => unknown | Promise<unknown>;
   /** See ToolManifestEntry's own doc comment (types.ts) - carried through splitPageTools unchanged. */
   source?: 'dynamic' | 'host';
+  /** See ToolManifestEntry's own doc comment (types.ts) - carried through splitPageTools unchanged. */
+  origin?: { kind: 'code'; code: string } | { kind: 'path'; path: string };
 }
 
 /**
