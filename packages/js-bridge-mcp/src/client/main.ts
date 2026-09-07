@@ -88,6 +88,24 @@ const scriptUrl = new URL(import.meta.url);
 const serverUrl = scriptUrl.searchParams.get('server') ?? undefined;
 const tenant = scriptUrl.searchParams.get('tenant') ?? undefined;
 
+// tool-bus.js is optional, host-page-loaded infrastructure by design (see
+// its own header comment) - a page that never imports it simply has no
+// window.__mcpToolBus, and currentPageTools()/onChange above already
+// handle that with `?.`. But register_page_tool_by_path/_by_code REQUIRE
+// the bus to exist (that's literally what they call), and the common
+// "paste get_embed_snippet's snippet into DevTools, nothing else" flow
+// (e.g. formalin, which never wires up tool-bus.js or the SDK itself)
+// never loads it - so main.js self-loads it here, once, from the same
+// server this script itself came from, guaranteeing window.__mcpToolBus
+// exists before either register branch below can be reached. A redundant
+// load (a host page that already imported tool-bus.js itself) is a safe
+// no-op, since tool-bus.js's own IIFE is `window.__mcpToolBus ??= ...`.
+const toolBusUrl = new URL('tool-bus.js', serverUrl ? `${serverUrl}/` : scriptUrl).href;
+const toolBusReady: Promise<void> = import(/* @vite-ignore */ toolBusUrl).then(
+  () => undefined,
+  () => undefined // unreachable - register_page_tool_by_*__ will surface a clear error instead of a silent crash
+);
+
 // Tracks the unregister function returned by window.__mcpToolBus.registerTool
 // for each tool THIS bridge dynamically registered via a reserved-name call
 // (register_page_tool_by_path/_by_code) — separate from any dynamic tool a
@@ -112,6 +130,9 @@ const socket = connectStateSocket<undefined, undefined>(
     async onCall(id, name, args) {
       try {
         if (name === REMOTE_REGISTER_BY_PATH_CALL) {
+          await toolBusReady;
+          const bus = (window as any).__mcpToolBus;
+          if (!bus) throw new Error('window.__mcpToolBus failed to load on this page - cannot register a tool');
           const { name: toolName, description, path } = args as { name: string; description: string; path: string };
           const segments = path.split('.');
           const lastKey = segments.pop()!;
@@ -124,13 +145,16 @@ const socket = connectStateSocket<undefined, undefined>(
           // `window.myApp.save()` in DevTools would get it, rather than an
           // unbound call that could break a method relying on its own `this`.
           const bound = (a: unknown) => fn.call(parent, a);
-          const unregister = (window as any).__mcpToolBus.registerTool(toolName, bound, { description });
+          const unregister = bus.registerTool(toolName, bound, { description });
           dynamicUnregisterByName.set(toolName, unregister);
           socket.send({ type: 'call_result', id, result: `registered "${toolName}" -> window.${path}` });
           return;
         }
 
         if (name === REMOTE_REGISTER_BY_CODE_CALL) {
+          await toolBusReady;
+          const bus = (window as any).__mcpToolBus;
+          if (!bus) throw new Error('window.__mcpToolBus failed to load on this page - cannot register a tool');
           const { name: toolName, description, code } = args as { name: string; description: string; code: string };
           // Human approval for code-based registration happens on the
           // js-bridge-mcp DASHBOARD (Tenant.requestApproval, surfaced as a
@@ -145,7 +169,7 @@ const socket = connectStateSocket<undefined, undefined>(
             throw new Error(`code failed to compile: ${(err as Error).message}`);
           }
           const wrapped = async (a: unknown) => compiled(a, document, window);
-          const unregister = (window as any).__mcpToolBus.registerTool(toolName, wrapped, { description });
+          const unregister = bus.registerTool(toolName, wrapped, { description });
           dynamicUnregisterByName.set(toolName, unregister);
           socket.send({ type: 'call_result', id, result: `registered "${toolName}" from code` });
           return;
