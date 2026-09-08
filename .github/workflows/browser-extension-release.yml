@@ -37,7 +37,7 @@ jobs:
         run: npm run build -w browser-extension
 
       - name: Package zip artifacts
-        run: node packages/browser-extension/scripts/package-dist.mjs --zip --out ../../release-artifacts
+        run: node scripts/package-dist.mjs --zip --out ../../release-artifacts
         working-directory: packages/browser-extension
 
       - uses: softprops/action-gh-release@v2
