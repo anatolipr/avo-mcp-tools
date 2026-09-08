@@ -472,10 +472,6 @@ body: >-
   listbox/option roles on the menu items — is identical to
 
   [[lit-autocomplete-combobox]] and isn't repeated here.
-status: stable
-owner: personal
-extends: null
-group: anatoli
 ---
 ## Tag input in Lit
 
@@ -804,3 +800,12 @@ Everything else — `.menu` popover positioning, `position-try-fallbacks:
 flip-block`, the document-click light-dismiss, the ARIA
 listbox/option roles on the menu items — is identical to
 [[lit-autocomplete-combobox]] and isn't repeated here.
+
+### Known gap: not form-associated
+
+This component exposes a `value`/`change` pair but never calls
+`attachInternals()` — so it doesn't participate in native `<form>`
+submission/`FormData`, `:invalid`/`:disabled` styling, or
+`<label for="...">` click-to-focus. Accepted for now; if a consumer
+needs this to behave like a first-class form control, see
+[[form-associated-custom-elements]] for the retrofit pattern.

@@ -626,10 +626,6 @@ body: >-
         reference.md first (clicking the trigger while open can fire native
         light-dismiss *before* your handler runs, so a naive
         `togglePopover()` call ends up reopening it).
-status: stable
-owner: personal
-extends: null
-group: anatoli
 ---
 ## Making dropdowns
 
@@ -800,6 +796,15 @@ Key points:
   listen for the native `toggle` event:
   `@toggle=${(e) => e.newState === 'open' ? ... : ...}` — `e.newState` is
   `'open'` or `'closed'`.
+- The same `toggle` event's `e.source` (Baseline 2026) is a reference to
+  the control element that triggered the toggle — the button whose
+  `popovertarget` invoked it, or `null` if the popover was toggled
+  programmatically (`showPopover()`/`hidePopover()`/`togglePopover()`
+  called directly, not via `popovertarget`). Useful when several buttons
+  can affect the same popover and the handler needs to know which one
+  fired — e.g. distinguishing a Pattern B row's own trigger from some
+  other close action — without separately tracking "which button" in
+  component state.
 
 ## Start here: the plain default (works for almost everything)
 
