@@ -345,8 +345,20 @@ toolBusReady.then(() => {
 // reconnect. Added for the browser extension's popup "Disconnect" action -
 // there was previously no page-side API for "stop this connection for real"
 // distinct from "I'm about to open a different one instead."
+//
+// Also deletes __mcpLeaveChannel/__mcpDisconnect/__mcpRename from window -
+// without this, tabAlreadyConnected() (browser-extension's connect-tab.ts,
+// and this same check anywhere else) would keep reporting "connected" forever
+// after a real disconnect, since it purely checks for these globals' presence
+// rather than any actual live-connection state. Reassigning appLabel/askedOnce
+// isn't needed here (this whole module instance is being retired - a future
+// reconnect on this page is always a fresh main.js import with its own fresh
+// module scope, never a call back into this one).
 (window as any).__mcpDisconnect = () => {
   socket.send({ type: 'leave_channel' });
   socket.close();
+  delete (window as any).__mcpLeaveChannel;
+  delete (window as any).__mcpDisconnect;
+  delete (window as any).__mcpRename;
   console.log('[js-bridge-mcp] disconnected (not retrying)');
 };
