@@ -84,6 +84,16 @@ export interface StateSocketHandlers<TSchema, TValues> {
   onDisconnect?(): void;
   /** Server-pushed "identify yourself" signal (see identify_connection tool). Defaults to a window.alert(). */
   onIdentify?(label: string | undefined): void;
+  /**
+   * Server-pushed "move to a different channel" command (the dashboard's
+   * move-to-channel action — see Tenant.moveConnection in mcp-tenant-lib
+   * and types.ts's MoveChannelMessage). No default behavior: unlike
+   * onIdentify, a caller that doesn't implement this simply ignores the
+   * command and stays on its current channel. js-bridge-mcp's main.ts is
+   * the consumer that actually performs the move (leave this channel,
+   * reconnect fresh to `channel`).
+   */
+  onMove?(channel: string): void;
 }
 
 export interface StateSocketOptions {
@@ -170,6 +180,7 @@ export function connectStateSocket<TSchema, TValues>(
         if (handlers.onIdentify) handlers.onIdentify(msg.label);
         else alert(`Identify: this is the "${msg.label ?? 'unlabeled'}" connection`);
       }
+      if (msg.type === 'move_channel') handlers.onMove?.(msg.channel);
     };
   };
   connect();

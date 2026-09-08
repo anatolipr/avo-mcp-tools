@@ -199,6 +199,28 @@ const socket = connectStateSocket<undefined, undefined>(
     onDisconnect() {
       console.log('[js-bridge-mcp] disconnected, retrying...');
     },
+    // The dashboard's "move to channel" action (mcp-tenant-lib's
+    // Tenant.moveConnection / MoveChannelMessage) — leave this channel and
+    // reconnect fresh to the target one, the same leave-then-reimport flow
+    // connect.js's own connectToChannel runs for a human-typed "channel:app",
+    // just triggered server-side. scriptUrl already carries this page's real
+    // main.js URL (host, and any server= param) - cloning it and swapping
+    // `tenant` (plus a cache-busting `_`, same trick connect.js uses) works
+    // whether this page loaded main.js via connect.js or a bare pasted
+    // snippet, unlike a connect.js-only mechanism. Closing this socket
+    // (rather than leaving it to drop on its own) stops ITS OWN reconnect
+    // loop from ever retrying against the channel we just left.
+    onMove(channel) {
+      console.log(`[js-bridge-mcp] server requested this connection move to channel "${channel}"`);
+      socket.send({ type: 'leave_channel' });
+      const nextUrl = new URL(scriptUrl.href);
+      nextUrl.searchParams.set('tenant', channel);
+      nextUrl.searchParams.set('_', String(Date.now()));
+      import(/* @vite-ignore */ nextUrl.href).catch((err) => {
+        console.error(`[js-bridge-mcp] failed to reconnect after move to "${channel}": ${(err as Error).message}`);
+      });
+      socket.close();
+    },
   },
   { serverUrl, tenant }
 );

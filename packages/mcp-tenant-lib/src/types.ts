@@ -10,6 +10,7 @@ export type ServerMessage<TSchema = unknown, TValues = unknown> =
   | { type: 'update'; field: string; value: unknown }
   | { type: 'waiting'; waiting: boolean }
   | { type: 'identify'; label?: string }
+  | MoveChannelMessage
   | CallMessage;
 
 export interface SetMessage {
@@ -158,6 +159,22 @@ export interface CallResultMessage {
 export interface RenameConnectionMessage {
   type: 'rename_connection';
   appLabel: string;
+}
+
+/**
+ * Server push telling one connection's page to leave its current channel
+ * and reconnect fresh to `channel` — the dashboard's "move to channel"
+ * action (see Tenant.moveConnection / dashboard.ts's move route). A
+ * command, not a state sync like the other ServerMessage variants: the
+ * page's own bridge (js-bridge-mcp's main.ts) is what actually performs
+ * the move, the same leave-then-reconnect flow connect.js already runs
+ * when a human retypes "channel:app" in its own prompt, just triggered
+ * server-side instead of page-side. `channel` is created on demand if it
+ * doesn't exist yet, exactly like join_channel/a fresh WS connect.
+ */
+export interface MoveChannelMessage {
+  type: 'move_channel';
+  channel: string;
 }
 
 export type ClientMessage = SetMessage | SubmitMessage | InterruptMessage | RegisterToolsMessage | CallResultMessage | RenameConnectionMessage | ResyncMessage | LeaveChannelMessage;

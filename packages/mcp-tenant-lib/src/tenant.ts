@@ -439,6 +439,24 @@ export class Tenant<TSchema, TValues> {
     return true;
   }
 
+  /**
+   * Pushes a 'move_channel' message at one connection, telling its page to
+   * leave this tenant and reconnect fresh to `targetChannel` — the
+   * mechanism behind the dashboard's "move to channel" action (see
+   * dashboard.ts). Fire-and-forget, same shape as identifyConnection: no
+   * ack, and a silent no-op if the connection has since closed. Does NOT
+   * touch `this.connections` itself — the actual move only happens once
+   * the page's own reconnect (a leave_channel on this tenant, then a fresh
+   * WS connect on targetChannel) reaches the server, same two-sided flow
+   * as any other channel switch (see ws.ts / connect.js's connectToChannel).
+   */
+  moveConnection(connectionId: string, targetChannel: string): boolean {
+    const conn = this.connections.get(connectionId);
+    if (!conn || conn.socket.readyState !== conn.socket.OPEN) return false;
+    conn.socket.send(JSON.stringify({ type: 'move_channel', channel: targetChannel }));
+    return true;
+  }
+
   resolveCall(id: string, result: unknown) {
     const pending = this.pendingCalls.get(id);
     if (!pending) return;

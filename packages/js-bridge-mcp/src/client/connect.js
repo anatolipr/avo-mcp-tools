@@ -25,6 +25,16 @@
 // human-readable name with zero interaction, and any MCP client can attach
 // to the exact same live connection via join_channel("<name>").
 //
+// Default channel: unless a caller passes opts.defaultChannel (or a human
+// retargets via handleConnectClick's prompt), a fresh connection lands on
+// the shared "default" channel - same one a raw WS connection with no
+// `tenant` param lands on - rather than each app getting its own isolated
+// channel automatically. This lets several apps that never bother naming a
+// channel show up together on one shared channel a human/agent can find by
+// just looking, and lets a human later group specific connections onto a
+// shared channel from the dashboard's "move" action (mcp-tenant-lib's
+// Tenant.moveConnection) without every app needing to coordinate names.
+//
 // Channel:app-name syntax: a chosen channel may be typed as "channel:app" -
 // e.g. "bug123:htmlpaint" - to explicitly set BOTH the shared channel
 // (join_channel target) and this connection's own app label/tool-name
@@ -71,9 +81,14 @@ export function parseChannelInput(input) {
  * @param {object} opts
  * @param {string} opts.appName - Short app-specific identifier, e.g.
  *   "htmlpaint", "bulletino", "mindfoo". Used as: the localStorage key
- *   namespace, the default channel name, and (unless a "channel:app" prompt
- *   input overrides it) the connection's window.__mcpAppName label.
- * @param {string} [opts.defaultChannel] - Defaults to opts.appName.
+ *   namespace, and (unless a "channel:app" prompt input overrides it) the
+ *   connection's window.__mcpAppName label.
+ * @param {string} [opts.defaultChannel] - Defaults to 'default' - the same
+ *   shared channel every unnamed connection (WS or MCP) lands on - so
+ *   several apps that never bother naming a channel land on one shared
+ *   channel by default rather than each getting its own. Pass opts.appName
+ *   (or any other fixed name) explicitly for the old per-app-isolated-by-
+ *   default behavior.
  * @param {(state: 'disconnected'|'connecting'|'connected', channel: string, appLabel: string) => void} [opts.onStateChange]
  *   Optional convenience callback, called on every state transition - an
  *   alternative to onConnectionStateChange() below for a caller that just
@@ -88,7 +103,7 @@ export function parseChannelInput(input) {
  */
 export function createMcpConnect(opts) {
   const appName = opts.appName;
-  const defaultChannel = opts.defaultChannel ?? appName;
+  const defaultChannel = opts.defaultChannel ?? 'default';
   const CHANNEL_STORAGE_KEY = `${appName}_mcp_channel`;
   const APP_LABEL_STORAGE_KEY = `${appName}_mcp_app_label`;
 

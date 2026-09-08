@@ -98,14 +98,16 @@ switch) is shared infrastructure, served by this package the same way
 ```js
 import { createMcpConnect } from 'http://localhost:8766/connect.js';
 
-const connect = createMcpConnect({ appName: 'myapp' }); // localStorage key + default channel + tool-name label
+const connect = createMcpConnect({ appName: 'myapp' }); // localStorage key + tool-name label; lands on the shared "default" channel
 connect.init();                                          // connects on page load
 connect.handleConnectClick();                             // wire to a toolbar button
 connect.onConnectionStateChange((state, channel, appLabel) => { /* render a status indicator */ });
 connect.getConnectionState();                              // { state, channel, appLabel } - synchronous
 ```
 
-`createMcpConnect` also accepts `defaultChannel` (defaults to `appName`) and
+`createMcpConnect` also accepts `defaultChannel` (defaults to `'default'` —
+the shared channel every unnamed connection lands on; pass `appName` for the
+old per-app-isolated-by-default behavior) and
 `beforeConnect` (an optional async hook run once, before the first
 `main.js` import — for a host page that layers extra tool providers onto
 `window.__mcpTools` first, e.g. via `tool-bus.js`; see bulletino-1's

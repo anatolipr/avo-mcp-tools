@@ -62,12 +62,12 @@ export class DashboardApp extends LitElement {
     }
     .view-tools-btn:hover { opacity: 1; background: var(--hover); }
     .no-connections { padding: 10px 14px; font-size: 12px; opacity: 0.5; font-style: italic; }
-    .identify-btn {
+    .identify-btn, .move-btn {
       flex: 0 0 auto; font-size: 11px; padding: 4px 10px; border-radius: 6px;
       border: 1px solid var(--border-strong); background: var(--bg); color: inherit; cursor: pointer;
     }
-    .identify-btn:hover { background: var(--hover); border-color: var(--accent); }
-    .identify-btn:active { background: var(--accent-tint); }
+    .identify-btn:hover, .move-btn:hover { background: var(--hover); border-color: var(--accent); }
+    .identify-btn:active, .move-btn:active { background: var(--accent-tint); }
     .identify-btn.sent { border-color: var(--accent); color: var(--accent); }
     .conn-count { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--hover); opacity: 0.75; }
   `;
@@ -184,6 +184,44 @@ export class DashboardApp extends LitElement {
     }, 1200);
   }
 
+  // Dashboard's "move to channel" action — groups a few connections by
+  // moving them into the same channel (existing or brand new; a channel is
+  // created on demand the moment a connection lands on it, same as
+  // join_channel). Reuses connect.js's own channel-name validation/prompt
+  // convention (no ":app" part here — moving only changes which channel a
+  // connection is on, not its app label) so a typo gets the same
+  // reprompt-with-a-suggested-fix loop as #copyEmbedSnippet/handleConnectClick.
+  // The actual move is server-pushed (Tenant.moveConnection) to that
+  // connection's own socket; this call just kicks it off and reports
+  // success/failure — the SSE stream reflects the connection having moved
+  // once its page reconnects to the new channel.
+  async #moveConnection(channel: string, connectionId: string) {
+    let input = prompt(`Move this connection to channel:`, channel);
+    if (!input || input === channel) return;
+    let target = input.trim();
+    while (target && !VALID_CHANNEL_NAME.test(target)) {
+      input = prompt(
+        `"${target}" isn't a valid channel name — only letters, digits, underscore, and hyphen are allowed (no spaces). Try again:`,
+        sanitizeToValidChannelName(target)
+      );
+      if (!input) return;
+      target = input.trim();
+    }
+    if (!target || target === channel) return;
+    try {
+      const res = await fetch(`/api/dashboard/channels/${encodeURIComponent(channel)}/connections/${encodeURIComponent(connectionId)}/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetChannel: target }),
+      });
+      const data = await res.json();
+      if (data.ok) toast.success(`Moving to "${target}"…`);
+      else toast.danger(data.error ?? 'Move failed');
+    } catch {
+      toast.danger('Move failed — connection may have closed');
+    }
+  }
+
   render() {
     const channels = this.#channels.value;
     const modal = this.#openModal.value;
@@ -243,6 +281,13 @@ export class DashboardApp extends LitElement {
                       @click=${() => this.#identify(c.channel, conn.id)}
                     >
                       ${sent ? 'Sent ✓' : 'Identify'}
+                    </button>
+                    <button
+                      class="move-btn"
+                      title="Move to a different channel"
+                      @click=${() => this.#moveConnection(c.channel, conn.id)}
+                    >
+                      Move…
                     </button>
                   </div>
                 `;

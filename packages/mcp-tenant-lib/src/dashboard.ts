@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { tenants, dashboardEvents } from './tenant.js';
+import { tenants, dashboardEvents, isValidChannelName } from './tenant.js';
 import { REMOTE_REGISTER_BY_PATH_CALL, REMOTE_REGISTER_BY_CODE_CALL, REMOTE_UNREGISTER_CALL } from './client-bridge.js';
 
 export interface DashboardConnection {
@@ -182,6 +182,42 @@ export async function handleDashboardRoutes(req: IncomingMessage, res: ServerRes
     const [, channel, connectionId] = identifyMatch as unknown as [string, string, string];
     const t = tenants.get(decodeURIComponent(channel));
     const ok = t?.identifyConnection(decodeURIComponent(connectionId)) ?? false;
+    res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok }));
+    return true;
+  }
+
+  // Pushes Tenant.moveConnection at one connection — the dashboard's "move
+  // to channel" action, letting a human group a few tenants by moving their
+  // connections into one shared channel (or off into a brand-new one).
+  // targetChannel is validated with the same rule join_channel enforces
+  // (isValidChannelName) since it ultimately becomes a WS `?tenant=` value
+  // once the page reconnects; an unknown-but-valid name is fine — it's
+  // created on demand exactly like join_channel/a fresh WS connect already do.
+  const moveMatch = url.pathname.match(/^\/api\/dashboard\/channels\/([^/]+)\/connections\/([^/]+)\/move$/);
+  if (moveMatch && req.method === 'POST') {
+    const [, channel, connectionId] = moveMatch as unknown as [string, string, string];
+    const t = tenants.get(decodeURIComponent(channel));
+    if (!t) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'channel not found' }));
+      return true;
+    }
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+      return true;
+    }
+    const targetChannel = body?.targetChannel;
+    if (typeof targetChannel !== 'string' || !isValidChannelName(targetChannel)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'targetChannel must contain only letters, digits, underscore, and hyphen' }));
+      return true;
+    }
+    const ok = t.moveConnection(decodeURIComponent(connectionId), targetChannel);
     res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok }));
     return true;
