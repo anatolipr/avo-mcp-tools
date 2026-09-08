@@ -213,10 +213,26 @@ const socket = connectStateSocket<undefined, undefined>(
     onMove(channel) {
       console.log(`[js-bridge-mcp] server requested this connection move to channel "${channel}"`);
       socket.send({ type: 'leave_channel' });
+      // Stash the CURRENT label onto window.__mcpAppName before the new
+      // instance evaluates, so its own hostProvidedLabel check (above) sees
+      // it as already-set and skips labelForFirstRegister()'s prompt — a
+      // page with no connect.js (never sets __mcpAppName itself) would
+      // otherwise get a surprise "Name this connection" popup mid-session
+      // triggered by nothing the user did. A no-op when connect.js (or the
+      // host page) already set this, since it's the same value either way.
+      (window as any).__mcpAppName = appLabel;
       const nextUrl = new URL(scriptUrl.href);
       nextUrl.searchParams.set('tenant', channel);
       nextUrl.searchParams.set('_', String(Date.now()));
-      import(/* @vite-ignore */ nextUrl.href).catch((err) => {
+      import(/* @vite-ignore */ nextUrl.href).then(() => {
+        // Fires only once the NEW instance has fully evaluated (so its own
+        // window.__mcpLeaveChannel assignment has already happened) — lets
+        // connect.js (if this page uses it) keep its own currentChannel/
+        // localStorage bookkeeping in sync with a move it didn't initiate
+        // itself; see connect.js's own listener for why this can't just be
+        // done here; main.js has no idea whether connect.js is even in use.
+        window.dispatchEvent(new CustomEvent('mcp-bridge-moved', { detail: { channel } }));
+      }).catch((err) => {
         console.error(`[js-bridge-mcp] failed to reconnect after move to "${channel}": ${(err as Error).message}`);
       });
       socket.close();

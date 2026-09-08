@@ -140,6 +140,30 @@ export function createMcpConnect(opts) {
     opts.onStateChange?.(state, currentChannel, currentAppLabel);
   }
 
+  // Reacts to a server-pushed "move to channel" (mcp-tenant-lib's
+  // Tenant.moveConnection) that main.js already carried out on its own by
+  // reconnecting - see main.ts's onMove handler. That reconnect goes
+  // straight to a fresh main.js import, bypassing connectToChannel (and
+  // therefore this module's own bookkeeping) entirely - main.js has no way
+  // to know this page is even using connect.js. Without this listener,
+  // currentChannel/localStorage would go stale after a move: a page reload
+  // would reconnect to the channel this connection was moved OFF of, and
+  // any UI reading getConnectionState()/onConnectionStateChange would keep
+  // showing the pre-move channel. main.js dispatches this event on
+  // `window` only after its own reconnect resolves, so
+  // window.__mcpLeaveChannel already points at the NEW socket by the time
+  // this runs. Deliberately does not touch currentAppLabel/its storage key -
+  // a move only ever changes which channel a connection is on, never its
+  // app label (main.ts's onMove preserves the label across the move itself).
+  window.addEventListener('mcp-bridge-moved', (event) => {
+    const channel = event.detail?.channel;
+    if (!channel || channel === currentChannel) return;
+    currentChannel = channel;
+    setStored(CHANNEL_STORAGE_KEY, currentChannel);
+    leaveCurrentSocket = typeof window.__mcpLeaveChannel === 'function' ? window.__mcpLeaveChannel : undefined;
+    setState('connected');
+  });
+
   // Lightweight reachability probe via plain HTTP - main.js's own
   // connectStateSocket doesn't expose connect/disconnect events to the
   // importer, so this is the only way to know "is js-bridge-mcp up" before
