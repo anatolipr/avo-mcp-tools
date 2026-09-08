@@ -7,6 +7,9 @@ yarn-error.log*
 .env.*.local
 dist/
 build/
+# browser-extension's build/ is source (vite configs), not output - dist/ is
+# its actual build output, already covered by the dist/ rule above.
+!packages/browser-extension/build/
 .DS_Store
 *.log
 *.sqlite

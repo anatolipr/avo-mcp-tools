@@ -42,6 +42,22 @@ export const REMOTE_REGISTER_BY_CODE_CALL = '__register_tool_by_code__';
 export const REMOTE_UNREGISTER_CALL = '__unregister_tool__';
 
 /**
+ * Reserved Tenant.call name for request_reconnect (see manifest-tools.ts).
+ * Same ride-on-the-existing-call/call_result-round-trip approach as the
+ * three above - added here, not a new wire-protocol message type, so any
+ * connection type (a page's main.ts, an extension's background script, or
+ * anything else built on connectStateSocket) special-cases this one more
+ * reserved name the same way it already special-cases the other three.
+ * Args: `{ targetOrigin?: string; targetTabId?: number }`, forwarded
+ * opaquely - what "reconnect" means, and how targetOrigin/targetTabId are
+ * used, is entirely up to whichever connection receives the call (a page
+ * bridge has no way to act on it at all, since its own socket dying is
+ * exactly the situation this call addresses; a browser extension can use
+ * these hints to find and re-inject into the right tab).
+ */
+export const REMOTE_REQUEST_RECONNECT_CALL = '__request_reconnect__';
+
+/**
  * Strips `fn` from each PageToolDef to produce the wire-safe
  * ToolManifestEntry[] for a RegisterToolsMessage, and returns a
  * name -> fn lookup for dispatching incoming CallMessages locally.
@@ -131,6 +147,16 @@ export function connectStateSocket<TSchema, TValues>(
   let closedByCaller = false;
   let reconnectAttempts = 0;
   let firstDisconnectAt: number | undefined;
+  // Messages sent before the socket has finished its handshake (readyState
+  // still CONNECTING) - e.g. a caller's own onChange-style resend firing
+  // concurrently with the initial connect, before onopen. WebSocket#send
+  // throws InvalidStateError synchronously if called while CONNECTING (seen
+  // in practice: packages/browser-extension's host-tools/bus onChange
+  // listeners can fire this way, since tool registration finishes fast while
+  // the WS handshake takes a real network round trip) - queued here and
+  // flushed once onopen fires, rather than either dropping the message or
+  // leaving every caller responsible for checking readyState itself.
+  let pendingSends: string[] = [];
 
   const connect = () => {
     const tenantId = options.tenant ?? (location.pathname.startsWith('/t/')
@@ -149,6 +175,13 @@ export function connectStateSocket<TSchema, TValues>(
       reconnectAttempts = 0;
       firstDisconnectAt = undefined;
       handlers.onConnect?.();
+      // Flush anything queued while CONNECTING - onConnect above may itself
+      // have just called send() again (e.g. the initial register_tools),
+      // which appends to a fresh queue rather than the one being flushed
+      // here, so order is preserved either way.
+      const queued = pendingSends;
+      pendingSends = [];
+      for (const raw of queued) ws?.send(raw);
     };
     ws.onclose = (event) => {
       console.log(`[mcp-ws] disconnected: code=${event.code} reason=${event.reason || '(none)'} wasClean=${event.wasClean}`);
@@ -187,7 +220,16 @@ export function connectStateSocket<TSchema, TValues>(
 
   return {
     send(msg: ClientMessage) {
-      ws?.send(JSON.stringify(msg));
+      const raw = JSON.stringify(msg);
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(raw);
+      } else {
+        // CONNECTING (queue for onopen's flush above), or CLOSING/CLOSED/no
+        // socket yet (queued anyway - a subsequent reconnect's onopen will
+        // flush it; harmless if the caller has otherwise given up, since
+        // nothing reads pendingSends again after that).
+        pendingSends.push(raw);
+      }
     },
     close() {
       closedByCaller = true;

@@ -2,7 +2,12 @@ import { z } from 'zod';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Tenant, TenantConnection } from './tenant.js';
 import type { ToolManifestEntry, ToolParamSpec } from './types.js';
-import { REMOTE_REGISTER_BY_PATH_CALL, REMOTE_REGISTER_BY_CODE_CALL, REMOTE_UNREGISTER_CALL } from './client-bridge.js';
+import {
+  REMOTE_REGISTER_BY_PATH_CALL,
+  REMOTE_REGISTER_BY_CODE_CALL,
+  REMOTE_UNREGISTER_CALL,
+  REMOTE_REQUEST_RECONNECT_CALL,
+} from './client-bridge.js';
 
 class UnsupportedParamTypeError extends Error {}
 
@@ -68,6 +73,7 @@ const IDENTIFY_CONNECTION_NAME = 'identify_connection';
 const REGISTER_TOOL_BY_PATH_NAME = 'register_page_tool_by_path';
 const REGISTER_TOOL_BY_CODE_NAME = 'register_page_tool_by_code';
 const UNREGISTER_TOOL_NAME = 'unregister_page_tool';
+const REQUEST_RECONNECT_NAME = 'request_reconnect';
 
 const IDENTIFY_CONNECTION_DESCRIPTION =
   'Pops an alert in the browser tab behind one connection, so a human looking at several open tabs/windows ' +
@@ -311,6 +317,49 @@ export function createManifestToolRegistry<TSchema, TValues>(
     handles.set(UNREGISTER_TOOL_NAME, handle);
   }
 
+  /**
+   * Same reserved-call-name mechanism as the three tools above
+   * (REMOTE_REQUEST_RECONNECT_CALL, see client-bridge.ts), generic at this
+   * layer for the same reason those three are: what "reconnect" means, and
+   * whether targetOrigin/targetTabId do anything at all, is entirely up to
+   * whichever connection receives the call. A page's own bridge (e.g.
+   * js-bridge-mcp's main.ts) has no way to act on this — its socket dying
+   * IS the situation this tool exists for — so it just acks; a browser
+   * extension connection is the intended real target, using targetOrigin/
+   * targetTabId to find and reconnect the right tab.
+   */
+  function registerRequestReconnect() {
+    const handle = mcp.registerTool(
+      REQUEST_RECONNECT_NAME,
+      {
+        description:
+          'Asks an already-connected client (e.g. a browser extension\'s own connection) to (re)connect a page, ' +
+          'without the user needing to manually paste a connect snippet. Most useful against a browser-extension ' +
+          'connection: pass targetOrigin (and optionally targetTabId) to have it find and reconnect the right tab, ' +
+          'using whatever channel that origin was last connected to. Against a plain page connection this is ' +
+          'mostly a no-op ack — a page\'s own socket dying (e.g. on navigation) is exactly the situation this tool ' +
+          'exists to work around, and a page with no extension present has no way to act on this call at all.',
+        inputSchema: {
+          id: z.string().optional().describe('Connection id from describe_tools\' `connections` array. Omit when only one connection is live.'),
+          targetOrigin: z.string().optional().describe('Origin (e.g. "https://example.com") to reconnect — meaningful to a browser-extension connection with a known prior channel for that origin.'),
+          targetTabId: z.number().optional().describe('Specific browser tab id to reconnect, if known — otherwise the receiving connection resolves a tab itself (e.g. from targetOrigin).'),
+        },
+      },
+      async ({ id, targetOrigin, targetTabId }: { id?: string; targetOrigin?: string; targetTabId?: number }) => {
+        const t = tenant();
+        const targetId = id ?? [...t.connections.keys()][0];
+        if (!targetId) return { content: [{ type: 'text', text: 'No live connection on this channel to request a reconnect from.' }], isError: true };
+        try {
+          const result = await t.call(targetId, REMOTE_REQUEST_RECONNECT_CALL, { targetOrigin, targetTabId });
+          return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
+        } catch (err) {
+          return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };
+        }
+      }
+    );
+    handles.set(REQUEST_RECONNECT_NAME, handle);
+  }
+
   function sync() {
     const conns = [...tenant().connections.values()];
     const multi = conns.length >= 2;
@@ -326,6 +375,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
       REGISTER_TOOL_BY_PATH_NAME,
       REGISTER_TOOL_BY_CODE_NAME,
       UNREGISTER_TOOL_NAME,
+      REQUEST_RECONNECT_NAME,
     ]);
 
     if (multi) {
@@ -360,6 +410,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
     if (!handles.has(REGISTER_TOOL_BY_PATH_NAME)) registerRegisterToolByPath();
     if (!handles.has(REGISTER_TOOL_BY_CODE_NAME)) registerRegisterToolByCode();
     if (!handles.has(UNREGISTER_TOOL_NAME)) registerUnregisterTool();
+    if (!handles.has(REQUEST_RECONNECT_NAME)) registerRequestReconnect();
 
     for (const [registeredName, { connectionId, entry }] of registeredNow) {
       if (handles.has(registeredName)) continue;

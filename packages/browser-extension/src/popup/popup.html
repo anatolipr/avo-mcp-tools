@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>js-bridge-mcp Connector</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <h1>This tab</h1>
+    <div id="tab-status"></div>
+
+    <div id="connected-panel" hidden>
+      <label for="rename-input">Connection name</label>
+      <div class="row">
+        <input id="rename-input" type="text" placeholder="connection name" />
+        <button id="rename-btn">Rename</button>
+      </div>
+      <button id="disconnect-btn" class="danger">Disconnect</button>
+      <hr />
+    </div>
+
+    <div id="status"></div>
+    <label for="channel-select" id="channel-label">Existing channel</label>
+    <select id="channel-select"></select>
+    <label for="new-channel">Or create a new channel</label>
+    <input id="new-channel" type="text" placeholder="channel-name" />
+    <label for="app-label" id="app-label-label">Connection name (optional)</label>
+    <input id="app-label" type="text" placeholder="defaults to this site's hostname" />
+    <button id="connect-btn">Connect</button>
+    <div id="result"></div>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

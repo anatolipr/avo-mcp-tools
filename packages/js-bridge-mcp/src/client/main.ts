@@ -5,6 +5,7 @@ import {
   REMOTE_REGISTER_BY_PATH_CALL,
   REMOTE_REGISTER_BY_CODE_CALL,
   REMOTE_UNREGISTER_CALL,
+  REMOTE_REQUEST_RECONNECT_CALL,
 } from 'mcp-tenant-lib/client';
 
 // The page itself defines its tools (function + manifest entry together,
@@ -185,6 +186,25 @@ const socket = connectStateSocket<undefined, undefined>(
           return;
         }
 
+        if (name === REMOTE_REQUEST_RECONNECT_CALL) {
+          // A page's own socket dying (e.g. on navigation) is exactly the
+          // situation request_reconnect exists to work around - by the time
+          // this handler could ever run, this connection is by definition
+          // still alive, so there's nothing to actually DO here beyond
+          // acking clearly rather than falling through to "no page tool
+          // named..." (which would misleadingly suggest a typo/missing
+          // tool rather than "this connection type can't act on this").
+          // The real reconnect-without-a-re-paste behavior comes from the
+          // browser-extension package's auto-reconnect, not from this page
+          // bridge itself.
+          socket.send({
+            type: 'call_result',
+            id,
+            result: 'This page connection is already live and has no way to reconnect a different tab — request_reconnect only has an effect against a browser-extension connection.',
+          });
+          return;
+        }
+
         const fn = fnByName.get(name);
         if (!fn) throw new Error(`no page tool named "${name}" — was it in window.__mcpTools when this script loaded?`);
         // Page tools may be async (e.g. ones that fetch another document) —
@@ -315,4 +335,18 @@ toolBusReady.then(() => {
 // recently opened socket is ever the "current" one worth leaving.
 (window as any).__mcpLeaveChannel = () => {
   socket.send({ type: 'leave_channel' });
+};
+
+// Genuine full disconnect - unlike __mcpLeaveChannel (which only tells the
+// server this socket is leaving, ahead of a FRESH main.js import opening a
+// new one; the old socket keeps running its own reconnect loop until then),
+// this actually closes the socket via connectStateSocket's own close()
+// (which sets closedByCaller and stops it retrying) with no follow-up
+// reconnect. Added for the browser extension's popup "Disconnect" action -
+// there was previously no page-side API for "stop this connection for real"
+// distinct from "I'm about to open a different one instead."
+(window as any).__mcpDisconnect = () => {
+  socket.send({ type: 'leave_channel' });
+  socket.close();
+  console.log('[js-bridge-mcp] disconnected (not retrying)');
 };

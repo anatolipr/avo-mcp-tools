@@ -1,0 +1,49 @@
+name: Release browser-extension zip artifacts
+
+# Separate from publish.yml: this package is "private": true and never
+# published to npm (scripts/publish-changed.mjs / check-unpublished.mjs both
+# skip any private package), so it needs its own trigger and its own
+# artifact — a zip attached to a GitHub Release, not an npm publish. Uses a
+# distinct tag namespace (browser-extension-v*) since this package's
+# releases are independent of any npm-publish-triggering version bump
+# elsewhere in the monorepo.
+on:
+  push:
+    tags: ["browser-extension-v*"]
+  workflow_dispatch: {} # manual trigger, e.g. to rebuild without a new tag
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to create a GitHub Release and upload assets
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      # mcp-tenant-lib first, same dependency-order reasoning as publish.yml —
+      # browser-extension imports mcp-tenant-lib/client at build time.
+      - name: Build mcp-tenant-lib
+        run: npm run build -w mcp-tenant-lib
+
+      - name: Build browser-extension
+        run: npm run build -w browser-extension
+
+      - name: Package zip artifacts
+        run: node packages/browser-extension/scripts/package-dist.mjs --zip --out ../../release-artifacts
+        working-directory: packages/browser-extension
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*.zip
+          # tag_name defaults to the pushed tag (browser-extension-v*); on a
+          # manual workflow_dispatch run (no tag), softprops/action-gh-release
+          # falls back to a draft release the workflow run can be inspected
+          # from.
