@@ -18,6 +18,8 @@ import {
   startDebuggerDetachTracking,
 } from './debugger-permission.js';
 import { readResponseBody, modifyRequest, unregisterRequestModifier, clearDebuggerStateForTab } from './debugger-tools.js';
+import { findConnectedTabs, listConnectedTabs } from './connected-tabs.js';
+import { tabAlreadyConnected } from './connect-tab.js';
 
 const DEBUGGER_GATED_TOOL_NAMES = ['read_response_body', 'modify_request', 'unregister_request_modifier'];
 
@@ -34,10 +36,40 @@ export async function registerBuiltinTools(): Promise<void> {
 
   const tools: Omit<ExtensionTool, 'source'>[] = [
     {
+      name: 'find_tab_by_connection',
+      description:
+        'Resolves a js-bridge-mcp channel name or connection label (e.g. "example", the name shown in describe_tools\' ' +
+        '`connections` array or the dashboard) to the Chrome tabId of the tab it\'s actually running in — pass that tabId ' +
+        'to get_network_log/get_console_log/inject_script/enable_debugger_tools\'s own `tabId` argument to target that ' +
+        'specific tab instead of whichever one happens to be active. Only finds tabs THIS EXTENSION connected (via its ' +
+        'popup, a channel switch, or silent auto-reconnect) — a page with its own hand-authored connect snippet is ' +
+        'invisible here even though describe_tools can still see it. Omit `query` to list every tab this extension ' +
+        'currently knows about. Returns an empty `matches` array (not an error) if nothing matches or the match is stale ' +
+        '(tab closed/navigated away since connecting) — check `matches.length` before assuming the connection is live.',
+      params: {
+        query: {
+          type: 'string',
+          description: 'Channel name or connection label to look up, e.g. "example". Omit to list all known tabs.',
+          optional: true,
+        },
+      },
+      fn: async (args) => {
+        const { query } = (args ?? {}) as { query?: string };
+        const candidates = query ? findConnectedTabs(query) : listConnectedTabs();
+        const matches = [];
+        for (const c of candidates) {
+          if (await tabAlreadyConnected(c.tabId)) matches.push(c);
+        }
+        return { matches };
+      },
+    },
+    {
       name: 'get_network_log',
       description:
         'Recent network requests/responses (URL, method, status, response headers, timing) observed for a browser tab. ' +
-        'Read-only — does not intercept or modify traffic. Defaults to the active tab if tabId is omitted.',
+        'responseHeaders includes Set-Cookie and other headers Chrome/Firefox normally hide from extensions, so cookie-' +
+        'setting behavior is visible here. Read-only — does not intercept or modify traffic. Defaults to the active tab ' +
+        'if tabId is omitted.',
       params: { tabId: { type: 'number', description: 'Tab id to read. Omit for the active tab.', optional: true } },
       fn: async (args) => {
         const { tabId } = (args ?? {}) as { tabId?: number };

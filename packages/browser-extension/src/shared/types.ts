@@ -30,6 +30,13 @@ export interface ActiveTabStatus {
   // snippet yet, or the connection dropped), used to pre-fill the picker.
   knownChannel?: string;
   knownAppLabel?: string;
+  // Number of MCP tools this tab's own connection is currently exposing -
+  // looked up server-side from /api/dashboard by matching knownChannel +
+  // knownAppLabel against that channel's connections. Undefined when not
+  // connected, or when this tab's connection can't be matched there (label
+  // collision, or the page connected via its own snippet with a label this
+  // extension never recorded).
+  toolCount?: number;
 }
 
 export interface ActionResult {

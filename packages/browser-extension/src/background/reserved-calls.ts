@@ -20,10 +20,12 @@ import {
   REMOTE_UNREGISTER_CALL,
   REMOTE_REQUEST_RECONNECT_CALL,
 } from 'mcp-tenant-lib/client';
+import type { ToolParamSpec } from 'mcp-tenant-lib';
 import { getExtensionToolBus } from './extension-tool-bus.js';
 import { getKnownOrigin } from './storage.js';
 import { injectConnectSnippet } from './connect-tab.js';
 import { markTabConnected } from './auto-reconnect.js';
+import { recordConnectedTab } from './connected-tabs.js';
 
 const dynamicUnregisterByName = new Map<string, () => void>();
 
@@ -32,7 +34,7 @@ export async function handleReservedCall(name: string, args: unknown): Promise<{
 
   if (name === REMOTE_REGISTER_BY_PATH_CALL) {
     try {
-      const { name: toolName, description, path } = args as { name: string; description: string; path: string };
+      const { name: toolName, description, path, params } = args as { name: string; description: string; path: string; params?: Record<string, ToolParamSpec> };
       const segments = path.split('.');
       const lastKey = segments.pop()!;
       const root = (self as any).__extensionApiRoot ?? self;
@@ -42,7 +44,7 @@ export async function handleReservedCall(name: string, args: unknown): Promise<{
         return { handled: true, error: `"${path}" does not resolve to a function on the extension's global scope` };
       }
       const bound = (a: unknown) => fn.call(parent, a);
-      const unregister = bus.registerTool(toolName, bound, { description, origin: { kind: 'path', path } });
+      const unregister = bus.registerTool(toolName, bound, { description, params, origin: { kind: 'path', path } });
       dynamicUnregisterByName.set(toolName, unregister);
       return { handled: true, result: `registered "${toolName}" -> self.${path}` };
     } catch (err) {
@@ -52,7 +54,7 @@ export async function handleReservedCall(name: string, args: unknown): Promise<{
 
   if (name === REMOTE_REGISTER_BY_CODE_CALL) {
     try {
-      const { name: toolName, description, code } = args as { name: string; description: string; code: string };
+      const { name: toolName, description, code, params } = args as { name: string; description: string; code: string; params?: Record<string, ToolParamSpec> };
       let compiled: (a: unknown, chromeApi: typeof chrome, browserApi: unknown) => unknown;
       try {
         // No `document`/`window` params here (a service worker has neither) -
@@ -65,7 +67,7 @@ export async function handleReservedCall(name: string, args: unknown): Promise<{
       }
       const browserGlobal = (self as any).browser ?? chrome;
       const wrapped = async (a: unknown) => compiled(a, chrome, browserGlobal);
-      const unregister = bus.registerTool(toolName, wrapped, { description, origin: { kind: 'code', code } });
+      const unregister = bus.registerTool(toolName, wrapped, { description, params, origin: { kind: 'code', code } });
       dynamicUnregisterByName.set(toolName, unregister);
       return { handled: true, result: `registered "${toolName}" from code` };
     } catch (err) {
@@ -137,6 +139,7 @@ async function handleRequestReconnect(
     const label = known.appLabel || origin.replace(/^https?:\/\//, '');
     await injectConnectSnippet(tabId, known.channel, label);
     markTabConnected(tabId);
+    recordConnectedTab(tabId, known.channel, label);
     return { handled: true, result: `reconnected tab ${tabId} (origin "${origin}") to channel "${known.channel}"` };
   } catch (err) {
     return { handled: true, error: String((err as Error).message) };

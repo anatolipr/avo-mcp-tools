@@ -10,6 +10,7 @@
 import { getKnownOrigin } from './storage.js';
 import { injectConnectSnippet, tabAlreadyConnected } from './connect-tab.js';
 import { refreshBadgeForActiveTab } from './connection-badge.js';
+import { recordConnectedTab, forgetConnectedTab } from './connected-tabs.js';
 
 // In-memory "this tab has a live page-side WS, as far as we know" set.
 // Marked true by message-handler.ts's connect-active-tab handler and by this
@@ -42,6 +43,7 @@ export function startAutoReconnect(): void {
   chrome.webNavigation.onBeforeNavigate.addListener((details) => {
     if (details.frameId !== 0) return;
     connectedTabs.delete(details.tabId);
+    forgetConnectedTab(details.tabId);
   });
 
   chrome.webNavigation.onCompleted.addListener(async (details) => {
@@ -65,6 +67,7 @@ export function startAutoReconnect(): void {
     // marker main.ts already sets on success, not a new opt-in requirement.
     if (await tabAlreadyConnected(details.tabId)) {
       connectedTabs.add(details.tabId);
+      recordConnectedTab(details.tabId, known.channel, known.appLabel || origin.replace(/^https?:\/\//, ''));
       await refreshBadgeForActiveTab();
       return;
     }
@@ -80,6 +83,7 @@ export function startAutoReconnect(): void {
     const label = known.appLabel || origin.replace(/^https?:\/\//, '');
     await injectConnectSnippet(details.tabId, known.channel, label);
     connectedTabs.add(details.tabId);
+    recordConnectedTab(details.tabId, known.channel, label);
     // BUG FIX (found during manual testing): connection-badge.ts's own
     // tabs.onUpdated listener fires independently of webNavigation.onCompleted
     // (this listener) with no ordering guarantee between them - the badge's
@@ -92,5 +96,6 @@ export function startAutoReconnect(): void {
 
   chrome.tabs.onRemoved.addListener((tabId) => {
     connectedTabs.delete(tabId);
+    forgetConnectedTab(tabId);
   });
 }

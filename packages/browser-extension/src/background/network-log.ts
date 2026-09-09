@@ -66,7 +66,11 @@ export function startNetworkLogCapture(): void {
       );
     },
     { urls: ['<all_urls>'] },
-    ['responseHeaders']
+    // 'extraHeaders' is required to see Set-Cookie (and a few other
+    // sensitive headers like X-Frame-Options/CSP) at all - Chrome strips
+    // them from responseHeaders by default regardless of what the response
+    // actually sent, unless a listener explicitly opts into seeing them.
+    ['responseHeaders', 'extraHeaders']
   );
 
   chrome.webRequest.onErrorOccurred.addListener(

@@ -4,6 +4,35 @@ import { getKnownOrigin, setKnownOrigin, deleteKnownOrigin } from './storage.js'
 import { markTabConnected } from './auto-reconnect.js';
 import { lookupPersistentScriptsForUrl } from './script-injection.js';
 import { refreshBadgeForActiveTab } from './connection-badge.js';
+import { recordConnectedTab, forgetConnectedTab } from './connected-tabs.js';
+import { JSBRIDGE_HOST } from '../shared/constants.js';
+
+// Structural subset of mcp-tenant-lib's DashboardChannel (dashboard.ts) - see
+// popup.ts's own former copy of this comment (now folded into the shared
+// lookupToolCount helper below, the only remaining caller).
+interface DashboardChannel {
+  channel: string;
+  connections: { label: string | null; toolCount: number }[];
+}
+
+// Matches this tab's known channel+label against a fresh /api/dashboard
+// snapshot to find its own current tool count - the tab itself has no way
+// to know this locally, since tool count is server-side connection state,
+// not something window.__mcpLeaveChannel or any other page-side marker
+// exposes. Best-effort: returns undefined on any fetch failure or on no
+// match (label collision, or the page connected via its own snippet under a
+// label this extension never recorded), never throws.
+async function lookupToolCount(channel: string, appLabel: string): Promise<number | undefined> {
+  try {
+    const res = await fetch(`${JSBRIDGE_HOST}/api/dashboard`);
+    if (!res.ok) return undefined;
+    const channels: DashboardChannel[] = await res.json();
+    const match = channels.find((c) => c.channel === channel)?.connections.find((c) => c.label === appLabel);
+    return match?.toolCount;
+  } catch {
+    return undefined;
+  }
+}
 
 // Content-script -> background messages (console capture relay, persistent
 // script lookup) - a separate family from ExtensionRuntimeMessage (popup ->
@@ -90,7 +119,10 @@ async function handleGetActiveTabStatus(): Promise<ActiveTabStatus> {
   }
 
   const [connected, known] = await Promise.all([tabAlreadyConnected(tab.id), getKnownOrigin(origin)]);
-  return { connectable: true, connected, knownChannel: known?.channel, knownAppLabel: known?.appLabel };
+  const toolCount = connected && known?.channel && known?.appLabel
+    ? await lookupToolCount(known.channel, known.appLabel)
+    : undefined;
+  return { connectable: true, connected, knownChannel: known?.channel, knownAppLabel: known?.appLabel, toolCount };
 }
 
 async function handleConnectActiveTab(channel: string, appLabel?: string): Promise<ConnectActiveTabResult> {
@@ -123,6 +155,7 @@ async function handleConnectActiveTab(channel: string, appLabel?: string): Promi
   }
   await setKnownOrigin({ origin, channel, appLabel: resolvedLabel, lastConnectedAt: Date.now() });
   markTabConnected(tab.id);
+  recordConnectedTab(tab.id, channel, resolvedLabel);
   await refreshBadgeForActiveTab();
 
   return { ok: true };
@@ -137,7 +170,10 @@ async function handleRenameActiveTab(appLabel: string): Promise<ActionResult> {
   await renameConnection(tab.id, appLabel);
   const origin = new URL(tab.url).origin;
   const known = await getKnownOrigin(origin);
-  if (known) await setKnownOrigin({ ...known, appLabel });
+  if (known) {
+    await setKnownOrigin({ ...known, appLabel });
+    recordConnectedTab(tab.id, known.channel, appLabel);
+  }
   await refreshBadgeForActiveTab();
   return { ok: true };
 }
@@ -156,6 +192,7 @@ async function handleChangeChannelActiveTab(channel: string): Promise<ActionResu
   await changeChannel(tab.id, channel, label);
   await setKnownOrigin({ origin, channel, appLabel: label, lastConnectedAt: Date.now() });
   markTabConnected(tab.id);
+  recordConnectedTab(tab.id, channel, label);
   await refreshBadgeForActiveTab();
   return { ok: true };
 }
@@ -171,6 +208,7 @@ async function handleDisconnectActiveTab(): Promise<ActionResult> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !tab.url) return { ok: false, error: 'No active tab found.' };
   await disconnectTab(tab.id);
+  forgetConnectedTab(tab.id);
   try {
     const origin = new URL(tab.url).origin;
     await deleteKnownOrigin(origin);
