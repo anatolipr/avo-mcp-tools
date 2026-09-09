@@ -261,8 +261,8 @@ export function createManifestToolRegistry<TSchema, TValues>(
         inputSchema: {
           id: z.string().optional().describe('Connection id from describe_tools\' `connections` array. Omit when only one connection is live.'),
           name: z.string().describe('Tool name to register — must be unique on this connection.'),
-          description: z.string().describe('One-line description of what this tool does, shown to agents AND to the human in the dashboard approval popup — write it for both audiences.'),
-          code: z.string().describe('JavaScript source for the function body — same signature as new Function("args","document","window", code). Return the result (a value or a Promise). Shown verbatim to the human for approval before it runs.'),
+          description: z.string().describe('One-line description of what this tool does, shown to agents.'),
+          code: z.string().describe('JavaScript source for the function body — same signature as new Function("args","document","window", code). Return the result (a value or a Promise).'),
         },
       },
       async ({ id, name, description, code }: { id?: string; name: string; description: string; code: string }) => {

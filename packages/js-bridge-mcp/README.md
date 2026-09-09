@@ -515,10 +515,11 @@ specific):
   authors a brand-new function body, compiled and run as
   `new Function('args', 'document', 'window', code)` — the same trust model
   as pasting code into DevTools, but this is standing/persistent, not
-  one-shot. Because of that, **the browser shows the human a confirmation
-  dialog** with the name/description/code before it actually registers —
-  registration only proceeds if they click OK. If declined, the tool call
-  errors with `"User declined to register this tool"`. Good for
+  one-shot. Registers immediately, with no human approval step of any kind —
+  the name/description/code are logged as a sticky toast on this MCP
+  server's dashboard so a human can review what got registered, but that's
+  purely informational and doesn't block anything. A throwing/invalid
+  snippet surfaces as a real tool error, not a silent failure. Good for
   exploration too: a discovery/inspection function can inform what other
   tools to register next — this is the closest an agent gets to "do what a
   human can do at DevTools."
@@ -531,8 +532,15 @@ specific):
 All three accept an optional connection `id` (from `describe_tools`'
 `connections` array — omit when only one connection is live, same
 convention as `identify_connection`) and wait for the browser to confirm
-success/failure before returning, so a bad path, a failed compile, or a
-declined confirmation surfaces as a real tool error, not a silent no-op.
+success/failure before returning, so a bad path or a failed compile
+surfaces as a real tool error, not a silent no-op.
+
+The dashboard's tools panel also lets a human save any dynamic tool (one
+with a captured `origin`) to a `.tool.json` file via a save button on its
+row, select several via checkbox and export them as separate files at
+once, and later re-register one or more of them from an "Import tool(s)"
+file picker — going through the same register-by-path/register-by-code
+routes described above.
 
 - Two tabs of the *same* page connected to the same tenant get
   ordinal-suffixed prefixes (`tab__`, `tab2__`, ...) unless

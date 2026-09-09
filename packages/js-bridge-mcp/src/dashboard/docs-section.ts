@@ -64,7 +64,8 @@ export class DocsSection extends LitElement {
         tools can never be removed this way. The same registration/unregistration is also
         available to agents as three MCP tools: <code>register_page_tool_by_path</code>,
         <code>register_page_tool_by_code</code>, and <code>unregister_page_tool</code> —
-        code-based registration shows the human a browser confirmation dialog before it runs.
+        both registration tools take effect immediately, with no approval step; a sticky
+        toast on this dashboard just lets you review what an agent registered after the fact.
       </p>
     `;
   }

@@ -17,6 +17,8 @@ const mime: Record<string, string> = {
   '.json': 'application/json',
   '.css': 'text/css',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.webmanifest': 'application/manifest+json',
 };
 
 const sessions = new Map<string, StreamableHTTPServerTransport>();
