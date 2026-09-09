@@ -367,7 +367,7 @@ test('register_page_tool_by_path sends a "__register_tool_by_path__" call and re
   const t = new Tenant('t1', undefined, {});
   t.registerConnection('a', fakeSocket((msg) => {
     assert.equal(msg.name, '__register_tool_by_path__');
-    assert.deepEqual(msg.args, { name: 'save', description: 'saves', path: 'myApp.save' });
+    assert.deepEqual(msg.args, { name: 'save', description: 'saves', path: 'myApp.save', params: {} });
     t.resolveCall(msg.id, 'registered "save" -> window.myApp.save');
   }));
 

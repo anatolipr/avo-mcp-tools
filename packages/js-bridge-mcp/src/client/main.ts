@@ -134,7 +134,7 @@ const socket = connectStateSocket<undefined, undefined>(
           await toolBusReady;
           const bus = (window as any).__mcpToolBus;
           if (!bus) throw new Error('window.__mcpToolBus failed to load on this page - cannot register a tool');
-          const { name: toolName, description, path } = args as { name: string; description: string; path: string };
+          const { name: toolName, description, path, params } = args as { name: string; description: string; path: string; params?: Record<string, unknown> };
           const segments = path.split('.');
           const lastKey = segments.pop()!;
           const parent = segments.reduce((obj: any, key) => obj?.[key], window as any);
@@ -146,7 +146,7 @@ const socket = connectStateSocket<undefined, undefined>(
           // `window.myApp.save()` in DevTools would get it, rather than an
           // unbound call that could break a method relying on its own `this`.
           const bound = (a: unknown) => fn.call(parent, a);
-          const unregister = bus.registerTool(toolName, bound, { description, origin: { kind: 'path', path } });
+          const unregister = bus.registerTool(toolName, bound, { description, params, origin: { kind: 'path', path } });
           dynamicUnregisterByName.set(toolName, unregister);
           socket.send({ type: 'call_result', id, result: `registered "${toolName}" -> window.${path}` });
           return;
@@ -156,7 +156,7 @@ const socket = connectStateSocket<undefined, undefined>(
           await toolBusReady;
           const bus = (window as any).__mcpToolBus;
           if (!bus) throw new Error('window.__mcpToolBus failed to load on this page - cannot register a tool');
-          const { name: toolName, description, code } = args as { name: string; description: string; code: string };
+          const { name: toolName, description, code, params } = args as { name: string; description: string; code: string; params?: Record<string, unknown> };
           // Registers immediately, no confirmation of its own — the
           // js-bridge-mcp dashboard separately logs this as a sticky toast
           // (Tenant.logToolRegistration) so a human can review it after the
@@ -168,7 +168,7 @@ const socket = connectStateSocket<undefined, undefined>(
             throw new Error(`code failed to compile: ${(err as Error).message}`);
           }
           const wrapped = async (a: unknown) => compiled(a, document, window);
-          const unregister = bus.registerTool(toolName, wrapped, { description, origin: { kind: 'code', code } });
+          const unregister = bus.registerTool(toolName, wrapped, { description, params, origin: { kind: 'code', code } });
           dynamicUnregisterByName.set(toolName, unregister);
           socket.send({ type: 'call_result', id, result: `registered "${toolName}" from code` });
           return;

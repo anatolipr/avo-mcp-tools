@@ -31,6 +31,38 @@ function manifestEntryToZodShape(entry: ToolManifestEntry): Record<string, z.Zod
   return shape;
 }
 
+/**
+ * Zod shape for the `params` argument accepted by register_page_tool_by_path/
+ * _by_code — describes the NEW tool's own parameters (a map of param name to
+ * {type, description?, optional?}), the same shape as ToolParamSpec/
+ * ToolManifestEntry.params. Without this, a registered tool always gets
+ * params: {} (empty inputSchema), so MCP clients strip any call-time
+ * arguments before they reach the page's JS — see this package's own README
+ * / the session report that led to this field ("register one generic
+ * wrapper and call it with different payloads" was unusable without it).
+ */
+const REGISTER_TOOL_PARAMS_SHAPE = z
+  .record(
+    z.string(),
+    z.object({
+      type: z.enum(['string', 'number', 'boolean']).describe('JSON type of this argument.'),
+      description: z.string().optional().describe('Shown to agents calling the new tool.'),
+      optional: z.boolean().optional().describe('Defaults to false (required).'),
+    })
+  )
+  .optional()
+  .describe(
+    'Parameters the NEW tool itself should accept, e.g. {"action":{"type":"string"},"count":{"type":"number",' +
+      '"optional":true}} — read as `args.action`/`args.count` inside `code` (or as the single object argument ' +
+      'passed to the function at `path`). Omit for a zero-argument tool. Always set this instead of hardcoding ' +
+      'values into `code` when the tool should be reusable across calls with different inputs — an omitted/empty ' +
+      'params means MCP clients will strip any arguments passed at call time.'
+  );
+
+function paramsArgToRecord(params: Record<string, { type: 'string' | 'number' | 'boolean'; description?: string; optional?: boolean }> | undefined): Record<string, ToolParamSpec> {
+  return params ?? {};
+}
+
 export interface ManifestToolRegistry {
   handles: Map<string, RegisteredTool>;
   sync(): void;
@@ -210,11 +242,14 @@ export function createManifestToolRegistry<TSchema, TValues>(
       {
         description:
           'Registers a NEW tool on an already-connected browser tab, pointing at an existing ' +
-          'window.* function (e.g. path "myApp.save" resolves window.myApp.save). Use this to expose ' +
-          'something the page already does, without writing new code — prefer ' +
+          'window.* function (e.g. path "myApp.save" resolves window.myApp.save). The target function ' +
+          'receives one argument: the object built from `params` (or {} if params is omitted). Use this ' +
+          'to expose something the page already does, without writing new code — prefer ' +
           'register_page_tool_by_code when no existing function does what you need. Waits for the ' +
           'browser to confirm registration succeeded; a bad path (does not resolve, or resolves to ' +
-          'something that is not a function) surfaces as a tool error, not a silent no-op. The new ' +
+          'something that is not a function) surfaces as a tool error, not a silent no-op. Some MCP ' +
+          'clients require a manual one-time enable of a newly-registered dynamic tool before it can be ' +
+          'called (a UI limitation of that client, not this server). The new ' +
           'tool becomes callable immediately but (per the MCP tools/list_changed caveat noted on ' +
           'describe_tools) some MCP clients may need a session restart to see it. Registration is ' +
           'logged as a sticky toast on this MCP server\'s dashboard so a human can review what got ' +
@@ -224,14 +259,15 @@ export function createManifestToolRegistry<TSchema, TValues>(
           name: z.string().describe('Tool name to register — must be unique on this connection.'),
           description: z.string().describe('One-line description of what this tool does, shown to agents.'),
           path: z.string().describe('Dot path off window to an existing function, e.g. "myApp.save" for window.myApp.save.'),
+          params: REGISTER_TOOL_PARAMS_SHAPE,
         },
       },
-      async ({ id, name, description, path }: { id?: string; name: string; description: string; path: string }) => {
+      async ({ id, name, description, path, params }: { id?: string; name: string; description: string; path: string; params?: Record<string, ToolParamSpec> }) => {
         const t = tenant();
         const targetId = id ?? [...t.connections.keys()][0];
         if (!targetId) return { content: [{ type: 'text', text: 'No live connection on this channel to register a tool on.' }], isError: true };
         try {
-          const result = await t.call(targetId, REMOTE_REGISTER_BY_PATH_CALL, { name, description, path });
+          const result = await t.call(targetId, REMOTE_REGISTER_BY_PATH_CALL, { name, description, path, params: paramsArgToRecord(params) });
           t.logToolRegistration(name, description);
           return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
         } catch (err) {
@@ -251,8 +287,11 @@ export function createManifestToolRegistry<TSchema, TValues>(
           'function body to compile and run in that page — the same trust model as pasting code into ' +
           'that page\'s own DevTools console. Use this when no existing window.* function already does ' +
           'what you need (use register_page_tool_by_path instead when one does). The code runs as ' +
-          'the body of `new Function(\'args\', \'document\', \'window\', code)` — return a value (or a ' +
-          'Promise) from `code`; it becomes this tool\'s result. Good for exploration too: a ' +
+          'the body of `new Function(\'args\', \'document\', \'window\', code)` — `args` is the object ' +
+          'built from `params` (or {} if params is omitted); return a value (or a ' +
+          'Promise) from `code`; it becomes this tool\'s result. Set `params` (rather than hardcoding ' +
+          'values into `code`) whenever the tool should be reusable across calls with different inputs. ' +
+          'Good for exploration too: a ' +
           'discovery/inspection function (e.g. "list every window.* key matching /save/i") can inform ' +
           'what other tools to register next. Registers immediately, no approval step — the ' +
           'name/description/code are logged as a sticky toast on this MCP server\'s dashboard so a human ' +
@@ -263,9 +302,10 @@ export function createManifestToolRegistry<TSchema, TValues>(
           name: z.string().describe('Tool name to register — must be unique on this connection.'),
           description: z.string().describe('One-line description of what this tool does, shown to agents.'),
           code: z.string().describe('JavaScript source for the function body — same signature as new Function("args","document","window", code). Return the result (a value or a Promise).'),
+          params: REGISTER_TOOL_PARAMS_SHAPE,
         },
       },
-      async ({ id, name, description, code }: { id?: string; name: string; description: string; code: string }) => {
+      async ({ id, name, description, code, params }: { id?: string; name: string; description: string; code: string; params?: Record<string, ToolParamSpec> }) => {
         const t = tenant();
         const targetId = id ?? [...t.connections.keys()][0];
         if (!targetId) return { content: [{ type: 'text', text: 'No live connection on this channel to register a tool on.' }], isError: true };
@@ -274,7 +314,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
           // logToolRegistration below is purely informational: it surfaces
           // a sticky toast on the dashboard's SSE stream so a human can see
           // what was registered after the fact, same as a build log.
-          const result = await t.call(targetId, REMOTE_REGISTER_BY_CODE_CALL, { name, description, code });
+          const result = await t.call(targetId, REMOTE_REGISTER_BY_CODE_CALL, { name, description, code, params: paramsArgToRecord(params) });
           t.logToolRegistration(name, description, code);
           return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
         } catch (err) {
