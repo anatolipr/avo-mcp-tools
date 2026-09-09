@@ -114,7 +114,7 @@ export class ToolsModal extends LitElement {
     .add-form { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
     .add-form h3 { font-size: 13px; margin: 0 0 10px; }
     .mode-toggle { display: flex; gap: 12px; margin-bottom: 10px; font-size: 12px; }
-    .mode-toggle label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    .mode-toggle label { display: flex; align-items: center; gap: 4px; cursor: pointer; flex: 1; white-space: nowrap; }
     .add-form input, .add-form textarea {
       width: 100%; box-sizing: border-box; font-size: 12px; padding: 6px 8px; margin-bottom: 8px;
       border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg); color: inherit;

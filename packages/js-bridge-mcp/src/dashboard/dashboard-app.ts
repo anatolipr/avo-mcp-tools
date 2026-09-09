@@ -53,9 +53,10 @@ export class DashboardApp extends LitElement {
     }
     .connection-label { font-size: 13px; font-weight: 600; flex: 0 0 auto; }
     .connection-summary {
-      font-size: 12px; opacity: 0.6; flex: 1 1 auto; min-width: 0;
+      font-size: 12px; opacity: 0.6; flex: 1 1 auto; min-width: 0; cursor: pointer;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
+    .connection-summary:hover { opacity: 1; text-decoration: underline dotted; }
     .view-tools-btn {
       font-size: 11px; opacity: 0.7; flex: 0 0 auto; border: none; background: none;
       color: inherit; cursor: pointer; padding: 2px 4px; border-radius: 4px;
@@ -70,12 +71,34 @@ export class DashboardApp extends LitElement {
     .identify-btn:active, .move-btn:active { background: var(--accent-tint); }
     .identify-btn.sent { border-color: var(--accent); color: var(--accent); }
     .conn-count { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--hover); opacity: 0.75; }
+    .summary-backdrop {
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 1001;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .summary-modal {
+      background: var(--bg); border: 1px solid var(--border-strong); border-radius: 10px;
+      width: min(640px, 92vw); max-height: 80vh; display: flex; flex-direction: column; overflow: hidden;
+      box-shadow: 0 20px 60px var(--shadow);
+    }
+    .summary-modal .modal-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px;
+    }
+    .summary-modal .close-btn {
+      font-size: 13px; border: none; background: none; color: inherit; cursor: pointer; opacity: 0.6;
+    }
+    .summary-modal .close-btn:hover { opacity: 1; }
+    .summary-modal .summary-view {
+      padding: 14px 18px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+      overflow-y: auto; flex: 1 1 auto; min-height: 0;
+    }
   `;
 
   #channels = new Signal<DashboardChannel[]>([]);
   #source?: EventSource;
   #justSent = new Signal<Set<string>>(new Set());
   #openModal = new Signal<{ channel: string; connectionId: string } | undefined>(undefined);
+  #viewingSummary = new Signal<{ label: string; summary: string } | undefined>(undefined);
   // Ids of recentToolRegistrations entries already surfaced as a sticky
   // toast — the SSE snapshot resends the whole rolling log on every push,
   // so without this a page reconnect (or any unrelated change firing
@@ -245,6 +268,23 @@ export class DashboardApp extends LitElement {
           ></tools-modal>`
         : ''}
       <toast-stack></toast-stack>
+      ${this.#renderSummaryView()}
+    `;
+  }
+
+  #renderSummaryView() {
+    const s = this.#viewingSummary.value;
+    if (!s) return '';
+    return html`
+      <div class="summary-backdrop" @click=${(e: Event) => { if (e.target === e.currentTarget) this.#viewingSummary.set(undefined); }}>
+        <div class="summary-modal">
+          <div class="modal-header">
+            <strong>${s.label}</strong>
+            <button class="close-btn" @click=${() => this.#viewingSummary.set(undefined)}>✕</button>
+          </div>
+          <div class="summary-view">${s.summary}</div>
+        </div>
+      </div>
     `;
   }
 
@@ -268,7 +308,11 @@ export class DashboardApp extends LitElement {
                   <div class="connection-row">
                     <span class="connection-dot"></span>
                     <span class="connection-label">${conn.label ?? '(unlabeled)'}</span>
-                    <span class="connection-summary">${conn.summary ?? ''}</span>
+                    <span
+                      class="connection-summary"
+                      title="Click to read the full description"
+                      @click=${() => this.#viewingSummary.set({ label: conn.label ?? '(unlabeled)', summary: conn.summary ?? '' })}
+                    >${conn.summary ?? ''}</span>
                     <button
                       class="view-tools-btn"
                       title="View tools"
