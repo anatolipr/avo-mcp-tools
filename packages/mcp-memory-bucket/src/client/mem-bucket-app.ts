@@ -108,10 +108,11 @@ function loadFilterState(): Partial<FilterState> {
 export class MemBucketApp extends LitElement {
   static styles = css`
     :host { display: flex; flex-direction: column; height: 100vh; position: relative; }
-    /* Overlays whichever header row #renderBody() renders for the current mode (.folders-bar,
-       .toolbar-bar, or folder-view's own .mode-row) - all three share the same 10px/16px padding,
-       so this lines up with them pixel-for-pixel without needing to sit inside any of them. */
-    .header-toolbar { position: absolute; top: 10px; right: 16px; z-index: 1; }
+    /* Mounted inside whichever header row #renderBody() renders for the current mode (.folders-bar,
+       .toolbar-bar, or folder-view's own .mode-row, via a <slot>) so it's a normal flex child of
+       that row - margin-left: auto keeps it pinned to the right, and it wraps onto its own line
+       with the rest of the row's content when the row gets too narrow. */
+    .header-toolbar { margin-left: auto; }
     .filters {
       padding: 12px 16px;
       border-bottom: 1px solid var(--border);
@@ -214,28 +215,25 @@ export class MemBucketApp extends LitElement {
       left: -3px; right: -3px;
     }
     label.small { font-size: 12px; opacity: 0.7; }
-    /* padding-right reserves room for .header-toolbar (an absolutely-positioned overlay, so it
-       takes no space in this row's own flex layout) so wrapped folder chips don't run under it. */
     .folders-bar {
       display: flex;
       gap: 6px;
       align-items: center;
       flex-wrap: wrap;
-      padding: 10px 320px 10px 16px;
+      padding: 10px 16px;
       border-bottom: 1px solid var(--border);
       background: var(--bg-subtle);
     }
+    /* Chips live directly in .folders-bar's own flex-wrap flow (not a nested flex container) so a
+       wrapped row of chips spans the bar's full width, left-aligned, instead of being squeezed into
+       whatever width a nested flex item happened to get on the first line. */
     .folders-bar .folder-chips {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-      flex-wrap: wrap;
-      flex: 1 1 auto;
-      min-width: 0;
+      display: contents;
     }
     .toolbar-bar {
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
       padding: 10px 16px;
       border-bottom: 1px solid var(--border);
       background: var(--bg-subtle);
@@ -1165,14 +1163,14 @@ export class MemBucketApp extends LitElement {
     this.#mountFolderfooProfileCircle();
   }
 
-  // <app-toolbar> lives here, outside #renderBody()'s mode branches, so it's always the same
-  // element in the same DOM position no matter which mode is active - see #renderToolbar's
-  // comment for why that matters beyond visual flicker. `.header-toolbar` positions it to line up
-  // visually with each mode's own header row (folders-bar / toolbar-bar / folder-view's mode-row),
-  // which all share the same height and padding (see their CSS).
+  // <app-toolbar> is mounted inside whichever header row #renderBody() renders for the current
+  // mode (.folders-bar / .toolbar-bar / folder-view's own .mode-row, reached via a <slot>), as a
+  // `.header-toolbar` flex child with margin-left: auto - so it switches DOM position (and
+  // remounts, including its async folderfoo-profile-circle widget) on every view change. That's
+  // fine: #mountFolderfooProfileCircle() already re-finds the current slot and no-ops if a circle
+  // is already there, so a remount just repeats a cheap, idempotent lookup.
   render() {
     return html`
-      <div class="header-toolbar">${this.#renderToolbar()}</div>
       ${this.#renderBody()}
       ${this.#quickPromptsOpen.value
         ? html`<quick-prompts-modal
@@ -1194,7 +1192,9 @@ export class MemBucketApp extends LitElement {
 
     if (this.#view.value === 'shared') {
       return html`
-        <div class="toolbar-bar"></div>
+        <div class="toolbar-bar">
+          <div class="header-toolbar">${this.#renderToolbar()}</div>
+        </div>
         <shared-with-me-panel
           .items=${this.#sharedItems.value}
           .refreshing=${this.#sharedRefreshing.value}
@@ -1211,7 +1211,9 @@ export class MemBucketApp extends LitElement {
 
     if (this.#view.value === 'channels') {
       return html`
-        <div class="toolbar-bar"></div>
+        <div class="toolbar-bar">
+          <div class="header-toolbar">${this.#renderToolbar()}</div>
+        </div>
         <channel-view
           .channels=${this.#channels.value}
           .selected=${this.#selectedChannel.value}
@@ -1237,13 +1239,17 @@ export class MemBucketApp extends LitElement {
           }}
           .onDateClick=${(d: string) => this.#setDateFilter(d)}
           .onKeyClick=${(key: string) => this.#setSearch(key)}
-        ></folder-view>
+        >
+          <div class="header-toolbar" slot="mode-row-end">${this.#renderToolbar()}</div>
+        </folder-view>
       `;
     }
 
     if (this.#foldersLoaded.value && allFolders.length === 0 && !this.#showAddFolder.value) {
       return html`
-        <div class="toolbar-bar"></div>
+        <div class="toolbar-bar">
+          <div class="header-toolbar">${this.#renderToolbar()}</div>
+        </div>
         <div class="first-run">
           <h1>No folders configured yet</h1>
           <p>
@@ -1287,6 +1293,7 @@ export class MemBucketApp extends LitElement {
           )}
           <button class="add-folder-btn" @click=${() => this.#showAddFolder.set(true)}>+ Add folder</button>
         </div>
+        <div class="header-toolbar">${this.#renderToolbar()}</div>
       </div>
       ${this.#folderfooOpenStatus.value
         ? html`

@@ -20,56 +20,30 @@ function isImageFilename(filename: string): boolean {
   return IMAGE_EXTENSIONS.has(filename.slice(dot).toLowerCase());
 }
 
-/** One node of the attachment tree built by `buildAttachmentTree` — either a directory (children
- * only) or a leaf pointing back at the original attachment entry for click/download/remove. */
-interface AttachmentTreeNode {
+/** One node of a file tree built by `buildFileTree` from a flat list of `/`-separated relative
+ * paths — either a directory (no `leaf`) or a file, optionally carrying an arbitrary payload `T`
+ * (e.g. the original `ClientAttachmentEntry`) for the caller's leaf renderer. Shared by
+ * `#renderAttachments` (attachment_add entries — see attachments/repository.ts, which creates
+ * nested subdirs on disk for `/`-containing filenames) and `#renderSkillSourceFiles` (a skill's own
+ * bundled files, read-only, no payload). */
+interface FileTreeNode<T> {
   name: string;
-  children: Map<string, AttachmentTreeNode>;
-  entry?: ClientAttachmentEntry;
+  children: Map<string, FileTreeNode<T>>;
+  leaf?: T;
 }
 
-/** Groups flat attachment entries (whose `filename` may itself be a `/`-separated relative path,
- * e.g. "scripts/setup.sh" — see attachments/repository.ts, which creates nested subdirs on disk)
- * into a directory tree for `#renderAttachments` to render with ASCII connectors. */
-function buildAttachmentTree(attachments: ClientAttachmentEntry[]): AttachmentTreeNode {
-  const root: AttachmentTreeNode = { name: '', children: new Map() };
-  for (const entry of attachments) {
-    const parts = entry.filename.split('/').filter(Boolean);
-    let node = root;
-    parts.forEach((part, i) => {
-      const isLeaf = i === parts.length - 1;
-      let child = node.children.get(part);
-      if (!child) {
-        child = { name: part, children: new Map() };
-        node.children.set(part, child);
-      }
-      if (isLeaf) child.entry = entry;
-      node = child;
-    });
-  }
-  return root;
-}
-
-/** Same shape as AttachmentTreeNode but for `EntryDetail.sourceFiles` (plain relative-path
- * strings, no download/view/remove actions — see #renderSourceFileTreeLevel). */
-interface SourceFileTreeNode {
-  name: string;
-  children: Map<string, SourceFileTreeNode>;
-  isFile: boolean;
-}
-
-function buildSourceFileTree(paths: string[]): SourceFileTreeNode {
-  const root: SourceFileTreeNode = { name: '', children: new Map(), isFile: false };
+function buildFileTree<T>(paths: string[], payloadFor: (path: string) => T): FileTreeNode<T> {
+  const root: FileTreeNode<T> = { name: '', children: new Map() };
   for (const p of paths) {
     const parts = p.split('/').filter(Boolean);
     let node = root;
     parts.forEach((part, i) => {
       let child = node.children.get(part);
       if (!child) {
-        child = { name: part, children: new Map(), isFile: false };
+        child = { name: part, children: new Map() };
         node.children.set(part, child);
       }
-      if (i === parts.length - 1) child.isFile = true;
+      if (i === parts.length - 1) child.leaf = payloadFor(p);
       node = child;
     });
   }
@@ -1252,71 +1226,55 @@ export class DetailPanel extends LitElement {
   }
 
   /** Renders one directory's children as ASCII-tree `<li>`s (├──/└── connectors, │ continuation
-   * bars for ancestor levels that aren't done yet), recursing into subdirectories. */
-  #renderAttachmentTreeLevel(
-    d: EntryDetail,
-    table: 'skills' | 'memory_docs',
-    node: AttachmentTreeNode,
-    ancestorBars: boolean[]
-  ): unknown[] {
+   * bars for ancestor levels that aren't done yet), recursing into subdirectories. `renderLeaf` is
+   * called with each file node's `leaf` payload — pass a no-payload tree (`FileTreeNode<void>`)
+   * and a leaf renderer that ignores its argument for read-only listings like skill source files. */
+  #renderFileTreeLevel<T>(node: FileTreeNode<T>, ancestorBars: boolean[], renderLeaf: (leaf: T, name: string) => unknown): unknown[] {
     const children = [...node.children.values()].sort((x, y) => x.name.localeCompare(y.name));
     return children.map((child, i) => {
       const isLast = i === children.length - 1;
       const prefix = ancestorBars.map((open) => (open ? '│   ' : '    ')).join('') + (isLast ? '└── ' : '├── ');
-      const isDir = child.entry === undefined;
+      const isDir = child.leaf === undefined;
       return html`
         <li>
           <span class="tree-prefix">${prefix}</span>${isDir
             ? html`<span class="tree-dir">📁 ${child.name}</span>`
-            : this.#renderAttachmentLeaf(d, table, child.entry!, child.name)}
+            : renderLeaf(child.leaf as T, child.name)}
         </li>
-        ${isDir ? this.#renderAttachmentTreeLevel(d, table, child, [...ancestorBars, !isLast]) : nothing}
+        ${isDir ? this.#renderFileTreeLevel(child, [...ancestorBars, !isLast], renderLeaf) : nothing}
       `;
     });
   }
 
-  /** Renders one directory's children of a skill's own bundled files (scripts/, references/, etc.)
-   * as ASCII-tree `<li>`s — read-only, no download/view/remove (these aren't attachment_add
-   * entries, so there's no matching API route to link to). */
-  #renderSourceFileTreeLevel(node: SourceFileTreeNode, ancestorBars: boolean[]): unknown[] {
-    const children = [...node.children.values()].sort((x, y) => x.name.localeCompare(y.name));
-    return children.map((child, i) => {
-      const isLast = i === children.length - 1;
-      const prefix = ancestorBars.map((open) => (open ? '│   ' : '    ')).join('') + (isLast ? '└── ' : '├── ');
-      return html`
-        <li>
-          <span class="tree-prefix">${prefix}</span>${child.isFile
-            ? html`<span>${child.name}</span>`
-            : html`<span class="tree-dir">📁 ${child.name}</span>`}
-        </li>
-        ${!child.isFile ? this.#renderSourceFileTreeLevel(child, [...ancestorBars, !isLast]) : nothing}
-      `;
-    });
-  }
-
+  /** Skill's own bundled files (scripts/, references/, etc.) — read-only, no download/view/remove
+   * (these aren't attachment_add entries, so there's no matching API route to link to). */
   #renderSkillSourceFiles(d: EntryDetail) {
     if (!d.sourceFiles?.length) return nothing;
-    const tree = buildSourceFileTree(d.sourceFiles);
+    const tree = buildFileTree(d.sourceFiles, () => undefined);
     return html`
       <div class="attachments-section">
         <h4>Skill files</h4>
-        <ul class="attachment-tree">${this.#renderSourceFileTreeLevel(tree, [])}</ul>
+        <ul class="attachment-tree">${this.#renderFileTreeLevel(tree, [], (_leaf, name) => html`<span>${name}</span>`)}</ul>
       </div>
     `;
   }
 
   #renderAttachments(d: EntryDetail, table: 'skills' | 'memory_docs') {
-    const tree = d.attachments?.length ? buildAttachmentTree(d.attachments) : undefined;
-    const hasNesting = d.attachments?.some((a) => a.filename.includes('/')) ?? false;
+    const attachments = d.attachments ?? [];
+    const byFilename = new Map(attachments.map((a) => [a.filename, a]));
+    const tree = attachments.length ? buildFileTree(attachments.map((a) => a.filename), (p) => byFilename.get(p)!) : undefined;
+    const hasNesting = attachments.some((a) => a.filename.includes('/'));
     return html`
       <div class="attachments-section">
         <h4>Attachments</h4>
         ${tree
           ? hasNesting
-            ? html`<ul class="attachment-tree">${this.#renderAttachmentTreeLevel(d, table, tree, [])}</ul>`
+            ? html`<ul class="attachment-tree">
+                ${this.#renderFileTreeLevel(tree, [], (leaf, name) => this.#renderAttachmentLeaf(d, table, leaf, name))}
+              </ul>`
             : html`
                 <ul>
-                  ${d.attachments!.map((a) => html`<li>${this.#renderAttachmentLeaf(d, table, a, a.filename)}</li>`)}
+                  ${attachments.map((a) => html`<li>${this.#renderAttachmentLeaf(d, table, a, a.filename)}</li>`)}
                 </ul>
               `
           : nothing}

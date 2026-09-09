@@ -127,19 +127,25 @@ export function writeAttachmentFile(dir: string, filename: string, data: Buffer)
   return entry;
 }
 
-/** Recurses into subdirectories — an attachment's `filename` may be a nested relative path (e.g. "references/foo.md"). Returns paths relative to `dir`. */
-export function listAttachmentFiles(dir: string): string[] {
+/** Recurses into subdirectories, returning every file's path relative to `dir` — the shared walker
+ * behind listAttachmentFiles, listSkillSourceFiles, and AttachmentRepository.addDirectory. */
+export function walkFilesRecursive(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
   const out: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      for (const nested of listAttachmentFiles(full)) out.push(path.join(entry.name, nested));
+      for (const nested of walkFilesRecursive(full)) out.push(path.join(entry.name, nested));
     } else if (entry.isFile()) {
       out.push(entry.name);
     }
   }
   return out;
+}
+
+/** Recurses into subdirectories — an attachment's `filename` may be a nested relative path (e.g. "references/foo.md"). Returns paths relative to `dir`. */
+export function listAttachmentFiles(dir: string): string[] {
+  return walkFilesRecursive(dir);
 }
 
 /**

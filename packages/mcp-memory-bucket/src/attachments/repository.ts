@@ -4,7 +4,7 @@ import type Database from 'better-sqlite3';
 import type { MemoryRepository } from '../memory/repository.js';
 import type { SkillRepository } from '../skills/repository.js';
 import type { AttachmentEntry } from './types.js';
-import { attachmentsDirFor, buildAttachmentEntry, guessMimeType, listAttachmentFiles, type DocKind } from './storage.js';
+import { attachmentsDirFor, buildAttachmentEntry, guessMimeType, listAttachmentFiles, walkFilesRecursive, type DocKind } from './storage.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { writeRemoteThenLocal } from '../remote/write-order.js';
 
@@ -70,6 +70,41 @@ export class AttachmentRepository {
     const existing = doc.attachments ?? [];
     await this.saveAttachmentsList(kind, folder, docIdOrName, [...existing, entry]);
     return entry;
+  }
+
+  /**
+   * Attaches every file under `sourceDir` (recursively), nesting each one under `destPrefix` the
+   * same way a single `add()` call nests a `/`-containing filename — this is that same one-
+   * file-at-a-time path, just looped, so it gets the same collision-avoidance, remote push, and
+   * doc-attachments-list bookkeeping per file with no new storage concept. Mirrors how skill
+   * sibling files are pushed one-by-one (see skills/repository.ts's pushSkillSiblingFileIfNeeded
+   * call sites) rather than as a single archive upload. Returns the entries in the order added.
+   */
+  async addDirectory(kind: DocKind, folder: string | undefined, docIdOrName: string, destPrefix: string, sourceDir: string): Promise<AttachmentEntry[]> {
+    const filePaths = walkFilesRecursive(sourceDir);
+    const entries: AttachmentEntry[] = [];
+    for (const relPath of filePaths) {
+      const filename = destPrefix ? `${destPrefix}/${relPath}` : relPath;
+      const data = fs.readFileSync(path.join(sourceDir, relPath));
+      entries.push(await this.add(kind, folder, docIdOrName, filename, data));
+    }
+    return entries;
+  }
+
+  /**
+   * Removes every attachment whose filename is `dirPrefix` itself or nested under it
+   * (`dirPrefix/...`) — the counterpart to addDirectory, since there's no single directory entity
+   * to delete, just a set of flat attachment rows sharing a path prefix. Reuses remove()'s own
+   * remote-trash + empty-dir cleanup per file.
+   */
+  async removeDirectory(kind: DocKind, folder: string | undefined, docIdOrName: string, dirPrefix: string): Promise<string[]> {
+    const doc = await this.getDoc(kind, folder, docIdOrName);
+    const prefix = `${dirPrefix}/`;
+    const matches = (doc.attachments ?? []).map((a) => a.filename).filter((f) => f === dirPrefix || f.startsWith(prefix));
+    for (const filename of matches) {
+      await this.remove(kind, folder, docIdOrName, filename);
+    }
+    return matches;
   }
 
   async get(kind: DocKind, folder: string | undefined, docIdOrName: string, filename: string): Promise<AttachmentEntry | undefined> {

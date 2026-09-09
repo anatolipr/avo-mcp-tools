@@ -245,15 +245,15 @@ test('walkSkillSiblingFiles: skips SKILL.md, attachments/, and OS junk files (.D
   assert.deepEqual(found, [path.join(skillDir, 'references', 'foo.md')], 'must yield only the real sibling file, never SKILL.md, attachments/, or OS junk files');
 });
 
-test('registerAttachmentTools: registers all six attachment tools', () => {
+test('registerAttachmentTools: registers all eight attachment tools', () => {
   const registered: string[] = [];
   const fakeMcp = { tool: (name: string) => registered.push(name) } as any;
   const { memoryRepo } = setupMemoryRepo();
   const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
   registerAttachmentTools(fakeMcp, attachRepo);
   assert.deepEqual(registered.sort(), [
-    'attachment_add', 'attachment_get', 'attachment_list',
-    'attachment_reconcile', 'attachment_remove', 'attachment_update',
+    'attachment_add', 'attachment_add_directory', 'attachment_get', 'attachment_list',
+    'attachment_reconcile', 'attachment_remove', 'attachment_remove_directory', 'attachment_update',
   ]);
 });
 
@@ -491,6 +491,82 @@ test('AttachmentRepository: skill-kind add/list/cascade-delete end-to-end', asyn
 
   assert.ok(!fs.existsSync(attachmentsDir), 'skill delete must cascade-remove the attachments dir');
   assert.equal(await skillRepo.get(skill.name), null);
+});
+
+test('AttachmentRepository.addDirectory: attaches every file under a local directory, nested under dest_prefix', async () => {
+  const { memoryRepo } = setupMemoryRepo();
+  const doc = await memoryRepo.create({ filename: 'test-dir-1', key: 'TEST-DIR-1', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
+  const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
+
+  const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-dir-src-'));
+  fs.writeFileSync(path.join(sourceDir, 'index.html'), '<html></html>');
+  fs.mkdirSync(path.join(sourceDir, 'src'));
+  fs.writeFileSync(path.join(sourceDir, 'src', 'app.js'), 'console.log(1)');
+
+  const entries = await attachRepo.addDirectory('memory', 'mem', filename, 'spa-demo', sourceDir);
+  assert.deepEqual(entries.map((e) => e.filename).sort(), ['spa-demo/index.html', 'spa-demo/src/app.js'].sort());
+
+  const attachmentsDir = attachmentsDirFor((await memoryRepo.get('mem', filename))!.source_path, 'memory');
+  assert.equal(fs.readFileSync(path.join(attachmentsDir, 'spa-demo', 'index.html'), 'utf-8'), '<html></html>');
+  assert.equal(fs.readFileSync(path.join(attachmentsDir, 'spa-demo', 'src', 'app.js'), 'utf-8'), 'console.log(1)');
+
+  const listed = await attachRepo.list('memory', 'mem', filename);
+  assert.equal(listed.length, 2);
+});
+
+test('AttachmentRepository.removeDirectory: removes every attachment nested under the prefix and leaves others intact', async () => {
+  const { memoryRepo } = setupMemoryRepo();
+  const doc = await memoryRepo.create({ filename: 'test-dir-2', key: 'TEST-DIR-2', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
+  const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
+
+  const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-dir-src-'));
+  fs.writeFileSync(path.join(sourceDir, 'a.txt'), 'a');
+  fs.mkdirSync(path.join(sourceDir, 'nested'));
+  fs.writeFileSync(path.join(sourceDir, 'nested', 'b.txt'), 'b');
+  await attachRepo.addDirectory('memory', 'mem', filename, 'demo', sourceDir);
+  await attachRepo.add('memory', 'mem', filename, 'unrelated.json', Buffer.from('{}'));
+
+  const removed = await attachRepo.removeDirectory('memory', 'mem', filename, 'demo');
+  assert.deepEqual(removed.sort(), ['demo/a.txt', 'demo/nested/b.txt'].sort());
+
+  const remaining = await attachRepo.list('memory', 'mem', filename);
+  assert.deepEqual(remaining.map((a) => a.filename), ['unrelated.json']);
+
+  const attachmentsDir = attachmentsDirFor((await memoryRepo.get('mem', filename))!.source_path, 'memory');
+  assert.ok(!fs.existsSync(path.join(attachmentsDir, 'demo')), 'the demo/ subdirectory must be cleaned up once empty');
+});
+
+test('attachment_add_directory tool: attaches a whole local directory in one call', async () => {
+  const { memoryRepo } = setupMemoryRepo();
+  const doc = await memoryRepo.create({ filename: 'test-dir-3', key: 'TEST-DIR-3', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
+  const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
+  const handlers = collectTools(attachRepo);
+
+  const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-dir-src-'));
+  fs.writeFileSync(path.join(sourceDir, 'readme.md'), '# demo');
+
+  const result = await handlers.attachment_add_directory({ kind: 'memory', folder: 'mem', doc: filename, dest_prefix: 'demo', source_dir: sourceDir });
+  const entries = JSON.parse(result.content[0].text);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].filename, 'demo/readme.md');
+});
+
+test('attachment_remove_directory tool: removes every attachment under the prefix', async () => {
+  const { memoryRepo } = setupMemoryRepo();
+  const doc = await memoryRepo.create({ filename: 'test-dir-4', key: 'TEST-DIR-4', key_type: 'ticket', doc_type: 'other', description: 'd', body: 'b' });
+  const filename = path.basename(doc.source_path);
+  const attachRepo = new AttachmentRepository(memoryRepo, undefined as any);
+  await attachRepo.add('memory', 'mem', filename, 'demo/a.txt', Buffer.from('a'));
+  await attachRepo.add('memory', 'mem', filename, 'demo/b.txt', Buffer.from('b'));
+  const handlers = collectTools(attachRepo);
+
+  const result = await handlers.attachment_remove_directory({ kind: 'memory', folder: 'mem', doc: filename, dest_prefix: 'demo' });
+  const { removed } = JSON.parse(result.content[0].text);
+  assert.deepEqual(removed.sort(), ['demo/a.txt', 'demo/b.txt']);
+  assert.equal((await memoryRepo.get('mem', filename))!.attachments?.length, 0);
 });
 
 test('AttachmentRepository: nested attachment path round-trips through add/list/remove, cleaning up its now-empty subdirectory', async () => {

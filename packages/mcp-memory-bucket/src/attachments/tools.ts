@@ -41,6 +41,44 @@ export function registerAttachmentTools(mcp: McpServer, attachRepo: AttachmentRe
   );
 
   mcp.tool(
+    'attachment_add_directory',
+    'Attaches every file in a local directory (recursively) to a memory doc or skill in one call, nesting them under dest_prefix — use this instead of looping attachment_add when attaching a whole folder (e.g. a demo app, a set of generated files).',
+    {
+      kind: kindSchema,
+      ...folderSchema,
+      doc: z.string().describe('memory doc filename or skill name'),
+      dest_prefix: z.string().describe('subdirectory to nest the files under inside attachments/, e.g. "spa-demo" — files land at attachments/spa-demo/<relative path>'),
+      source_dir: z.string().describe('local filesystem path to the directory to attach'),
+    },
+    async ({ kind, folder, doc, dest_prefix, source_dir }: any) => {
+      try {
+        for (const relPath of fs.readdirSync(source_dir, { recursive: true }) as string[]) {
+          const full = `${source_dir}/${relPath}`;
+          if (fs.statSync(full).isFile()) assertFileSizeOk(full);
+        }
+        const entries = await attachRepo.addDirectory(kind, folder, doc, dest_prefix, source_dir);
+        return { content: [{ type: 'text', text: JSON.stringify(entries, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
+      }
+    }
+  );
+
+  mcp.tool(
+    'attachment_remove_directory',
+    'Removes every attachment nested under dest_prefix (as added by attachment_add_directory) — the counterpart for deleting a whole directory attachment in one call.',
+    { kind: kindSchema, ...folderSchema, doc: z.string(), dest_prefix: z.string() },
+    async ({ kind, folder, doc, dest_prefix }: any) => {
+      try {
+        const removed = await attachRepo.removeDirectory(kind, folder, doc, dest_prefix);
+        return { content: [{ type: 'text', text: JSON.stringify({ removed }, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
+      }
+    }
+  );
+
+  mcp.tool(
     'attachment_get',
     'Returns the on-disk path (not content) of an attachment, plus its metadata. Use Read on the returned absolute_path for the content.',
     { kind: kindSchema, ...folderSchema, doc: z.string(), filename: z.string() },
