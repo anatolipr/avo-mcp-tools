@@ -584,3 +584,136 @@ test('MemoryRepository.update against a remote folder leaves the local file UNCH
   const after = fs.readFileSync(doc.source_path, 'utf-8');
   assert.equal(before, after, 'local file must be byte-for-byte unchanged after a failed remote update');
 });
+
+// A minimal but STATEFUL fake folderfoo (unlike mockFolderfoo above, which returns canned
+// responses) — needed for the test below, which exercises a real save-on-machine-A /
+// pull-on-machine-B round trip through pullFile, not just an isolated repo-level call.
+interface FakeStoredFile { content: Buffer; mtime: number }
+class FakeFolderfoo {
+  files = new Map<string, FakeStoredFile>(); // key: `${folderPath}/${name}`, tenant-root-absolute
+  counter = 0;
+  private key(folderPath: string, name: string) { return folderPath ? `${folderPath}/${name}` : name; }
+  save(folderPath: string, name: string, content: Buffer) {
+    this.counter += 1;
+    this.files.set(this.key(folderPath, name), { content, mtime: this.counter });
+  }
+  lastChanged(): number {
+    let max = 0;
+    for (const f of this.files.values()) max = Math.max(max, f.mtime);
+    return max;
+  }
+  changedSince(queryFolderPath: string, since: number): Array<{ name: string; folderPath: string; mtime: number }> {
+    const out: Array<{ name: string; folderPath: string; mtime: number }> = [];
+    for (const [key, f] of this.files.entries()) {
+      if (key !== queryFolderPath && !key.startsWith(`${queryFolderPath}/`)) continue;
+      if (f.mtime <= since) continue;
+      const idx = key.lastIndexOf('/');
+      out.push({ name: idx === -1 ? key : key.slice(idx + 1), folderPath: idx === -1 ? '' : key.slice(0, idx), mtime: f.mtime });
+    }
+    return out;
+  }
+  data(folderPath: string, name: string): Buffer {
+    const f = this.files.get(this.key(folderPath, name));
+    if (!f) throw new Error(`404: ${folderPath}/${name}`);
+    return f.content;
+  }
+}
+
+// Mirrors filenameParam()'s grammar in folderfoo-client.ts: ":folderPath:name" or bare "name".
+function parseFilenameParam(raw: string): { folderPath: string; name: string } {
+  if (raw.startsWith(':')) {
+    const secondColon = raw.indexOf(':', 1);
+    return { folderPath: raw.slice(1, secondColon), name: raw.slice(secondColon + 1) };
+  }
+  return { folderPath: '', name: raw };
+}
+
+function statefulFolderfoo(backend: FakeFolderfoo) {
+  return async (url: string, init?: RequestInit) => {
+    const u = new URL(url);
+    if (u.pathname === '/folders') return mockFolderList(['memz']);
+    if (u.pathname === '/folders/last-changed') return { ok: true, status: 200, json: async () => ({ lastChanged: backend.lastChanged() }) } as Response;
+    if (u.pathname === '/folders/changed-since') {
+      const folderPath = u.searchParams.get('folderPath') ?? '';
+      const since = Number(u.searchParams.get('since') ?? '0');
+      return { ok: true, status: 200, json: async () => ({ files: backend.changedSince(folderPath, since), serverTime: Date.now() }) } as Response;
+    }
+    if (u.pathname.startsWith('/save/')) {
+      const { folderPath, name } = parseFilenameParam(decodeURIComponent(u.pathname.slice('/save/'.length)));
+      const body = init?.body;
+      const content = Buffer.isBuffer(body) ? body : Buffer.from(typeof body === 'string' ? body : await new Response(body as any).arrayBuffer());
+      backend.save(folderPath, name, content);
+      return { ok: true, status: 200, json: async () => ({ message: 'saved' }) } as Response;
+    }
+    if (u.pathname.startsWith('/data/')) {
+      const { folderPath, name } = parseFilenameParam(decodeURIComponent(u.pathname.slice('/data/'.length)));
+      return { ok: true, status: 200, text: async () => backend.data(folderPath, name).toString('utf-8') } as Response;
+    }
+    throw new Error(`unexpected mocked fetch call: ${url}`);
+  };
+}
+
+// Regression test for a real bug: pullFile applied spec.remoteFilename.toLocal (meant only to
+// translate a DOC's own remote name — a skill's fixed "SKILL" -> "SKILL.md", or a memory doc's
+// legacy extensionless remote name -> "<name>.md") to EVERY changed file, including attachments.
+// A non-.md attachment (e.g. "style.css") got ".md" appended on pull ("style.css.md"), which
+// reconcileDeletions' own untranslated remote-listing comparison then saw as absent remotely and
+// deleted on the very same poll — so a directory attachment synced to a second machine vanished
+// before the resync even finished, even though it was pushed and stored correctly on folderfoo.
+// This wasn't caught by the "reappeared from trash" test above because that test writes the
+// mirror file directly, bypassing pullFile entirely.
+test('a nested directory attachment created on one machine is fully present after a fresh resync on a second machine', async (t) => {
+  const backend = new FakeFolderfoo();
+
+  // Machine A: creates the doc and attaches a small directory tree under it.
+  const credsA = tmpDir('mb-machineA-creds-');
+  setCredential(credsA, 'https://folderfoo.example.com', 'jwt-1');
+  const dbA = openCache(':memory:');
+  const memoryRepoA = new MemoryRepository(dbA, [], [], credsA, loggedInIdentity());
+  const skillRepoA = new SkillRepository(dbA, [{ name: 'builtin', path: '/nonexistent' }], [], credsA, loggedInIdentity());
+  const attachRepoA = new AttachmentRepository(memoryRepoA, skillRepoA, dbA);
+  const mirrorDirA = mirrorDirFor(credsA, 'dev', 'testuser', 'memz');
+  const remoteA: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir: mirrorDirA, mode: 'dev', username: 'testuser' };
+  memoryRepoA.registerRemoteFolder(remoteA);
+
+  t.mock.method(globalThis, 'fetch', statefulFolderfoo(backend));
+  const doc = await memoryRepoA.create({ filename: 'dir-attach-sync-test', key: 'K1', key_type: 'freeform', doc_type: 'plan', description: 'd', body: 'b', folder: 'memz' });
+  const filename = path.basename(doc.source_path);
+
+  const sourceDir = tmpDir('mb-source-dir-');
+  fs.writeFileSync(path.join(sourceDir, 'index.html'), '<html></html>');
+  fs.mkdirSync(path.join(sourceDir, 'css'));
+  fs.writeFileSync(path.join(sourceDir, 'css', 'style.css'), 'body{}');
+  await attachRepoA.addDirectory('memory', 'memz', filename, 'spa-demo', sourceDir);
+
+  // Machine B: a completely fresh mirror dir + db, pointed at the SAME remote folder.
+  const credsB = tmpDir('mb-machineB-creds-');
+  setCredential(credsB, 'https://folderfoo.example.com', 'jwt-1');
+  const dbB = openCache(':memory:');
+  const memoryRepoB = new MemoryRepository(dbB, [], [], credsB, loggedInIdentity());
+  const skillRepoB = new SkillRepository(dbB, [{ name: 'builtin', path: '/nonexistent' }], [], credsB, loggedInIdentity());
+  const attachRepoB = new AttachmentRepository(memoryRepoB, skillRepoB, dbB);
+  const mirrorDirB = mirrorDirFor(credsB, 'dev', 'testuser', 'memz');
+  const remoteB: RemoteFolder = { name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir: mirrorDirB, mode: 'dev', username: 'testuser' };
+  memoryRepoB.registerRemoteFolder(remoteB);
+
+  const memorySpecB = memorySyncSpec([{ name: 'memz', path: mirrorDirB }]);
+  const poller = startRemotePolling(dbB, memorySpecB, [remoteB], credsB, (folder) => attachRepoB.repairUnlistedInFolder('memory_docs', folder.name));
+  try {
+    await poller.resyncNow('memz');
+  } finally {
+    poller.stop();
+  }
+
+  const healedOnB = await memoryRepoB.get('memz', filename);
+  assert.deepEqual(
+    healedOnB?.attachments?.map((a) => a.filename).sort(),
+    ['spa-demo/css/style.css', 'spa-demo/index.html'],
+    'both nested attachment files must still be declared on the doc after a fresh resync'
+  );
+
+  const wrapperDir = path.join(path.dirname(healedOnB!.source_path), filename.replace(/\.md$/, ''));
+  assert.ok(fs.existsSync(path.join(wrapperDir, 'attachments', 'spa-demo', 'index.html')), 'index.html must actually be on disk after the resync, not just declared');
+  assert.ok(fs.existsSync(path.join(wrapperDir, 'attachments', 'spa-demo', 'css', 'style.css')), 'style.css must actually be on disk after the resync, not just declared');
+  assert.ok(!fs.existsSync(path.join(wrapperDir, 'attachments', 'spa-demo', 'index.html.md')), 'must not have mangled the attachment name by appending .md');
+});

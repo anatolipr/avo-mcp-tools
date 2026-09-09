@@ -219,7 +219,16 @@ async function pullFile<TFrontmatter>(
   // converted to mirror-relative before joining onto folder.mirrorDir.
   const content = await readFile(folder.server, credentialsBaseDir, folder.tenantId, changedFile.folderPath, changedFile.name, folder.owner);
   const mirrorRelativeDir = toMirrorRelativeDir(folder.folderPath, changedFile.folderPath);
-  const localFilename = spec.remoteFilename.toLocal(changedFile.name);
+  // spec.remoteFilename.toLocal exists to translate a DOC's own remote name (a skill's fixed
+  // "SKILL" -> "SKILL.md", or a memory doc's legacy extensionless remote name -> "<name>.md") - it
+  // must never touch an attachment (or skill sibling) file, which is pushed/pulled under its own
+  // literal name with no translation (see attachments/storage.ts's isUnderAttachmentsDir doc
+  // comment). Applying it unconditionally used to append ".md" to every non-.md attachment (e.g.
+  // "style.css" -> "style.css.md"), which reconcileDeletions' own untranslated remote-listing
+  // comparison then saw as absent remotely and deleted on the very same poll - so a directory/file
+  // attachment synced down to a second machine, then vanished before its resync even finished.
+  const isAttachment = isUnderAttachmentsDir(mirrorRelativeDir);
+  const localFilename = isAttachment ? changedFile.name : spec.remoteFilename.toLocal(changedFile.name);
   const relPath = mirrorRelativeDir ? path.join(mirrorRelativeDir, localFilename) : localFilename;
   const mirrorPath = path.join(folder.mirrorDir, relPath);
   fs.mkdirSync(path.dirname(mirrorPath), { recursive: true });
