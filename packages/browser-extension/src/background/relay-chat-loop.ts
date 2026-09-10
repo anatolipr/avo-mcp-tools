@@ -32,9 +32,17 @@ export interface ChatLoopConfig {
   completion: CompletionConfig;
   startSentinel: string;
   endSentinel: string;
+  // Primer text fetched from the app tab (window.__humanMcpRelay.getPrimer())
+  // at "Start bridging" time - if present, the loop sends it as the very
+  // first message before waiting for any reply, replacing the manual
+  // "copy primer from app tab, paste into chat tab" step. Undefined (not
+  // sent at all) if the app tab had no primer available (e.g.
+  // window.__humanMcpRelay wasn't found there) - the human is expected to
+  // paste it manually in that case, same as before this existed.
+  initialPrimer?: string;
 }
 
-export function buildChatLoopConfig(appTabId: number, recipe: Recipe): ChatLoopConfig {
+export function buildChatLoopConfig(appTabId: number, recipe: Recipe, initialPrimer?: string): ChatLoopConfig {
   return {
     appTabId,
     inputSelector: recipe.input.selector,
@@ -44,6 +52,7 @@ export function buildChatLoopConfig(appTabId: number, recipe: Recipe): ChatLoopC
     completion: recipe.completion,
     startSentinel: recipe.callBlock?.startSentinel ?? 'HUMAN-MCP CALL',
     endSentinel: recipe.callBlock?.endSentinel ?? 'HUMAN-MCP END',
+    initialPrimer,
   };
 }
 
@@ -70,6 +79,7 @@ export function chatLoopMainFunction(configJson: string): void {
       | { strategy: 'disabled-toggle'; watchSelector: string; maxWaitMs: number };
     startSentinel: string;
     endSentinel: string;
+    initialPrimer?: string;
   };
 
   const doc = (globalThis as any).document;
@@ -217,6 +227,7 @@ export function chatLoopMainFunction(configJson: string): void {
       let stableSinceMs: number | undefined; // idle-mutation: when the current text last changed
       let lastSeenText: string | undefined;
       let seenWatchPresent = false; // button-reappears / disabled-toggle
+      let firstTick = true; // button-reappears / disabled-toggle - see finish()'s first-tick check above
 
       function stop() {
         if (intervalId !== undefined) clearInterval(intervalId);
@@ -262,12 +273,32 @@ export function chatLoopMainFunction(configJson: string): void {
             finish();
           }
         } else if (completion.strategy === 'button-reappears') {
+          // If the watched button is already absent on the VERY FIRST tick
+          // of this wait (never observed present at all), the reply had
+          // already finished generating before polling started - e.g. the
+          // human already had a completed reply on screen when they clicked
+          // Start bridging. Waiting for a present->absent transition in
+          // that case would wait forever, since that transition already
+          // happened before this wait began. Found live: a session's very
+          // first wait hung indefinitely with a fully-formed CALL block
+          // already visible on screen.
           const present = !!doc.querySelector(completion.watchSelector);
+          if (firstTick && !present) {
+            finish();
+            return;
+          }
+          firstTick = false;
           if (present) seenWatchPresent = true;
           if (seenWatchPresent && !present) finish();
         } else if (completion.strategy === 'disabled-toggle') {
+          // Same first-tick reasoning as button-reappears above.
           const el = doc.querySelector(completion.watchSelector);
           const disabled = !!el?.disabled;
+          if (firstTick && !disabled) {
+            finish();
+            return;
+          }
+          firstTick = false;
           if (disabled) seenWatchPresent = true;
           if (seenWatchPresent && el && !el.disabled) finish();
         } else {
@@ -326,14 +357,16 @@ export function chatLoopMainFunction(configJson: string): void {
   }
 
   async function loop() {
-    let nextMessageForChat: string | undefined;
-    // The FIRST wait accepts whatever reply already exists - the human is
-    // expected to have already pasted the primer and gotten a reply before
-    // clicking Start, so that existing reply must be acceptable
-    // immediately, not treated as "already there." Passing undefined here
-    // means "anything counts as new" (see waitForReply: a defined
-    // currentText simply needs to differ from previousLastReplyText, and
-    // undefined never equals a real string).
+    // If a primer was fetched from the app tab at "Start bridging" time,
+    // send it as the very first message - reusing the exact same
+    // send-then-wait-for-a-newer-reply path the loop already uses for
+    // every subsequent HUMAN-MCP RESULT, so no separate first-message logic
+    // is needed. Replaces the human's own "copy primer from app tab, paste
+    // into chat tab" step. If no primer was available (e.g. the app tab had
+    // no window.__humanMcpRelay), the human is expected to have already
+    // pasted one manually before clicking Start, matching the original
+    // behavior - the first wait then accepts whatever reply already exists.
+    let nextMessageForChat: string | undefined = config.initialPrimer;
     let previousLastReplyText: string | undefined = undefined;
 
     for (;;) {

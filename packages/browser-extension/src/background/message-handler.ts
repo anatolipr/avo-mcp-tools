@@ -190,7 +190,23 @@ async function handleStartRelayBridge(chatTabId: number, appTabId: number, recip
   const recipe = await getRecipe(recipeId);
   if (!recipe) return { ok: false, error: `No recipe found with id "${recipeId}".` };
 
-  const config = buildChatLoopConfig(appTabId, recipe);
+  // Best-effort: fetch the current primer from the app tab so the loop can
+  // send it as its first message, replacing the human's own "copy primer,
+  // paste into chat tab" step. Not fatal if this fails (e.g. the app tab
+  // doesn't have human-mcp-relay loaded, or its window.__humanMcpRelay
+  // predates the getPrimer addition) - the human is expected to have
+  // already pasted a primer manually in that case, same as before this
+  // existed, so start-relay-bridge still succeeds either way.
+  let initialPrimer: string | undefined;
+  try {
+    const primerCode = "return (typeof window.__humanMcpRelay?.getPrimer === 'function') ? window.__humanMcpRelay.getPrimer() : undefined;";
+    const result = await injectScriptOnce(appTabId, primerCode);
+    if (typeof result === 'string' && result.length > 0) initialPrimer = result;
+  } catch {
+    // ignored - see comment above
+  }
+
+  const config = buildChatLoopConfig(appTabId, recipe, initialPrimer);
   await chrome.scripting.executeScript({
     target: { tabId: chatTabId },
     world: 'ISOLATED',
