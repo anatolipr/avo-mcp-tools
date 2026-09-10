@@ -7,7 +7,13 @@ export type ExtensionRuntimeMessage =
   | { type: 'get-active-tab-status' }
   | { type: 'rename-active-tab'; appLabel: string }
   | { type: 'change-channel-active-tab'; channel: string }
-  | { type: 'disconnect-active-tab' };
+  | { type: 'disconnect-active-tab' }
+  | { type: 'list-recipes' }
+  | { type: 'save-recipe'; recipe: unknown }
+  | { type: 'delete-recipe'; id: string }
+  | { type: 'start-relay-session'; chatTabId: number; appTabId: number; recipeId: string }
+  | { type: 'stop-relay-session'; sessionId: string }
+  | { type: 'list-relay-sessions' };
 
 export interface ConnectActiveTabResult {
   ok: boolean;
@@ -50,4 +56,28 @@ export interface KnownOriginEntry {
   channel: string;
   appLabel?: string;
   lastConnectedAt: number;
+}
+
+// Response to 'list-recipes'.
+export interface ListRecipesResult {
+  recipes: import('./recipe-types.js').Recipe[];
+}
+
+// Response to 'save-recipe' - errors is populated (and ok is false) when
+// validateRecipe rejected the uploaded JSON; see recipe-validator.ts.
+export interface SaveRecipeResult {
+  ok: boolean;
+  errors?: string[];
+}
+
+// Response to 'start-relay-session'.
+export interface StartRelaySessionResult {
+  ok: boolean;
+  sessionId?: string;
+  error?: string;
+}
+
+// Response to 'list-relay-sessions'.
+export interface ListRelaySessionsResult {
+  sessions: import('./recipe-types.js').RelaySession[];
 }

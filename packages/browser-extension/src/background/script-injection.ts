@@ -29,6 +29,28 @@ function urlMatchesPattern(url: string, pattern: string): boolean {
   return new RegExp(`^${escaped}$`).test(url);
 }
 
+// chrome.scripting's InjectionResult carries an `error` field (a
+// structured-cloned Error, or a plain thrown value) when the injected
+// function threw or its returned Promise rejected - the type declares
+// `result` as the only outcome field, but Chrome actually populates `error`
+// in that case and leaves `result` undefined. Reading unwrapInjectionResult's
+// return value without checking this first silently loses the real failure
+// reason (callers used to see only a missing/wrong-shaped result with no
+// indication anything went wrong). Shared by injectScriptOnce below and by
+// relay-completion-strategies.ts's waitForReplyInTab, which calls
+// chrome.scripting.executeScript directly (not through injectScriptOnce)
+// since its injected function takes typed args rather than a compiled code
+// string.
+export function unwrapInjectionResult(injectionResult: { result?: unknown; error?: unknown } | undefined): unknown {
+  if (injectionResult && 'error' in injectionResult && injectionResult.error !== undefined) {
+    const err = injectionResult.error;
+    const message =
+      err instanceof Error ? err.message : typeof err === 'object' && err && 'message' in err ? String((err as { message: unknown }).message) : String(err);
+    throw new Error(message);
+  }
+  return injectionResult?.result;
+}
+
 export async function injectScriptOnce(tabId: number, code: string): Promise<unknown> {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
@@ -38,7 +60,7 @@ export async function injectScriptOnce(tabId: number, code: string): Promise<unk
     args: [code],
     world: 'MAIN',
   });
-  return results[0]?.result;
+  return unwrapInjectionResult(results[0]);
 }
 
 async function ensureRunnerRegistered(matchOrigin: string): Promise<void> {

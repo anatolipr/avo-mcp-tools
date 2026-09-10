@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "deepseek",
+  "hostname": "chat.deepseek.com",
+  "displayName": "DeepSeek",
+  "input": {
+    "selector": "textarea[placeholder=\"Message DeepSeek\"]",
+    "setVia": "native-value-setter"
+  },
+  "submit": {
+    "selector": ".ds-button--circle"
+  },
+  "reply": {
+    "containerSelector": ".ds-assistant-message-main-content",
+    "pick": "last"
+  },
+  "completion": {
+    "strategy": "idle-mutation",
+    "observe": ".ds-assistant-message-main-content:last-of-type",
+    "idleMs": 3000,
+    "maxWaitMs": 120000
+  },
+  "callBlock": {
+    "startSentinel": "HUMAN-MCP CALL",
+    "endSentinel": "HUMAN-MCP END"
+  }
+}

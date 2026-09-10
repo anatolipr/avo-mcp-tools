@@ -1,4 +1,13 @@
-import type { ExtensionRuntimeMessage, ConnectActiveTabResult, ActiveTabStatus, ActionResult } from '../shared/types.js';
+import type {
+  ExtensionRuntimeMessage,
+  ConnectActiveTabResult,
+  ActiveTabStatus,
+  ActionResult,
+  ListRecipesResult,
+  SaveRecipeResult,
+  StartRelaySessionResult,
+  ListRelaySessionsResult,
+} from '../shared/types.js';
 import { injectConnectSnippet, changeChannel, renameConnection, disconnectTab, tabAlreadyConnected } from './connect-tab.js';
 import { getKnownOrigin, setKnownOrigin, deleteKnownOrigin } from './storage.js';
 import { markTabConnected } from './auto-reconnect.js';
@@ -6,6 +15,9 @@ import { lookupPersistentScriptsForUrl } from './script-injection.js';
 import { refreshBadgeForActiveTab } from './connection-badge.js';
 import { recordConnectedTab, forgetConnectedTab } from './connected-tabs.js';
 import { JSBRIDGE_HOST } from '../shared/constants.js';
+import { listRecipes, saveRecipe, deleteRecipe, listRecipeIds } from './relay-recipes-storage.js';
+import { startRelaySession, stopRelaySession, listRelaySessions } from './relay-engine.js';
+import { validateRecipe } from '../shared/recipe-validator.js';
 
 // Structural subset of mcp-tenant-lib's DashboardChannel (dashboard.ts) - see
 // popup.ts's own former copy of this comment (now folded into the shared
@@ -100,8 +112,60 @@ export function startMessageHandler(onConsoleCapture: (tabId: number, level: str
         .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies ActionResult));
       return true;
     }
+
+    if (message.type === 'list-recipes') {
+      listRecipes()
+        .then((recipes) => sendResponse({ recipes } satisfies ListRecipesResult))
+        .catch((err) => sendResponse({ recipes: [], error: String(err?.message ?? err) }));
+      return true;
+    }
+
+    if (message.type === 'save-recipe') {
+      handleSaveRecipe(message.recipe)
+        .then(sendResponse)
+        .catch((err) => sendResponse({ ok: false, errors: [String(err?.message ?? err)] } satisfies SaveRecipeResult));
+      return true;
+    }
+
+    if (message.type === 'delete-recipe') {
+      deleteRecipe(message.id)
+        .then(() => sendResponse({ ok: true } satisfies ActionResult))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies ActionResult));
+      return true;
+    }
+
+    if (message.type === 'start-relay-session') {
+      startRelaySession(message.chatTabId, message.appTabId, message.recipeId)
+        .then((result) => sendResponse(result satisfies StartRelaySessionResult))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies StartRelaySessionResult));
+      return true;
+    }
+
+    if (message.type === 'stop-relay-session') {
+      stopRelaySession(message.sessionId);
+      sendResponse({ ok: true } satisfies ActionResult);
+      return false;
+    }
+
+    if (message.type === 'list-relay-sessions') {
+      sendResponse({ sessions: listRelaySessions() } satisfies ListRelaySessionsResult);
+      return false;
+    }
+
     return false;
   });
+}
+
+// Re-validates server-side too (defense in depth), not just trusting the
+// popup's own client-side validateRecipe call - the popup's check exists
+// mainly to give a human a fast, DOM-backed selector-syntax check before
+// upload; this call is what actually decides whether the recipe is stored.
+async function handleSaveRecipe(rawRecipe: unknown): Promise<SaveRecipeResult> {
+  const existingIds = await listRecipeIds();
+  const result = validateRecipe(rawRecipe, existingIds);
+  if (!result.ok) return { ok: false, errors: result.errors };
+  await saveRecipe(result.recipe);
+  return { ok: true };
 }
 
 async function handleGetActiveTabStatus(): Promise<ActiveTabStatus> {

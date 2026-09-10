@@ -276,6 +276,8 @@ export class PopupApp extends LitElement {
       />
       <button id="connect-btn" ?disabled=${!tabStatus?.connectable} @click=${() => this.#connect()}>Connect</button>
       <div id="result">${this.#result.value}</div>
+
+      <relay-panel></relay-panel>
     `;
   }
 

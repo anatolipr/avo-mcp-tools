@@ -20,3 +20,7 @@ export const KNOWN_ORIGIN_KEY_PREFIX = 'known-origin:';
 // name.
 export const EXTENSION_LABEL_STORAGE_KEY = 'extension-app-label';
 export const EXTENSION_CHANNEL_STORAGE_KEY = 'extension-channel';
+
+// chrome.storage.local key prefix for chat-relay recipes (see
+// src/background/relay-recipes-storage.ts, src/shared/recipe-types.ts).
+export const RELAY_RECIPE_KEY_PREFIX = 'relay-recipe:';

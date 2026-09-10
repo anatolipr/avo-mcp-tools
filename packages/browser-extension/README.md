@@ -70,6 +70,31 @@ Chrome Web Store / Firefox AMO store submission automation remains explicitly ou
 of scope (per the original requirements) — this stops at "zip is attached to a
 release."
 
+## Chat relay (automated human-mcp-relay bridging)
+
+Bridges a "chat tab" (an arbitrary chat UI with no MCP/API access, e.g.
+chat.deepseek.com, driven per an uploaded JSON recipe — see
+`docs/recipe-authoring.md` and `src/relay-recipes/recipe.schema.json`) to an
+"app tab" running the published
+[human-mcp-relay](https://www.npmjs.com/package/human-mcp-relay) package,
+automating the human's role in that package's manual copy/paste loop.
+Managed from the extension popup's "Chat-relay recipes" / "Start bridging"
+section: upload a recipe, pick a chat tab + app tab + recipe, click "Start
+bridging". See `src/background/relay-engine.ts` for the orchestration and
+`src/background/relay-completion-strategies.ts` for the chat-tab DOM
+automation.
+
+**Known limitation (FIXME, see `src/background/session-keepalive.ts`)**: a
+running session currently requires the extension **popup to stay open** for
+its full duration. The intended fix (a `chrome.runtime.Port` held open for
+the session's lifetime, preventing MV3 service-worker idle-suspension) is
+implemented but was found via live testing to NOT reliably survive the popup
+closing — likely because a service worker connecting to itself doesn't count
+toward Chrome's own idle-tracking the way a Port held by a genuinely
+separate context does. Not yet fixed; see that file's header comment for the
+next approach to try (having the popup itself, or a dedicated always-open
+extension page, hold the Port instead).
+
 ## TODO / future idea (not started)
 
 Extension-as-js-bridge-server: bundle `js-bridge-mcp`'s server role into the

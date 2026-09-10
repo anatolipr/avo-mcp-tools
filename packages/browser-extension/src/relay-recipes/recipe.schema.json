@@ -1,0 +1,154 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/anatolipr/avo-mcp-tools/packages/browser-extension/relay-recipe.schema.json",
+  "title": "Chat Relay Recipe",
+  "description": "Describes how to drive one chat UI's DOM well enough to relay HUMAN-MCP CALL/RESULT blocks through it automatically. This is the authoritative field-level reference - also see docs/recipe-authoring.md in this package for the narrative guide (how to explore a page, pick a completion strategy, common pitfalls) that this schema's descriptions summarize.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "hostname", "input", "submit", "reply", "completion"],
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "description": "Must be exactly 1. The only version this extension understands - do not guess at a different number."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable slug, e.g. \"deepseek\". This is the storage primary key, NOT hostname - so two recipes may target the same hostname (e.g. an old vs. new UI variant) without colliding. Must be unique among already-uploaded recipes."
+    },
+    "hostname": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Exact location.hostname of the chat page, e.g. \"chat.deepseek.com\" - no scheme, path, or port. Matched exactly, not as a pattern."
+    },
+    "displayName": {
+      "type": "string",
+      "description": "Optional human-readable label shown in the extension popup, e.g. \"DeepSeek\". Defaults to hostname if omitted."
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "setVia"],
+      "properties": {
+        "selector": {
+          "type": "string",
+          "minLength": 1,
+          "description": "CSS selector for the chat's message-input element (a <textarea> or contenteditable element). Prefer a stable attribute (placeholder text, aria-label) over a hashed/generated CSS-module class name, which can change on any site redeploy."
+        },
+        "setVia": {
+          "enum": ["native-value-setter", "contenteditable-text"],
+          "description": "How to set the input's text so the site's own framework (React, etc.) notices the change. \"native-value-setter\" is for a real <textarea>/<input> whose value is controlled by a JS framework - plain `el.value = text` is silently ignored by React-controlled inputs, so this strategy sets the value via the native property setter (Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set) and then dispatches a bubbling 'input' event, which IS what React listens for. \"contenteditable-text\" is for a contenteditable div (not yet implemented as of schemaVersion 1 - a recipe requesting it will fail loudly at runtime, not silently misbehave; only declare it if you've confirmed a future version implements it)."
+        }
+      }
+    },
+    "submit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector"],
+      "properties": {
+        "selector": {
+          "type": "string",
+          "minLength": 1,
+          "description": "CSS selector for the send/submit button. Must be clickable via el.click() once the input has text (some sites disable this button while the input is empty - that's fine, the recipe sets the input value first). No \"press Enter instead\" fallback exists - if the site truly requires a click, this selector must resolve to it."
+        }
+      }
+    },
+    "reply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["containerSelector", "pick"],
+      "properties": {
+        "containerSelector": {
+          "type": "string",
+          "minLength": 1,
+          "description": "CSS selector matching each assistant reply's final-answer text container. IMPORTANT: many chat UIs render a separate \"thinking\"/reasoning trace alongside the actual answer (e.g. a sibling element with different styling/class) - this selector must match ONLY the final answer text, never the reasoning trace, or the relay will try to parse HUMAN-MCP CALL sentinels out of scratchpad text that was never meant to contain them. Verify this by triggering a reply that visibly shows a reasoning/thinking section and confirming the selector's matched text excludes it."
+        },
+        "pick": {
+          "enum": ["last", "nth"],
+          "description": "Which match of containerSelector to read. Only \"last\" is implemented (reads the most recent reply). \"nth\" is reserved for a future version - do not use it, a recipe with pick:\"nth\" is rejected at validation time."
+        }
+      }
+    },
+    "completion": {
+      "description": "How to detect that the assistant has finished streaming its reply, before reading it. Pick ONE strategy based on what's actually observable on the page - see docs/recipe-authoring.md for how to choose.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy", "observe", "idleMs", "maxWaitMs"],
+          "properties": {
+            "strategy": { "const": "idle-mutation" },
+            "observe": {
+              "type": "string",
+              "minLength": 1,
+              "description": "CSS selector to watch for DOM mutations (text/children changing) - typically the same as, or an ancestor of, reply.containerSelector's last match. Falls back to document.body if the selector currently matches nothing (e.g. before any reply exists yet)."
+            },
+            "idleMs": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Resolve once this many milliseconds pass with no further mutations on the observed node. Use this strategy when there's no reliable stop-button or disabled-state signal, only visibly-streaming text. Pick idleMs generously (3000ms+ recommended) - a reasoning model's thinking pauses between sentences can easily exceed a short idle threshold, causing a truncated mid-stream reply to be read before the actual answer/call block is written."
+            },
+            "maxWaitMs": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 600000,
+              "description": "Hard timeout (ms, max 10 minutes) - if no completion signal fires before this, the wait fails with a timeout error rather than hanging forever."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy", "watchSelector", "maxWaitMs"],
+          "properties": {
+            "strategy": { "const": "button-reappears" },
+            "watchSelector": {
+              "type": "string",
+              "minLength": 1,
+              "description": "CSS selector for a \"stop generating\"/regenerate-style button that appears while streaming and disappears (or is replaced by a different button) once done. Completion is: selector seen present, then subsequently absent. Prefer this strategy when such a button exists - it's the most reliable signal, since it's the same signal the site's own UI relies on."
+            },
+            "maxWaitMs": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 600000,
+              "description": "Hard timeout (ms, max 10 minutes)."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy", "watchSelector", "maxWaitMs"],
+          "properties": {
+            "strategy": { "const": "disabled-toggle" },
+            "watchSelector": {
+              "type": "string",
+              "minLength": 1,
+              "description": "CSS selector for an element (often the same as submit.selector) whose `disabled` property flips to true while streaming and back to false once done. Completion is: seen disabled, then subsequently re-enabled. Use this when the submit button itself is disabled during generation and no separate stop button exists."
+            },
+            "maxWaitMs": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 600000,
+              "description": "Hard timeout (ms, max 10 minutes)."
+            }
+          }
+        }
+      ]
+    },
+    "callBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "startSentinel": {
+          "type": "string",
+          "description": "Defaults to \"HUMAN-MCP CALL\" if omitted - leave unset unless you have a specific reason to deviate from the standard human-mcp-relay protocol."
+        },
+        "endSentinel": {
+          "type": "string",
+          "description": "Defaults to \"HUMAN-MCP END\" if omitted - leave unset unless you have a specific reason to deviate from the standard human-mcp-relay protocol."
+        }
+      }
+    }
+  }
+}
