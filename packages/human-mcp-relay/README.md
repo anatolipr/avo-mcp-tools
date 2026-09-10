@@ -52,6 +52,24 @@ window.__mcpTools = [
    optional session-name tagging for bridging more than one app into the
    same agent conversation at once.
 
+## Programmatic API (no popup/clipboard)
+
+For an automated caller (e.g. a browser extension driving a second tab on the
+human's behalf) rather than a human copy/pasting through the popup, the script
+also exposes:
+
+```js
+const resultBlock = await window.__humanMcpRelay.runCall(callBlockText, sessionName);
+```
+
+`callBlockText` is a raw `HUMAN-MCP CALL[...]`...`HUMAN-MCP END` block (same
+format a human would paste into the popup); the optional `sessionName`
+overrides the popup's own session-name field for this one call. Returns a
+formatted `HUMAN-MCP RESULT[...]`...`HUMAN-MCP END` string — the same wire
+format a human would otherwise copy out of the popup by hand. This does not
+touch the clipboard or the popup's own paste/result UI state; it's a separate
+entry point into the same call-dispatch logic.
+
 ## Files
 
 - `src/relay.js` — the `<human-mcp-relay>` Lit element, popup UI, keyboard

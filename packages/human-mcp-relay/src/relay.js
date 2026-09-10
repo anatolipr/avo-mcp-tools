@@ -317,36 +317,54 @@ class HumanMcpRelay extends LitElement {
 
   async _runPasted() {
     this.statusText = '';
+    await this._setResult(await this._runCall(this.pasteText, this.sessionName));
+  }
+
+  // Parses a HUMAN-MCP CALL block, dispatches it against window.__mcpTools,
+  // and returns a {tool, ok, data|error} result object - no UI side effects
+  // (does not touch pasteText/resultText or the clipboard). Split out of
+  // _runPasted so runCallText (below) can share the same dispatch logic for
+  // a fully automated caller (e.g. a browser extension relaying calls from a
+  // second tab) without going through the popup's own paste/copy UI state.
+  async _runCall(text, expectedSession) {
     let call;
     try {
-      call = parseCall(this.pasteText, this.sessionName);
+      call = parseCall(text, expectedSession);
     } catch (e) {
-      // Even a malformed paste (bad JSON, missing sentinel, wrong shape)
-      // gets a proper result block, not just a status line - the human
-      // needs something copyable to hand back so the agent can see exactly
-      // what parsing rejected and self-correct, instead of the human having
-      // to paraphrase the error by hand.
-      await this._setResult({tool: 'unknown', ok: false, error: e.message});
-      return;
+      // Even a malformed call (bad JSON, missing sentinel, wrong shape)
+      // gets a proper result object, not just a thrown error - the caller
+      // needs something to hand back so the agent can see exactly what
+      // parsing rejected and self-correct, instead of having to paraphrase
+      // the error by hand.
+      return {tool: 'unknown', ok: false, error: e.message};
     }
 
     let tool = this._tools.find(t => t.name === call.tool);
     if (!tool) {
       let names = this._tools.map(t => t.name).join(', ');
-      await this._setResult({
+      return {
         tool: call.tool,
         ok: false,
         error: `Unknown tool "${call.tool}". Available tools: ${names}`,
-      });
-      return;
+      };
     }
 
     try {
       let data = await tool.fn(call.args);
-      await this._setResult({tool: call.tool, ok: true, data});
+      return {tool: call.tool, ok: true, data};
     } catch (e) {
-      await this._setResult({tool: call.tool, ok: false, error: e.message || String(e)});
+      return {tool: call.tool, ok: false, error: e.message || String(e)};
     }
+  }
+
+  // Programmatic counterpart to the popup's paste-and-run flow, for an
+  // automated caller with no human/clipboard in the loop (see
+  // window.__humanMcpRelay.runCall below). Takes a raw HUMAN-MCP CALL...
+  // HUMAN-MCP END block, returns a formatted HUMAN-MCP RESULT...HUMAN-MCP END
+  // block - same wire format a human would copy out of the popup by hand,
+  // so a caller can't tell the difference from the other end.
+  async runCallText(text, expectedSession) {
+    return formatResult(await this._runCall(text, expectedSession), expectedSession);
   }
 
   render() {
@@ -417,3 +435,17 @@ if (!document.querySelector('human-mcp-relay')) {
   let el = document.createElement('human-mcp-relay');
   document.body.appendChild(el);
 }
+
+// Opt-in programmatic entry point, additive and backward-compatible with
+// the human-facing popup above - lets an automated caller (e.g. a browser
+// extension driving a second "chat" tab on the human's behalf) run a
+// HUMAN-MCP CALL block without any popup UI, clipboard, or human in the
+// loop. Set here (module init), not inside the element, so it's available
+// even before the popup has ever been opened.
+window.__humanMcpRelay = {
+  runCall: (text, sessionName) => {
+    let el = document.querySelector('human-mcp-relay');
+    if (!el) throw new Error('human-mcp-relay element not found on this page.');
+    return el.runCallText(text, sessionName ?? el.sessionName);
+  },
+};
