@@ -20,7 +20,6 @@ import {
 import { readResponseBody, modifyRequest, unregisterRequestModifier, clearDebuggerStateForTab } from './debugger-tools.js';
 import { findConnectedTabs, listConnectedTabs } from './connected-tabs.js';
 import { tabAlreadyConnected } from './connect-tab.js';
-import { listRelaySessions } from './relay-engine.js';
 
 const DEBUGGER_GATED_TOOL_NAMES = ['read_response_body', 'modify_request', 'unregister_request_modifier'];
 
@@ -126,16 +125,6 @@ export async function registerBuiltinTools(): Promise<void> {
         const removed = await unregisterPersistentScript(id);
         return removed ? `unregistered "${id}"` : `"${id}" was not a registered persistent script`;
       },
-    },
-    {
-      name: 'list_relay_sessions',
-      description:
-        'Lists active chat-relay bridging sessions - each one automates the human-mcp-relay copy/paste loop between a ' +
-        'chat-UI tab (driven per an uploaded JSON recipe) and an MCP-capable app tab. Read-only: there is no tool to ' +
-        'start or stop a session, since bridging two specific tabs together is a human decision made in the extension ' +
-        "popup, not something an agent initiates. Returns each session's chatTabId/appTabId/recipeId/status/lastError.",
-      params: {},
-      fn: async () => ({ sessions: listRelaySessions() }),
     },
   ];
 

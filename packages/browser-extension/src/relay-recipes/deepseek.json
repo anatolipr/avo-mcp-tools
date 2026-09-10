@@ -16,7 +16,6 @@
   },
   "completion": {
     "strategy": "idle-mutation",
-    "observe": ".ds-assistant-message-main-content:last-of-type",
     "idleMs": 3000,
     "maxWaitMs": 120000
   },

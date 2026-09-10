@@ -80,20 +80,32 @@ chat.deepseek.com, driven per an uploaded JSON recipe — see
 automating the human's role in that package's manual copy/paste loop.
 Managed from the extension popup's "Chat-relay recipes" / "Start bridging"
 section: upload a recipe, pick a chat tab + app tab + recipe, click "Start
-bridging". See `src/background/relay-engine.ts` for the orchestration and
-`src/background/relay-completion-strategies.ts` for the chat-tab DOM
-automation.
+bridging".
 
-**Known limitation (FIXME, see `src/background/session-keepalive.ts`)**: a
-running session currently requires the extension **popup to stay open** for
-its full duration. The intended fix (a `chrome.runtime.Port` held open for
-the session's lifetime, preventing MV3 service-worker idle-suspension) is
-implemented but was found via live testing to NOT reliably survive the popup
-closing — likely because a service worker connecting to itself doesn't count
-toward Chrome's own idle-tracking the way a Port held by a genuinely
-separate context does. Not yet fixed; see that file's header comment for the
-next approach to try (having the popup itself, or a dedicated always-open
-extension page, hold the Port instead).
+**The chat tab owns the entire bridging session, not the extension.**
+"Start bridging" injects one self-contained script
+(`src/background/relay-chat-loop.ts`'s `chatLoopMainFunction`) into the chat
+tab; from that point on, that injected code runs the whole loop (watch for
+a reply, extract a `HUMAN-MCP CALL` block, forward it, send the result back,
+repeat) permanently in the page's own JS realm. The extension's background
+service worker is **fully stateless** — it does exactly two things, both
+one-shot: inject the loop at "Start bridging," and act as an opaque
+message bus (`src/background/message-handler.ts`'s `relay-bus-forward`
+handler, backed by the existing `injectScriptOnce`) that the chat tab's own
+injected relay script (`src/background/relay-bus-isolated.ts`) uses to reach
+the app tab. The background never knows a session exists, never inspects
+what's being relayed, and holds no registry of running bridges. This design
+replaced an earlier background-owned-loop implementation that proved
+fragile against MV3 service-worker suspension (lost popup selections, stuck
+waits, races between duplicate sessions) — moving the loop into the one
+context that's actually stable for the session's duration (the tab itself,
+which never reloads mid-session) eliminated that whole category of bug.
+
+**Stopping a bridge means reloading or closing the chat tab** — there is no
+Stop button, no stop message, and no session state to track. Reloading the
+tab destroys the injected script's JS realm along with it, which is the
+entire mechanism. The popup's "Reload chat tab" button is a plain
+`chrome.tabs.reload()` convenience wrapper, nothing more.
 
 ## TODO / future idea (not started)
 

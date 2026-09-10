@@ -1,23 +1,27 @@
-// Chat-relay recipe management and session start/stop - a separate
-// component from popup-app.ts (rather than growing that already ~320-line
-// file further) since recipe upload/list/delete plus session start/stop is
-// a large, logically separate concern from the connect/rename/disconnect
-// flow popup-app.ts already owns. Same avosignals Signal/SignalWatcher
-// pattern as popup-app.ts, not Lit's own reactive properties, for
-// consistency across this package's popup code.
+// Chat-relay recipe management and bridge start - a separate component
+// from popup-app.ts (rather than growing that already ~320-line file
+// further) since recipe upload/list plus starting a bridge is a large,
+// logically separate concern from the connect/rename/disconnect flow
+// popup-app.ts already owns. Same avosignals Signal/SignalWatcher pattern
+// as popup-app.ts, not Lit's own reactive properties, for consistency
+// across this package's popup code.
+//
+// This panel has NO persistent session/status tracking - the extension
+// background is fully stateless (see relay-chat-loop.ts's header comment).
+// "Start bridging" is fire-and-forget beyond its immediate ok/error
+// response: once the chat tab's loop is injected, this popup does not poll
+// or track what it's doing. "Check status" is a deliberate exception - a
+// one-shot, human-initiated read of window.__mcpRelayStats directly off the
+// chat tab (not anything the background remembers), for a human to answer
+// "is this still alive" without opening that tab's own DevTools console.
+// Stopping a bridge means reloading or closing the chat tab - the "Reload
+// chat tab" button below is a plain convenience wrapping chrome.tabs.reload,
+// nothing more.
 import { LitElement, html, css } from 'lit';
 import { Signal, SignalWatcher } from 'avosignals';
 import { validateRecipe } from '../shared/recipe-validator.js';
-import type {
-  Recipe,
-  RelaySession,
-} from '../shared/recipe-types.js';
-import type {
-  ListRecipesResult,
-  SaveRecipeResult,
-  StartRelaySessionResult,
-  ListRelaySessionsResult,
-} from '../shared/types.js';
+import type { Recipe } from '../shared/recipe-types.js';
+import type { ListRecipesResult, SaveRecipeResult, StartRelayBridgeResult, RelayCheckStatusResult } from '../shared/types.js';
 
 interface TabOption {
   id: number;
@@ -58,6 +62,9 @@ export class RelayPanel extends LitElement {
     button {
       margin-top: 8px;
       cursor: pointer;
+    }
+    button.secondary {
+      background: light-dark(#f3f4f6, #27272a);
     }
     button.danger {
       background: light-dark(#fee2e2, #450a0a);
@@ -109,7 +116,6 @@ export class RelayPanel extends LitElement {
   `;
 
   #recipes = new Signal<Recipe[]>([]);
-  #sessions = new Signal<RelaySession[]>([]);
   #tabs = new Signal<TabOption[]>([]);
   #uploadErrors = new Signal<string[]>([]);
   #chatTabId = new Signal<string>('');
@@ -117,6 +123,7 @@ export class RelayPanel extends LitElement {
   #selectedRecipeId = new Signal<string>('');
   #statusText = new Signal<string>('');
   #statusIsError = new Signal<boolean>(false);
+  #checkStatusResult = new Signal<RelayCheckStatusResult | undefined>(undefined);
 
   constructor() {
     super();
@@ -125,21 +132,12 @@ export class RelayPanel extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    void this.#refresh();
-  }
-
-  async #refresh(): Promise<void> {
-    await Promise.all([this.#loadRecipes(), this.#loadSessions(), this.#loadTabs()]);
+    void Promise.all([this.#loadRecipes(), this.#loadTabs()]);
   }
 
   async #loadRecipes(): Promise<void> {
     const res: ListRecipesResult = await chrome.runtime.sendMessage({ type: 'list-recipes' });
     this.#recipes.set(res.recipes ?? []);
-  }
-
-  async #loadSessions(): Promise<void> {
-    const res: ListRelaySessionsResult = await chrome.runtime.sendMessage({ type: 'list-relay-sessions' });
-    this.#sessions.set(res.sessions ?? []);
   }
 
   async #loadTabs(): Promise<void> {
@@ -211,19 +209,48 @@ export class RelayPanel extends LitElement {
       return;
     }
     this.#setStatus('Starting…');
-    const res: StartRelaySessionResult = await chrome.runtime.sendMessage({
-      type: 'start-relay-session',
+    const res: StartRelayBridgeResult = await chrome.runtime.sendMessage({
+      type: 'start-relay-bridge',
       chatTabId,
       appTabId,
       recipeId,
     });
+    // Fire-and-forget beyond this point: the background holds no session
+    // state to poll, and the chat tab's own injected loop runs
+    // independently from here on. "Bridging started" only confirms the
+    // injection itself succeeded, not that the loop is doing anything
+    // useful yet.
     this.#setStatus(res.ok ? 'Bridging started.' : `Failed: ${res.error}`, !res.ok);
-    await this.#loadSessions();
   }
 
-  async #onStopSession(sessionId: string): Promise<void> {
-    await chrome.runtime.sendMessage({ type: 'stop-relay-session', sessionId });
-    await this.#loadSessions();
+  async #onReloadChatTab(): Promise<void> {
+    const chatTabId = Number(this.#chatTabId.value);
+    if (!chatTabId) {
+      this.#setStatus('Pick a chat tab first.', true);
+      return;
+    }
+    await chrome.tabs.reload(chatTabId);
+    this.#checkStatusResult.set(undefined);
+    this.#setStatus('Chat tab reloaded - any running bridge on it has stopped.');
+  }
+
+  async #onCheckStatus(): Promise<void> {
+    const chatTabId = Number(this.#chatTabId.value);
+    if (!chatTabId) {
+      this.#setStatus('Pick a chat tab first.', true);
+      return;
+    }
+    const res: RelayCheckStatusResult = await chrome.runtime.sendMessage({ type: 'relay-check-status', chatTabId });
+    this.#checkStatusResult.set(res);
+  }
+
+  #formatStatus(s: RelayCheckStatusResult): string {
+    if (s.error) return `Check failed: ${s.error}`;
+    if (!s.active) return 'No bridge is running on this tab.';
+    const ago = (ms?: number) => (ms === undefined ? 'never' : `${Math.round((Date.now() - ms) / 1000)}s ago`);
+    let text = `Active. Started ${ago(s.startedAt)}. Polls: ${s.pollCount ?? 0} (last ${ago(s.lastPollAt)}). Rounds completed: ${s.roundsCompleted ?? 0}.`;
+    if (s.lastError) text += ` Last error: ${s.lastError}`;
+    return text;
   }
 
   render() {
@@ -266,20 +293,12 @@ export class RelayPanel extends LitElement {
         ${this.#recipes.value.map((r) => html`<option value=${r.id}>${r.displayName ?? r.hostname}</option>`)}
       </select>
       <button @click=${() => this.#onStartBridging()}>Start bridging</button>
+      <button class="secondary" @click=${() => this.#onCheckStatus()}>Check status</button>
+      <button class="secondary" @click=${() => this.#onReloadChatTab()}>Reload chat tab (stops any running bridge)</button>
       <div class="status ${this.#statusIsError.value ? 'error' : ''}">${this.#statusText.value}</div>
-
-      <h2>Active sessions</h2>
-      <ul>
-        ${this.#sessions.value.map(
-          (s) => html`
-            <li>
-              <span>${s.recipeId}: ${s.status}${s.lastError ? ` — ${s.lastError}` : ''}</span>
-              <button class="danger" @click=${() => this.#onStopSession(s.id)}>Stop</button>
-            </li>
-          `
-        )}
-        ${this.#sessions.value.length === 0 ? html`<li><span class="status">No active sessions.</span></li>` : ''}
-      </ul>
+      ${this.#checkStatusResult.value
+        ? html`<div class="status">${this.#formatStatus(this.#checkStatusResult.value)}</div>`
+        : ''}
     `;
   }
 }

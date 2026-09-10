@@ -136,8 +136,9 @@ export function validateRecipe(input: unknown, existingIds?: Set<string>): Valid
       errors.push(`"completion.maxWaitMs" must be a positive number no greater than ${MAX_WAIT_MS_CEILING} (10 minutes).`);
     }
     if (completion.strategy === 'idle-mutation') {
-      if (!isNonEmptyString(completion.observe)) errors.push('"completion.observe" must be a non-empty string for strategy "idle-mutation".');
-      else if (!isValidSelectorSyntax(completion.observe)) errors.push(`"completion.observe" is not valid CSS selector syntax: "${completion.observe}"`);
+      // No `observe` field - the poll always targets whichever element is
+      // currently the last reply.containerSelector match, re-resolved every
+      // tick (see recipe-types.ts's IdleMutationCompletion comment).
       if (!isPositiveNumber(completion.idleMs)) errors.push('"completion.idleMs" must be a positive number for strategy "idle-mutation".');
     } else if (completion.strategy === 'button-reappears' || completion.strategy === 'disabled-toggle') {
       if (!isNonEmptyString(completion.watchSelector)) {

@@ -5,19 +5,21 @@ import type {
   ActionResult,
   ListRecipesResult,
   SaveRecipeResult,
-  StartRelaySessionResult,
-  ListRelaySessionsResult,
+  StartRelayBridgeResult,
+  RelayBusForwardResult,
+  RelayCheckStatusResult,
 } from '../shared/types.js';
 import { injectConnectSnippet, changeChannel, renameConnection, disconnectTab, tabAlreadyConnected } from './connect-tab.js';
 import { getKnownOrigin, setKnownOrigin, deleteKnownOrigin } from './storage.js';
 import { markTabConnected } from './auto-reconnect.js';
-import { lookupPersistentScriptsForUrl } from './script-injection.js';
+import { lookupPersistentScriptsForUrl, injectScriptOnce } from './script-injection.js';
 import { refreshBadgeForActiveTab } from './connection-badge.js';
 import { recordConnectedTab, forgetConnectedTab } from './connected-tabs.js';
 import { JSBRIDGE_HOST } from '../shared/constants.js';
-import { listRecipes, saveRecipe, deleteRecipe, listRecipeIds } from './relay-recipes-storage.js';
-import { startRelaySession, stopRelaySession, listRelaySessions } from './relay-engine.js';
+import { listRecipes, saveRecipe, deleteRecipe, listRecipeIds, getRecipe } from './relay-recipes-storage.js';
 import { validateRecipe } from '../shared/recipe-validator.js';
+import { buildChatLoopConfig, chatLoopMainFunction } from './relay-chat-loop.js';
+import { relayBusIsolatedFunction } from './relay-bus-isolated.js';
 
 // Structural subset of mcp-tenant-lib's DashboardChannel (dashboard.ts) - see
 // popup.ts's own former copy of this comment (now folded into the shared
@@ -134,22 +136,30 @@ export function startMessageHandler(onConsoleCapture: (tabId: number, level: str
       return true;
     }
 
-    if (message.type === 'start-relay-session') {
-      startRelaySession(message.chatTabId, message.appTabId, message.recipeId)
-        .then((result) => sendResponse(result satisfies StartRelaySessionResult))
-        .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies StartRelaySessionResult));
+    if (message.type === 'start-relay-bridge') {
+      handleStartRelayBridge(message.chatTabId, message.appTabId, message.recipeId)
+        .then((result) => sendResponse(result satisfies StartRelayBridgeResult))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies StartRelayBridgeResult));
       return true;
     }
 
-    if (message.type === 'stop-relay-session') {
-      stopRelaySession(message.sessionId);
-      sendResponse({ ok: true } satisfies ActionResult);
-      return false;
+    if (message.type === 'relay-bus-forward') {
+      // OPAQUE transport - `message.code` is never inspected or parsed
+      // here, only forwarded to the target tab via the existing
+      // injectScriptOnce. See relay-chat-loop.ts's header comment: this
+      // handler has no idea it's carrying a HUMAN-MCP CALL/RESULT, and
+      // that's by design.
+      injectScriptOnce(message.targetTabId, message.code)
+        .then((result) => sendResponse({ ok: true, result: typeof result === 'string' ? result : String(result) } satisfies RelayBusForwardResult))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies RelayBusForwardResult));
+      return true;
     }
 
-    if (message.type === 'list-relay-sessions') {
-      sendResponse({ sessions: listRelaySessions() } satisfies ListRelaySessionsResult);
-      return false;
+    if (message.type === 'relay-check-status') {
+      handleRelayCheckStatus(message.chatTabId)
+        .then((result) => sendResponse(result satisfies RelayCheckStatusResult))
+        .catch((err) => sendResponse({ active: false, error: String(err?.message ?? err) } satisfies RelayCheckStatusResult));
+      return true;
     }
 
     return false;
@@ -166,6 +176,45 @@ async function handleSaveRecipe(rawRecipe: unknown): Promise<SaveRecipeResult> {
   if (!result.ok) return { ok: false, errors: result.errors };
   await saveRecipe(result.recipe);
   return { ok: true };
+}
+
+// Injects relay-chat-loop.ts's MAIN-world loop and relay-bus-isolated.ts's
+// ISOLATED-world relay half into the chat tab, once. This is the ENTIRE
+// extension-side involvement in a bridging session - after this call
+// returns, the background holds no record of the session at all (no
+// registry, no session id); the chat tab's own injected code owns
+// everything from here, reaching back into the background only via
+// relay-bus-forward messages it initiates itself. Stopping a bridge means
+// reloading or closing the chat tab, not any message this background sends.
+async function handleStartRelayBridge(chatTabId: number, appTabId: number, recipeId: string): Promise<StartRelayBridgeResult> {
+  const recipe = await getRecipe(recipeId);
+  if (!recipe) return { ok: false, error: `No recipe found with id "${recipeId}".` };
+
+  const config = buildChatLoopConfig(appTabId, recipe);
+  await chrome.scripting.executeScript({
+    target: { tabId: chatTabId },
+    world: 'ISOLATED',
+    func: relayBusIsolatedFunction,
+  });
+  await chrome.scripting.executeScript({
+    target: { tabId: chatTabId },
+    world: 'MAIN',
+    func: chatLoopMainFunction,
+    args: [JSON.stringify(config)],
+  });
+
+  return { ok: true };
+}
+
+// One-shot read of window.__mcpRelayStats (see relay-chat-loop.ts) from the
+// given tab - purely for a human to check "is this still running, what's it
+// doing" from the popup. Uses the same injectScriptOnce every other one-shot
+// read in this package uses; involves no background state of any kind.
+async function handleRelayCheckStatus(chatTabId: number): Promise<RelayCheckStatusResult> {
+  const code = 'return window.__mcpRelayStats ? JSON.stringify({ active: !!window.__mcpRelayLoopActive, ...window.__mcpRelayStats }) : JSON.stringify({ active: false });';
+  const result = await injectScriptOnce(chatTabId, code);
+  if (typeof result !== 'string') return { active: false, error: 'relay-check-status: injected script returned no result.' };
+  return JSON.parse(result) as RelayCheckStatusResult;
 }
 
 async function handleGetActiveTabStatus(): Promise<ActiveTabStatus> {

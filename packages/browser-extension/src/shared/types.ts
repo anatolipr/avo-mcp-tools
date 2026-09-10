@@ -11,9 +11,17 @@ export type ExtensionRuntimeMessage =
   | { type: 'list-recipes' }
   | { type: 'save-recipe'; recipe: unknown }
   | { type: 'delete-recipe'; id: string }
-  | { type: 'start-relay-session'; chatTabId: number; appTabId: number; recipeId: string }
-  | { type: 'stop-relay-session'; sessionId: string }
-  | { type: 'list-relay-sessions' };
+  | { type: 'start-relay-bridge'; chatTabId: number; appTabId: number; recipeId: string }
+  // Sent by the chat tab's OWN injected relay-bus-isolated.ts script, never
+  // by the popup - the background never initiates this, only responds. See
+  // relay-chat-loop.ts's header comment: this is opaque transport, the
+  // background never inspects `code`'s contents.
+  | { type: 'relay-bus-forward'; targetTabId: number; code: string }
+  // Popup-initiated, one-shot read of window.__mcpRelayStats from the given
+  // tab (see relay-chat-loop.ts) - does NOT involve any background state,
+  // just a direct injectScriptOnce read, same mechanism as relay-bus-forward
+  // but for a human checking status rather than the loop relaying a call.
+  | { type: 'relay-check-status'; chatTabId: number };
 
 export interface ConnectActiveTabResult {
   ok: boolean;
@@ -70,14 +78,32 @@ export interface SaveRecipeResult {
   errors?: string[];
 }
 
-// Response to 'start-relay-session'.
-export interface StartRelaySessionResult {
+// Response to 'start-relay-bridge'.
+export interface StartRelayBridgeResult {
   ok: boolean;
-  sessionId?: string;
   error?: string;
 }
 
-// Response to 'list-relay-sessions'.
-export interface ListRelaySessionsResult {
-  sessions: import('./recipe-types.js').RelaySession[];
+// Response to 'relay-bus-forward' - result is the injected script's return
+// value (expected to be a string, the HUMAN-MCP RESULT text, but this type
+// doesn't enforce that - the background never inspects it either way).
+export interface RelayBusForwardResult {
+  ok: boolean;
+  result?: string;
+  error?: string;
+}
+
+// Response to 'relay-check-status' - mirrors relay-chat-loop.ts's
+// window.__mcpRelayStats shape. `active` is false (with everything else
+// undefined) when the tab has no loop running at all - either it was never
+// started, or the tab was reloaded/closed since (which clears the flag
+// along with the whole JS realm).
+export interface RelayCheckStatusResult {
+  active: boolean;
+  startedAt?: number;
+  pollCount?: number;
+  lastPollAt?: number;
+  roundsCompleted?: number;
+  lastError?: string;
+  error?: string;
 }

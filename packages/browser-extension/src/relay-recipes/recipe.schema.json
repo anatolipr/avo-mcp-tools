@@ -75,24 +75,19 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["strategy", "observe", "idleMs", "maxWaitMs"],
+          "required": ["strategy", "idleMs", "maxWaitMs"],
           "properties": {
             "strategy": { "const": "idle-mutation" },
-            "observe": {
-              "type": "string",
-              "minLength": 1,
-              "description": "CSS selector to watch for DOM mutations (text/children changing) - typically the same as, or an ancestor of, reply.containerSelector's last match. Falls back to document.body if the selector currently matches nothing (e.g. before any reply exists yet)."
-            },
             "idleMs": {
               "type": "number",
               "exclusiveMinimum": 0,
-              "description": "Resolve once this many milliseconds pass with no further mutations on the observed node. Use this strategy when there's no reliable stop-button or disabled-state signal, only visibly-streaming text. Pick idleMs generously (3000ms+ recommended) - a reasoning model's thinking pauses between sentences can easily exceed a short idle threshold, causing a truncated mid-stream reply to be read before the actual answer/call block is written."
+              "description": "Resolve once reply.containerSelector's last match's text has stayed unchanged for this many milliseconds, checked by polling (once per second) - not by a DOM mutation observer, which was found to hang permanently on chat UIs that replace the reply DOM node wholesale during a re-render (React-style frameworks commonly do this). Use this strategy when there's no reliable stop-button or disabled-state signal, only visibly-streaming text. Pick idleMs generously (3000ms+ recommended) - a reasoning model's thinking pauses between sentences can easily exceed a short idle threshold, causing a truncated mid-stream reply to be read before the actual answer/call block is written."
             },
             "maxWaitMs": {
               "type": "number",
               "exclusiveMinimum": 0,
               "maximum": 600000,
-              "description": "Hard timeout (ms, max 10 minutes) - if no completion signal fires before this, the wait fails with a timeout error rather than hanging forever."
+              "description": "Hard timeout (ms, max 10 minutes) bounding ONLY how long a reply is allowed to take to actually finish streaming, once it has started appearing - NOT how long the engine waits for a reply to START appearing in the first place (e.g. while waiting for a human to answer a clarifying question after a no-CALL-block round) - that earlier phase is unbounded on purpose. If no completion signal fires within maxWaitMs of a reply actually beginning, the wait fails with a timeout error."
             }
           }
         },
@@ -111,7 +106,7 @@
               "type": "number",
               "exclusiveMinimum": 0,
               "maximum": 600000,
-              "description": "Hard timeout (ms, max 10 minutes)."
+              "description": "Hard timeout (ms, max 10 minutes) bounding this strategy's own detection phase once a new reply has started appearing - not the earlier open-ended wait for a reply to start at all."
             }
           }
         },
@@ -130,7 +125,7 @@
               "type": "number",
               "exclusiveMinimum": 0,
               "maximum": 600000,
-              "description": "Hard timeout (ms, max 10 minutes)."
+              "description": "Hard timeout (ms, max 10 minutes) bounding this strategy's own detection phase once a new reply has started appearing - not the earlier open-ended wait for a reply to start at all."
             }
           }
         }

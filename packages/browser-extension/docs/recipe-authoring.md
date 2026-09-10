@@ -12,7 +12,11 @@ A recipe is plain JSON, validated against
 version). It describes how to drive one chat UI well enough to relay
 `HUMAN-MCP CALL`/`HUMAN-MCP RESULT` blocks through it automatically, without
 any code running on the extension's behalf — only a fixed, safe vocabulary of
-selectors and enum-valued strategies.
+selectors and enum-valued strategies. See
+[`../src/relay-recipes/SKILL.md`](../src/relay-recipes/SKILL.md) for the
+actual step-by-step live investigative session that produced
+`deepseek.json`, including the mistakes made along the way — read it
+alongside this file before authoring a recipe for a new site.
 
 ## Workflow: explore before you write JSON
 
@@ -71,9 +75,20 @@ selectors and enum-valued strategies.
      itself is disabled during generation and re-enabled when done, use
      this instead.
    - **`idle-mutation`** — last resort, when neither of the above is
-     observable, only a visibly-streaming text node. Watch
-     `reply.containerSelector`'s (or an ancestor's) subtree for mutations
-     and resolve once `idleMs` passes with none. Pick `idleMs` generously —
+     observable, only a visibly-streaming text node. Leave `observe` unset
+     (the recommended default) — the engine automatically watches whichever
+     element `reply.containerSelector`'s LAST match currently is, resolved
+     dynamically each time. Do NOT hand-write a selector like
+     `.my-reply:last-of-type` expecting it to mean "the last reply on the
+     page": CSS's `:last-of-type` actually means "the last element of this
+     type among its own siblings," so if each reply lives in a separate
+     parent wrapper (common in chat UIs — one wrapper div per turn), that
+     selector matches multiple STALE elements, and
+     `document.querySelector` silently returns the first (wrong, no-longer-
+     changing) one — found live authoring the DeepSeek recipe, where it
+     caused sessions to hang in `waiting-for-reply` forever even with a
+     CALL block clearly visible on screen. Resolves once `idleMs` passes
+     with no further mutations. Pick `idleMs` generously —
      found in practice against DeepSeek, 1500ms was too short: a reasoning
      model's natural "thinking" pauses between sentences (finishing one
      thought, then pausing before continuing toward the actual tool call)
@@ -82,7 +97,13 @@ selectors and enum-valued strategies.
      3000ms+ is a safer starting point for any model that visibly "thinks"
      before answering; tune upward further if truncated replies still occur.
    - Always set a `maxWaitMs` you're comfortable timing out at (max 10
-     minutes) as a hard backstop regardless of strategy.
+     minutes) as a hard backstop regardless of strategy. This only bounds
+     how long a reply is allowed to take to finish STREAMING once it has
+     started — it does NOT bound how long the extension waits for a reply
+     to start appearing in the first place. That earlier wait (e.g. for a
+     human to answer a clarifying question after a `watching` round) is
+     intentionally unbounded and costs no CPU while idle, since it's driven
+     by a `MutationObserver`, not polling.
 
 7. **Validate before uploading.** Check the recipe against
    `recipe.schema.json`'s constraints — every selector must be non-empty and
@@ -127,7 +148,6 @@ nothing when actually queried as a plain CSS selector. Use the bare
   },
   "completion": {
     "strategy": "idle-mutation",
-    "observe": ".ds-assistant-message-main-content:last-of-type",
     "idleMs": 3000,
     "maxWaitMs": 120000
   },

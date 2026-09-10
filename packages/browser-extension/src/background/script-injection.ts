@@ -36,11 +36,7 @@ function urlMatchesPattern(url: string, pattern: string): boolean {
 // in that case and leaves `result` undefined. Reading unwrapInjectionResult's
 // return value without checking this first silently loses the real failure
 // reason (callers used to see only a missing/wrong-shaped result with no
-// indication anything went wrong). Shared by injectScriptOnce below and by
-// relay-completion-strategies.ts's waitForReplyInTab, which calls
-// chrome.scripting.executeScript directly (not through injectScriptOnce)
-// since its injected function takes typed args rather than a compiled code
-// string.
+// indication anything went wrong). Used by injectScriptOnce below.
 export function unwrapInjectionResult(injectionResult: { result?: unknown; error?: unknown } | undefined): unknown {
   if (injectionResult && 'error' in injectionResult && injectionResult.error !== undefined) {
     const err = injectionResult.error;
