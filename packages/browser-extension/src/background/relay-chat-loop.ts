@@ -118,7 +118,17 @@ export function chatLoopMainFunction(configJson: string): void {
     return { tag: found.tag, body: body.slice(found.index + found.matchLength, endIdx).trim() };
   }
 
-  function sendMessage(messageText: string) {
+  // Small delay between setting the input value and clicking submit -
+  // needed for 'contenteditable-text' specifically: a framework (e.g.
+  // Angular, as Gemini uses) that reacts to execCommand via its own change
+  // detection cycle can race a same-tick click, sometimes leaving the
+  // submit button not-yet-enabled or the click firing before the
+  // framework's internal state has caught up with the DOM - found live
+  // testing against Gemini, where a same-tick type+click occasionally
+  // silently failed to send at all. 'native-value-setter' has not shown
+  // this issue, but the delay is applied uniformly since it's harmless in
+  // that case too.
+  async function sendMessage(messageText: string): Promise<void> {
     const inputEl = doc.querySelector(config.inputSelector);
     if (!inputEl) throw new Error(`input selector not found: ${config.inputSelector}`);
     if (config.setVia === 'native-value-setter') {
@@ -131,9 +141,20 @@ export function chatLoopMainFunction(configJson: string): void {
       if (!setter) throw new Error('native-value-setter: could not find a native value setter for this element.');
       setter.call(inputEl, messageText);
       inputEl.dispatchEvent(new win.Event('input', { bubbles: true }));
+    } else if (config.setVia === 'contenteditable-text') {
+      // document.execCommand is deprecated but still the most reliable way
+      // to insert text into a contenteditable element such that a rich-text
+      // editor library (Quill, as Gemini uses) updates its own internal
+      // model in sync with the DOM - directly setting .textContent/.innerHTML
+      // bypasses the editor's own state and can desync it from what's
+      // actually submitted.
+      inputEl.focus();
+      doc.execCommand('selectAll', false, null);
+      doc.execCommand('insertText', false, messageText);
     } else {
       throw new Error('setVia "' + config.setVia + '" not yet implemented.');
     }
+    await new Promise((resolve) => win.setTimeout(resolve, 150));
     const submitEl = doc.querySelector(config.submitSelector);
     if (!submitEl) throw new Error(`submit selector not found: ${config.submitSelector}`);
     submitEl.click();
@@ -318,7 +339,7 @@ export function chatLoopMainFunction(configJson: string): void {
     for (;;) {
       try {
         if (nextMessageForChat !== undefined) {
-          sendMessage(nextMessageForChat);
+          await sendMessage(nextMessageForChat);
           nextMessageForChat = undefined;
           // Snapshot AFTER sending (not before loop start) - whatever the
           // last reply's text is right now is "already seen," so the next

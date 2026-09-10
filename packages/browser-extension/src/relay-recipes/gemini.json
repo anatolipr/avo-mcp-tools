@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "gemini",
+  "hostname": "gemini.google.com",
+  "displayName": "Gemini",
+  "input": {
+    "selector": ".ql-editor[aria-label=\"Enter a prompt for Gemini\"]",
+    "setVia": "contenteditable-text"
+  },
+  "submit": {
+    "selector": "button[aria-label=\"Send message\"]"
+  },
+  "reply": {
+    "containerSelector": ".model-response-text",
+    "pick": "last"
+  },
+  "completion": {
+    "strategy": "button-reappears",
+    "watchSelector": "button[aria-label=\"Stop response\"]",
+    "maxWaitMs": 120000
+  },
+  "callBlock": {
+    "startSentinel": "HUMAN-MCP CALL",
+    "endSentinel": "HUMAN-MCP END"
+  }
+}

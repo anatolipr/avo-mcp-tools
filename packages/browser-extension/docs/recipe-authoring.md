@@ -37,10 +37,22 @@ alongside this file before authoring a recipe for a new site.
    setter.call(el, 'test message');
    el.dispatchEvent(new Event('input', {bubbles: true}));
    ```
-   If the input is a `contenteditable` div instead of a `<textarea>`, note
-   that `setVia: "contenteditable-text"` is declared in the schema but **not
-   yet implemented** — a recipe requesting it will fail loudly at runtime.
-   Flag this to the human rather than shipping an unusable recipe.
+   If the input is a `contenteditable` div instead of a `<textarea>` (e.g.
+   a Quill-based editor, as Gemini uses), use `setVia:
+   "contenteditable-text"` instead: focus the element, select all existing
+   content, then insert the new text via `document.execCommand`, which
+   keeps a rich-text editor's own internal model in sync with the DOM
+   (directly setting `.textContent`/`.innerHTML` does not):
+   ```js
+   el.focus();
+   document.execCommand('selectAll', false, null);
+   document.execCommand('insertText', false, 'test message');
+   ```
+   `execCommand` is deprecated but remains the most reliable cross-editor
+   way to do this. Found in practice against Gemini: leave a short pause
+   (100–200ms) between setting the text and clicking submit — a same-tick
+   type-then-click can race the page's own change detection and silently
+   fail to send (the engine already does this automatically).
 
 3. **Find the submit control.** Usually near the input. Confirm it becomes
    clickable (not disabled) once the input has text, and that `el.click()`

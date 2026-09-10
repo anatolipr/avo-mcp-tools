@@ -37,7 +37,7 @@
         },
         "setVia": {
           "enum": ["native-value-setter", "contenteditable-text"],
-          "description": "How to set the input's text so the site's own framework (React, etc.) notices the change. \"native-value-setter\" is for a real <textarea>/<input> whose value is controlled by a JS framework - plain `el.value = text` is silently ignored by React-controlled inputs, so this strategy sets the value via the native property setter (Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set) and then dispatches a bubbling 'input' event, which IS what React listens for. \"contenteditable-text\" is for a contenteditable div (not yet implemented as of schemaVersion 1 - a recipe requesting it will fail loudly at runtime, not silently misbehave; only declare it if you've confirmed a future version implements it)."
+          "description": "How to set the input's text so the site's own framework notices the change. \"native-value-setter\" is for a real <textarea>/<input> whose value is controlled by a JS framework (React, etc.) - plain `el.value = text` is silently ignored, so this strategy sets the value via the native property setter (Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set) and then dispatches a bubbling 'input' event, which IS what React listens for. \"contenteditable-text\" is for a contenteditable div (e.g. a Quill-based editor, as Gemini uses) - sets the text via document.execCommand('insertText', ...) after selecting all existing content, which keeps a rich-text editor's own internal model in sync with the DOM (directly setting .textContent/.innerHTML does not)."
         }
       }
     },

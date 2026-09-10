@@ -185,6 +185,50 @@ of the process above, not a first guess. If DeepSeek's UI changes and this
 recipe breaks, repeat this same workflow against the new DOM rather than
 patching the JSON blind.
 
+## Second worked example: `gemini.json` (gemini.google.com)
+
+Authored the same way, using the extension's own "extension" channel and
+`inject_script` against the live Gemini tab. Differences from DeepSeek worth
+noting, since they validate the general workflow generalizes:
+
+1. **Input is `contenteditable`, not a `<textarea>`.** Gemini's prompt box
+   is a Quill editor: `.ql-editor[aria-label="Enter a prompt for Gemini"]`.
+   This is what prompted implementing `setVia: "contenteditable-text"` for
+   real (it existed in the schema as a stub before this). Tested live:
+   `el.focus()` then `document.execCommand('selectAll', false, null)` then
+   `document.execCommand('insertText', false, text)` correctly updates
+   Quill's internal model (visible as a proper `<p>` child, not just raw
+   text) - confirmed by checking the send button's enabled state changed
+   afterward.
+
+2. **DEAD END, found immediately**: sending `execCommand(...)` insert text
+   and `submitButton.click()` in the SAME synchronous script (same
+   `inject_script` call) silently did not send the message - the text sat
+   in the input, unsent, with no error. A near-identical follow-up call
+   (same code, run moments later as a separate `inject_script` call) worked
+   fine. This points to Gemini's Angular change-detection cycle needing a
+   tick to catch up with the `execCommand`-driven DOM change before the
+   click is recognized as acting on a "ready" state - a same-tick call
+   races it. **Fix baked into the engine** (not recipe-specific): `sendMessage`
+   now always awaits a short delay (150ms) between setting the input and
+   clicking submit, for both `setVia` strategies (harmless for
+   `native-value-setter`, necessary for `contenteditable-text`).
+
+3. **Completion signal found on the first try**: `button[aria-label="Stop
+   response"]` appears while generating and disappears the instant it's
+   done - confirmed by polling reply length every second while a real
+   message streamed (`button-reappears`, no need to fall back to
+   `idle-mutation`). This is the ideal case flagged in step 6 of the main
+   workflow above - always check for this before settling for polling text
+   stability.
+
+4. **Reply container**: `.model-response-text` - found by broadly querying
+   `[class*="response"], [class*="message"]` after sending a real message
+   (Gemini's DOM is deeply nested with custom elements like
+   `MODEL-RESPONSE`/`RESPONSE-CONTAINER`; this class is the one that holds
+   ONLY the clean reply text, not the "You said"/"Gemini said"
+   screen-reader-prefixed wrapper text one level up).
+
 ## General lessons for the NEXT recipe (any new chat site)
 
 - Always get a live probe (`inject_script` via the extension channel) into
@@ -205,3 +249,11 @@ patching the JSON blind.
   multi-round automated session, not a single short manual test - failure
   modes specific to sustained/complex replies (long thinking pauses,
   multi-paragraph answers) often don't show up in a quick manual check.
+- If a "type text then click submit" test silently does nothing (no error,
+  text just sits there unsent), suspect a same-tick race between the
+  framework's change-detection reacting to the input update and the click
+  being processed - not a wrong selector. Re-running the exact same click
+  as a SEPARATE call a moment later is a good diagnostic: if that works,
+  it's a timing issue, not a selector issue (the engine already bakes in a
+  short delay between setting input and clicking submit for exactly this
+  reason - see the Gemini section above).
