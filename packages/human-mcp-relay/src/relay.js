@@ -367,6 +367,19 @@ class HumanMcpRelay extends LitElement {
     return formatResult(await this._runCall(text, expectedSession), expectedSession);
   }
 
+  // Programmatic counterpart to the popup's "Copy primer" button (see
+  // window.__humanMcpRelay.getPrimer below) - same buildPrimer call
+  // _refreshPrimer uses, but returned directly rather than staged into
+  // this.primerText/the popup UI, so an automated caller can fetch the
+  // current primer without opening the popup at all.
+  getPrimerText() {
+    if (this._tools.length === 0) return '';
+    return buildPrimer(this._tools, {
+      appName: document.title,
+      sessionName: this.sessionName,
+    });
+  }
+
   render() {
     if (!this.open) return html``;
 
@@ -447,5 +460,10 @@ window.__humanMcpRelay = {
     let el = document.querySelector('human-mcp-relay');
     if (!el) throw new Error('human-mcp-relay element not found on this page.');
     return el.runCallText(text, sessionName ?? el.sessionName);
+  },
+  getPrimer: () => {
+    let el = document.querySelector('human-mcp-relay');
+    if (!el) throw new Error('human-mcp-relay element not found on this page.');
+    return el.getPrimerText();
   },
 };

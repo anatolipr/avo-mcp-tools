@@ -70,6 +70,15 @@ format a human would otherwise copy out of the popup by hand. This does not
 touch the clipboard or the popup's own paste/result UI state; it's a separate
 entry point into the same call-dispatch logic.
 
+```js
+const primerText = window.__humanMcpRelay.getPrimer();
+```
+
+Returns the current pasteable Markdown primer — the same text the popup's
+"Copy primer" button copies — built fresh from `window.__mcpTools` each call.
+Returns `''` if no tools are currently exposed. Also does not touch the
+clipboard.
+
 ## Files
 
 - `src/relay.js` — the `<human-mcp-relay>` Lit element, popup UI, keyboard
