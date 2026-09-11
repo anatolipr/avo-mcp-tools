@@ -180,7 +180,7 @@ export function startMessageHandler(onConsoleCapture: (tabId: number, level: str
     }
 
     if (message.type === 'add-app-tab') {
-      handleAddAppTab(message.chatTabId, message.appTabId)
+      handleAddAppTab(message.chatTabId, message.appTabId, message.assignTag)
         .then((result) => sendResponse(result satisfies AddAppTabResult))
         .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies AddAppTabResult));
       return true;
@@ -298,7 +298,28 @@ async function handleRelayListAppTabs(chatTabId: number): Promise<RelayListAppTa
 // the app tab has no human-mcp-relay loaded, or its tag is already bridged
 // (checked both here, defense in depth, and by win.__mcpRelayAddAppTab
 // itself inside the chat tab).
-async function handleAddAppTab(chatTabId: number, appTabId: number): Promise<AddAppTabResult> {
+//
+// `assignTag`, if given (see relay-panel.ts's inline prompt), is written
+// into the app tab's OWN human-mcp-relay via window.__humanMcpRelay.
+// setSessionName BEFORE fetching its primer - two untagged app tabs are
+// indistinguishable both to this loop's routing map and to the LLM's own
+// sentinel-tag protocol, so a second app tab with no name of its own MUST
+// be given one before it can be usefully added; the popup is expected to
+// have already confirmed this is needed (via relay-ping-tab's sessionName)
+// before sending assignTag, but this also works as a plain rename even when
+// not strictly required. Setting it here (not just passing it as this
+// call's own tag) keeps that app tab's own popup UI in sync with what the
+// LLM is told to call it - see relay.js's setSessionName comment.
+async function handleAddAppTab(chatTabId: number, appTabId: number, assignTag?: string): Promise<AddAppTabResult> {
+  if (assignTag) {
+    try {
+      const setNameCode = "if (typeof window.__humanMcpRelay?.setSessionName !== 'function') { throw new Error('This tab\\'s human-mcp-relay is too old to support setSessionName - reload the tab to pick up the latest version.'); } window.__humanMcpRelay.setSessionName(" + JSON.stringify(assignTag) + ');';
+      await injectScriptOnce(appTabId, setNameCode);
+    } catch (err) {
+      return { ok: false, error: String((err as Error)?.message ?? err) };
+    }
+  }
+
   const ping = await pingAppTab(appTabId);
   if (!ping?.ok) return { ok: false, error: 'The selected tab does not appear to have human-mcp-relay loaded (ping failed).' };
   const appTag = ping.sessionName ?? '';

@@ -37,6 +37,16 @@ interface TabOption {
   hostname: string;
 }
 
+// A TabOption that has also been pinged (see #onFindAddCandidates) and
+// carries what that ping reported for the app's own human-mcp-relay session
+// name - '' means the human never set one, which #onAddAppTab uses to
+// decide whether to require a fresh one before allowing the add (see its
+// own comment for why untagged can't just be silently allowed once a first
+// app tab is already bridged).
+interface AddCandidate extends TabOption {
+  sessionName: string;
+}
+
 export class RelayPanel extends LitElement {
   static styles = css`
     :host {
@@ -98,6 +108,12 @@ export class RelayPanel extends LitElement {
       margin: 0;
       padding: 2px 6px;
     }
+    li em {
+      font-style: normal;
+      color: light-dark(#666666, #a3a3a3);
+      font-size: 11px;
+      white-space: nowrap;
+    }
     .errors {
       font-size: 11px;
       color: light-dark(#991b1b, #fecaca);
@@ -138,13 +154,17 @@ export class RelayPanel extends LitElement {
   // once; empty-but-defined means "checked, no bridge active yet."
   #bridgedAppTabs = new Signal<Record<string, number> | undefined>(undefined);
   // Vetted candidates for "Add app tab": open tabs (minus the chat tab and
-  // any already-bridged app tab) that responded ok to a ping. Populated by
-  // #refreshAddCandidates, which the human triggers explicitly (pinging
-  // every open tab on every popup render would be wasteful) via a "Find app
-  // tabs" button.
-  #addCandidates = new Signal<TabOption[]>([]);
+  // any already-bridged app tab) that responded ok to a ping - see
+  // #onFindAddCandidates, which runs automatically once a bridge is
+  // detected/started (#refreshBridgedAppTabs) and again on demand via
+  // "Rescan open tabs".
+  #addCandidates = new Signal<AddCandidate[]>([]);
   #addCandidatesChecked = new Signal<boolean>(false);
   #selectedAddTabId = new Signal<string>('');
+  // Human-entered tag for the selected candidate, shown only when that
+  // candidate's own sessionName came back empty from the ping - see
+  // #renderAddAppTab and #onAddAppTab.
+  #newTagInput = new Signal<string>('');
 
   constructor() {
     super();
@@ -153,7 +173,37 @@ export class RelayPanel extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    void Promise.all([this.#loadRecipes(), this.#loadTabs()]);
+    void (async () => {
+      await Promise.all([this.#loadRecipes(), this.#loadTabs()]);
+      await this.#detectRunningBridge();
+    })();
+  }
+
+  // Auto-detects an already-running bridge on popup open, so "Add app tab"
+  // is available immediately without the human having to re-pick the same
+  // chat tab from the dropdown every time they reopen the popup (which
+  // wouldn't even work as a fix on its own - re-selecting the same value
+  // doesn't fire a native <select> change event, and there was previously no
+  // read of the chat tab's own state on open at all). Consistent with this
+  // package's stateless design: nothing is remembered by the popup itself:
+  // every open tab is probed fresh via relay-check-status (a one-shot read
+  // of that tab's own win.__mcpRelayLoopActive - see relay-chat-loop.ts), and
+  // whichever tab (if any) reports itself active is what gets pre-selected.
+  // If more than one tab happens to have an active loop (a human bridged
+  // more than one chat tab separately), none is auto-picked - that's
+  // ambiguous, so the human still chooses manually in that case.
+  async #detectRunningBridge(): Promise<void> {
+    const results = await Promise.all(
+      this.#tabs.value.map(async (tab) => {
+        const res: RelayCheckStatusResult = await chrome.runtime.sendMessage({ type: 'relay-check-status', chatTabId: tab.id });
+        return res.active ? tab : undefined;
+      })
+    );
+    const active = results.filter((t): t is TabOption => t !== undefined);
+    const [onlyActiveTab] = active;
+    if (active.length !== 1 || !onlyActiveTab) return;
+    this.#chatTabId.set(String(onlyActiveTab.id));
+    await this.#refreshBridgedAppTabs();
   }
 
   async #loadRecipes(): Promise<void> {
@@ -175,6 +225,15 @@ export class RelayPanel extends LitElement {
       }
     }
     this.#tabs.set(options);
+  }
+
+  // Whether the currently-selected chat tab already has a bridge running -
+  // used to hide the "Start bridging" fields (app tab / recipe / button)
+  // once they're no longer relevant, replaced by the "Add app tab" section
+  // below. Same underlying signal #renderAddAppTab already gates on.
+  get #bridgeIsActive(): boolean {
+    const bridged = this.#bridgedAppTabs.value;
+    return !!bridged && Object.keys(bridged).length > 0;
   }
 
   #setStatus(text: string, isError = false): void {
@@ -236,7 +295,13 @@ export class RelayPanel extends LitElement {
   // Reads the selected chat tab's own win.__mcpRelayAppTabs (see
   // relay-chat-loop.ts) so the "Add app tab" section can show what's
   // already bridged and exclude those tabs from candidates. Called after
-  // picking a chat tab and after every successful Start/Add, never polled.
+  // picking a chat tab, after every successful Start/Add, and once on popup
+  // open if a running bridge was auto-detected (#detectRunningBridge).
+  // Immediately kicks off candidate discovery too (see
+  // #onFindAddCandidates) so the "Add app tab" picker is ready the moment
+  // its section appears, rather than needing a separate manual scan click
+  // first - a human reopening the popup on an active bridge should see
+  // everything they need in one screen.
   async #refreshBridgedAppTabs(): Promise<void> {
     const chatTabId = Number(this.#chatTabId.value);
     if (!chatTabId) {
@@ -244,7 +309,17 @@ export class RelayPanel extends LitElement {
       return;
     }
     const res: RelayListAppTabsResult = await chrome.runtime.sendMessage({ type: 'relay-list-app-tabs', chatTabId });
-    this.#bridgedAppTabs.set(res.active ? res.appTabs : {});
+    const appTabs = res.active ? res.appTabs : {};
+    this.#bridgedAppTabs.set(appTabs);
+    if (Object.keys(appTabs).length > 0) await this.#onFindAddCandidates();
+  }
+
+  // Resolves a bridged app tab's id to its current title via the already-
+  // loaded #tabs list (from #loadTabs) - falls back to the raw id only if
+  // that tab isn't in the list anymore (e.g. closed since bridging it,
+  // which the loop itself has no way to detect since it only holds ids).
+  #titleForTabId(tabId: number): string {
+    return this.#tabs.value.find((t) => t.id === tabId)?.title ?? `tab ${tabId}`;
   }
 
   async #onStartBridging(): Promise<void> {
@@ -290,12 +365,27 @@ export class RelayPanel extends LitElement {
     const results = await Promise.all(
       candidates.map(async (tab) => {
         const res: RelayPingTabResult = await chrome.runtime.sendMessage({ type: 'relay-ping-tab', tabId: tab.id });
-        return res.ok ? tab : undefined;
+        return res.ok ? { ...tab, sessionName: res.sessionName ?? '' } : undefined;
       })
     );
-    this.#addCandidates.set(results.filter((t): t is TabOption => t !== undefined));
+    this.#addCandidates.set(results.filter((t): t is AddCandidate => t !== undefined));
     this.#addCandidatesChecked.set(true);
     this.#setStatus(`Found ${this.#addCandidates.value.length} bridgeable tab(s).`);
+  }
+
+  // Two untagged app tabs can never be told apart - neither by this loop's
+  // own tag -> tab map, nor by the LLM reading HUMAN-MCP CALL/RESULT
+  // sentinels (see human-mcp-relay/protocol.js's [sessionName] tagging).
+  // Since ANY already-bridged app tab existing means the current selection
+  // would collide with it whenever both are untagged, a candidate with no
+  // session name of its own requires the human to type one here - sent
+  // through as add-app-tab's assignTag, which the background writes into
+  // that tab's own human-mcp-relay via setSessionName BEFORE bridging it
+  // (see message-handler.ts's handleAddAppTab), so that tab's own popup
+  // stays in sync with what the LLM is told to call it.
+  get #selectedCandidateNeedsTag(): boolean {
+    const candidate = this.#addCandidates.value.find((t) => String(t.id) === this.#selectedAddTabId.value);
+    return !!candidate && !candidate.sessionName;
   }
 
   async #onAddAppTab(): Promise<void> {
@@ -305,11 +395,22 @@ export class RelayPanel extends LitElement {
       this.#setStatus('Pick a tab to add first.', true);
       return;
     }
+    const assignTag = this.#newTagInput.value.trim();
+    if (this.#selectedCandidateNeedsTag && !assignTag) {
+      this.#setStatus('This tab has no session name set - type one above so the agent can address it distinctly.', true);
+      return;
+    }
     this.#setStatus('Adding…');
-    const res: AddAppTabResult = await chrome.runtime.sendMessage({ type: 'add-app-tab', chatTabId, appTabId });
+    const res: AddAppTabResult = await chrome.runtime.sendMessage({
+      type: 'add-app-tab',
+      chatTabId,
+      appTabId,
+      assignTag: assignTag || undefined,
+    });
     this.#setStatus(res.ok ? 'App tab added.' : `Failed: ${res.error}`, !res.ok);
     if (res.ok) {
       this.#selectedAddTabId.set('');
+      this.#newTagInput.set('');
       this.#addCandidates.set(this.#addCandidates.value.filter((t) => t.id !== appTabId));
       await this.#refreshBridgedAppTabs();
     }
@@ -374,19 +475,23 @@ export class RelayPanel extends LitElement {
         <option value="">— pick a tab —</option>
         ${this.#tabs.value.map((t) => html`<option value=${t.id}>${t.title}</option>`)}
       </select>
-      <label for="app-tab-select">App tab (running human-mcp-relay)</label>
-      <select id="app-tab-select" .value=${this.#appTabId.value} @change=${(e: Event) => this.#appTabId.set((e.target as HTMLSelectElement).value)}>
-        <option value="">— pick a tab —</option>
-        ${this.#tabs.value
-          .filter((t) => String(t.id) !== this.#chatTabId.value)
-          .map((t) => html`<option value=${t.id}>${t.title}</option>`)}
-      </select>
-      <label for="recipe-select">Recipe</label>
-      <select id="recipe-select" .value=${this.#selectedRecipeId.value} @change=${(e: Event) => this.#selectedRecipeId.set((e.target as HTMLSelectElement).value)}>
-        <option value="">— pick a recipe —</option>
-        ${this.#recipes.value.map((r) => html`<option value=${r.id}>${r.displayName ?? r.hostname}</option>`)}
-      </select>
-      <button @click=${() => this.#onStartBridging()}>Start bridging</button>
+      ${this.#bridgeIsActive
+        ? ''
+        : html`
+            <label for="app-tab-select">App tab (running human-mcp-relay)</label>
+            <select id="app-tab-select" .value=${this.#appTabId.value} @change=${(e: Event) => this.#appTabId.set((e.target as HTMLSelectElement).value)}>
+              <option value="">— pick a tab —</option>
+              ${this.#tabs.value
+                .filter((t) => String(t.id) !== this.#chatTabId.value)
+                .map((t) => html`<option value=${t.id}>${t.title}</option>`)}
+            </select>
+            <label for="recipe-select">Recipe</label>
+            <select id="recipe-select" .value=${this.#selectedRecipeId.value} @change=${(e: Event) => this.#selectedRecipeId.set((e.target as HTMLSelectElement).value)}>
+              <option value="">— pick a recipe —</option>
+              ${this.#recipes.value.map((r) => html`<option value=${r.id}>${r.displayName ?? r.hostname}</option>`)}
+            </select>
+            <button @click=${() => this.#onStartBridging()}>Start bridging</button>
+          `}
       <button class="secondary" @click=${() => this.#onCheckStatus()}>Check status</button>
       <button class="secondary" @click=${() => this.#onReloadChatTab()}>Reload chat tab (stops any running bridge)</button>
       <div class="status ${this.#statusIsError.value ? 'error' : ''}">${this.#statusText.value}</div>
@@ -410,29 +515,44 @@ export class RelayPanel extends LitElement {
     return html`
       <hr />
       <h2>Add app tab</h2>
+      <p class="status">Bridged app tabs:</p>
       <ul>
         ${Object.entries(bridged).map(
-          ([tag, tabId]) => html`<li><span>${tag || '(untagged)'} → tab ${tabId}</span></li>`
+          ([tag, tabId]) => html`<li><span>${this.#titleForTabId(tabId)} ${tag ? html`<em>[${tag}]</em>` : html`<em>[untagged]</em>`}</span></li>`
         )}
       </ul>
-      <button class="secondary" @click=${() => this.#onFindAddCandidates()}>Find app tabs</button>
       ${this.#addCandidatesChecked.value
         ? html`
             <label for="add-tab-select">Tab to add</label>
             <select
               id="add-tab-select"
               .value=${this.#selectedAddTabId.value}
-              @change=${(e: Event) => this.#selectedAddTabId.set((e.target as HTMLSelectElement).value)}
+              @change=${(e: Event) => {
+                this.#selectedAddTabId.set((e.target as HTMLSelectElement).value);
+                this.#newTagInput.set('');
+              }}
             >
               <option value="">— pick a tab —</option>
-              ${this.#addCandidates.value.map((t) => html`<option value=${t.id}>${t.title}</option>`)}
+              ${this.#addCandidates.value.map((t) => html`<option value=${t.id}>${t.title}${t.sessionName ? ` [${t.sessionName}]` : ''}</option>`)}
             </select>
             ${this.#addCandidates.value.length === 0
               ? html`<div class="status">No open tabs responded as human-mcp-relay-ready.</div>`
               : ''}
+            ${this.#selectedCandidateNeedsTag
+              ? html`
+                  <label for="new-tag-input">Session name for this app (required - lets the agent address it distinctly)</label>
+                  <input
+                    id="new-tag-input"
+                    type="text"
+                    placeholder="e.g. htmlpaint2"
+                    .value=${this.#newTagInput.value}
+                    @input=${(e: Event) => this.#newTagInput.set((e.target as HTMLInputElement).value)}
+                  />
+                `
+              : ''}
             <button @click=${() => this.#onAddAppTab()}>Add app tab</button>
-          `
-        : ''}
+            <button class="secondary" @click=${() => this.#onFindAddCandidates()}>Rescan open tabs</button>`
+        : html`<div class="status">Scanning open tabs…</div>`}
     `;
   }
 }

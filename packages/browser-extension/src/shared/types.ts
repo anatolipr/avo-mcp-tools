@@ -39,8 +39,13 @@ export type ExtensionRuntimeMessage =
   // best-effort injectScriptOnce read start-relay-bridge already does) and
   // hands it to the chat tab's own win.__mcpRelayAddAppTab, which enqueues
   // it as a chat message and registers the tag -> tab id mapping - all
-  // still inside that one page's realm, not the background.
-  | { type: 'add-app-tab'; chatTabId: number; appTabId: number };
+  // still inside that one page's realm, not the background. `assignTag`,
+  // if given, is written into the app tab's own human-mcp-relay via
+  // setSessionName BEFORE anything else - required when that tab's
+  // sessionName is empty (two untagged app tabs can never be routed to or
+  // addressed by the LLM distinctly), and the popup is expected to have
+  // already prompted for it in that case (see relay-panel.ts).
+  | { type: 'add-app-tab'; chatTabId: number; appTabId: number; assignTag?: string };
 
 export interface ConnectActiveTabResult {
   ok: boolean;

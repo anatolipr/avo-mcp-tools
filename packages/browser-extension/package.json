@@ -1,6 +1,6 @@
 {
   "name": "browser-extension",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Chrome/Firefox WebExtension for js-bridge-mcp: keeps a page's connection alive across reloads/navigations, and exposes the extension itself as a persistent tool-provider channel.",

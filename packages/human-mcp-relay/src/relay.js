@@ -23,7 +23,7 @@ const OPEN_SHORTCUT = {key: 'a', metaOrCtrl: true, shift: true};
 // (runs via prepublishOnly) - this file is loaded standalone via jsDelivr
 // (see header comment), not bundled, so it can't import package.json at
 // runtime.
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 
 // Persisted per-origin so a given app's tab remembers its session name
 // across reloads/reopens of the popup - set once when bridging multiple apps
@@ -239,7 +239,17 @@ class HumanMcpRelay extends LitElement {
   }
 
   _onSessionNameInput(e) {
-    this.sessionName = e.target.value;
+    this.setSessionName(e.target.value);
+  }
+
+  // Sets sessionName and persists it exactly like the popup's own "Session
+  // name" input does - factored out so window.__humanMcpRelay.setSessionName
+  // (below) can drive the SAME state an automated caller (e.g. the browser
+  // extension's "Add app tab" flow, which has no way to type into this
+  // page's own popup UI) reaches, keeping this tab's popup and the
+  // extension's routing tag from ever disagreeing about this tab's name.
+  setSessionName(name) {
+    this.sessionName = name;
     try {
       if (this.sessionName) {
         localStorage.setItem(SESSION_NAME_STORAGE_KEY, this.sessionName);
@@ -487,5 +497,17 @@ window.__humanMcpRelay = {
   ping: () => {
     let el = document.querySelector('human-mcp-relay');
     return { ok: !!el, version: VERSION, sessionName: el?.sessionName || '' };
+  },
+  // Programmatic counterpart to typing into the popup's own "Session name"
+  // field - for an automated caller with no way to reach that input (e.g.
+  // the browser extension's "Add app tab" flow, which prompts for a name on
+  // the human's behalf instead of asking them to switch to this tab and
+  // open its popup first). Goes through the SAME setSessionName the input
+  // itself uses, so this tab's own popup (if later opened) shows the name
+  // that was actually set, and it survives a reload the same way.
+  setSessionName: (name) => {
+    let el = document.querySelector('human-mcp-relay');
+    if (!el) throw new Error('human-mcp-relay element not found on this page.');
+    el.setSessionName(name);
   },
 };
