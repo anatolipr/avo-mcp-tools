@@ -27,6 +27,7 @@
 // through `globalThis as any` since this file compiles under
 // tsconfig.background.json (webworker lib, no DOM lib).
 import type { CompletionConfig, Recipe, SetViaStrategy } from '../shared/recipe-types.js';
+import { EXTENSION_APP_TAB_SENTINEL } from '../shared/constants.js';
 
 export interface ChatLoopConfig {
   // The first app tab bridged at "Start bridging" time, keyed by its
@@ -53,6 +54,15 @@ export interface ChatLoopConfig {
   // window.__humanMcpRelay wasn't found there) - the human is expected to
   // paste it manually in that case, same as before this existed.
   initialPrimer?: string;
+  // Reserved app-tab id meaning "route to the extension's own host tools,
+  // not a real tab" (see shared/constants.ts's EXTENSION_APP_TAB_SENTINEL).
+  // Threaded through config rather than hardcoded as a literal inside
+  // chatLoopMainFunction's injected source text, since that function can't
+  // import shared/constants.ts (its source is serialized as a string for
+  // chrome.scripting.executeScript - see this file's header comment) and a
+  // hand-duplicated literal would risk silently drifting out of sync with
+  // the real constant.
+  extensionAppTabSentinel: number;
 }
 
 export function buildChatLoopConfig(appTabId: number, appTag: string, recipe: Recipe, initialPrimer?: string): ChatLoopConfig {
@@ -67,6 +77,7 @@ export function buildChatLoopConfig(appTabId: number, appTag: string, recipe: Re
     startSentinel: recipe.callBlock?.startSentinel ?? 'HUMAN-MCP CALL',
     endSentinel: recipe.callBlock?.endSentinel ?? 'HUMAN-MCP END',
     initialPrimer,
+    extensionAppTabSentinel: EXTENSION_APP_TAB_SENTINEL,
   };
 }
 
@@ -95,6 +106,7 @@ export function chatLoopMainFunction(configJson: string): void {
     startSentinel: string;
     endSentinel: string;
     initialPrimer?: string;
+    extensionAppTabSentinel: number;
   };
 
   const doc = (globalThis as any).document;
@@ -402,10 +414,17 @@ export function chatLoopMainFunction(configJson: string): void {
       );
     }
     const requestId = 'req-' + Math.random().toString(36).slice(2) + '-' + Date.now();
+    // For the extension sentinel, `code` is the RAW call text, not an
+    // injectable JS snippet - message-handler.ts's relay-bus-forward handler
+    // recognizes this targetTabId and hands `code` straight to
+    // runCallAgainstHostTools instead of injecting it into any tab (there is
+    // no page to inject into for this target).
     const code =
-      "return (async () => { if (!window.__humanMcpRelay) { throw new Error('window.__humanMcpRelay not found on this tab - is human-mcp-relay loaded here?'); } return await window.__humanMcpRelay.runCall(" +
-      JSON.stringify(callText) +
-      '); })();';
+      targetTabId === config.extensionAppTabSentinel
+        ? callText
+        : "return (async () => { if (!window.__humanMcpRelay) { throw new Error('window.__humanMcpRelay not found on this tab - is human-mcp-relay loaded here?'); } return await window.__humanMcpRelay.runCall(" +
+          JSON.stringify(callText) +
+          '); })();';
     return new Promise((resolve, reject) => {
       function onResponse(event: Event) {
         const detail = (event as CustomEvent).detail as { requestId: string; result?: string; error?: string };

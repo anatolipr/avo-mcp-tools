@@ -24,3 +24,11 @@ export const EXTENSION_CHANNEL_STORAGE_KEY = 'extension-channel';
 // chrome.storage.local key prefix for chat-relay recipes (see
 // src/background/relay-recipes-storage.ts, src/shared/recipe-types.ts).
 export const RELAY_RECIPE_KEY_PREFIX = 'relay-recipe:';
+
+// Reserved "app tab id" meaning "the extension's own host tools" (see
+// host-tool-relay.ts), used wherever a real chrome.tabs.Tab.id is otherwise
+// expected in the chat-relay bridging flow (relay-panel.ts's app-tab
+// pickers, message-handler.ts's start-relay-bridge/add-app-tab/relay-bus-
+// forward handlers, relay-chat-loop.ts's forwardToAppTab). Real tab ids are
+// always positive, so -1 can never collide with one.
+export const EXTENSION_APP_TAB_SENTINEL = -1;

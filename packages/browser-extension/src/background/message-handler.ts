@@ -11,6 +11,9 @@ import type {
   RelayPingTabResult,
   RelayListAppTabsResult,
   AddAppTabResult,
+  RunHostToolCallResult,
+  GetRelayPrimerResult,
+  SetExtensionSessionNameResult,
 } from '../shared/types.js';
 import { injectConnectSnippet, changeChannel, renameConnection, disconnectTab, tabAlreadyConnected } from './connect-tab.js';
 import { getKnownOrigin, setKnownOrigin, deleteKnownOrigin } from './storage.js';
@@ -18,11 +21,12 @@ import { markTabConnected } from './auto-reconnect.js';
 import { lookupPersistentScriptsForUrl, injectScriptOnce } from './script-injection.js';
 import { refreshBadgeForActiveTab } from './connection-badge.js';
 import { recordConnectedTab, forgetConnectedTab } from './connected-tabs.js';
-import { JSBRIDGE_HOST } from '../shared/constants.js';
+import { JSBRIDGE_HOST, EXTENSION_APP_TAB_SENTINEL } from '../shared/constants.js';
 import { listRecipes, saveRecipe, deleteRecipe, listRecipeIds, getRecipe } from './relay-recipes-storage.js';
 import { validateRecipe } from '../shared/recipe-validator.js';
 import { buildChatLoopConfig, chatLoopMainFunction } from './relay-chat-loop.js';
 import { relayBusIsolatedFunction } from './relay-bus-isolated.js';
+import { runCallAgainstHostTools, buildExtensionPrimer, getExtensionSessionName, setExtensionSessionName } from './host-tool-relay.js';
 
 // Structural subset of mcp-tenant-lib's DashboardChannel (dashboard.ts) - see
 // popup.ts's own former copy of this comment (now folded into the shared
@@ -147,11 +151,22 @@ export function startMessageHandler(onConsoleCapture: (tabId: number, level: str
     }
 
     if (message.type === 'relay-bus-forward') {
-      // OPAQUE transport - `message.code` is never inspected or parsed
-      // here, only forwarded to the target tab via the existing
-      // injectScriptOnce. See relay-chat-loop.ts's header comment: this
-      // handler has no idea it's carrying a HUMAN-MCP CALL/RESULT, and
-      // that's by design.
+      // OPAQUE transport for a real tab target - `message.code` is never
+      // inspected or parsed here, only forwarded via injectScriptOnce. See
+      // relay-chat-loop.ts's header comment: this handler has no idea it's
+      // carrying a HUMAN-MCP CALL/RESULT, and that's by design.
+      //
+      // The one deliberate exception: EXTENSION_APP_TAB_SENTINEL means
+      // there's no tab to inject into at all - relay-chat-loop.ts's
+      // forwardToAppTab sends the RAW HUMAN-MCP CALL text as `code` in this
+      // case (not an injectable JS snippet), so it can go straight to
+      // runCallAgainstHostTools instead.
+      if (message.targetTabId === EXTENSION_APP_TAB_SENTINEL) {
+        runCallAgainstHostTools(message.code, getExtensionSessionName())
+          .then((result) => sendResponse({ ok: true, result } satisfies RelayBusForwardResult))
+          .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies RelayBusForwardResult));
+        return true;
+      }
       injectScriptOnce(message.targetTabId, message.code)
         .then((result) => sendResponse({ ok: true, result: typeof result === 'string' ? result : String(result) } satisfies RelayBusForwardResult))
         .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies RelayBusForwardResult));
@@ -184,6 +199,28 @@ export function startMessageHandler(onConsoleCapture: (tabId: number, level: str
         .then((result) => sendResponse(result satisfies AddAppTabResult))
         .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies AddAppTabResult));
       return true;
+    }
+
+    if (message.type === 'run-host-tool-call') {
+      runCallAgainstHostTools(message.callText, message.sessionName)
+        .then((resultText) => sendResponse({ ok: true, resultText } satisfies RunHostToolCallResult))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies RunHostToolCallResult));
+      return true;
+    }
+
+    if (message.type === 'get-relay-primer') {
+      try {
+        sendResponse({ ok: true, primer: buildExtensionPrimer(message.sessionName) } satisfies GetRelayPrimerResult);
+      } catch (err) {
+        sendResponse({ ok: false, error: String((err as Error)?.message ?? err) } satisfies GetRelayPrimerResult);
+      }
+      return false;
+    }
+
+    if (message.type === 'set-extension-session-name') {
+      setExtensionSessionName(message.tag);
+      sendResponse({ ok: true } satisfies SetExtensionSessionNameResult);
+      return false;
     }
 
     return false;
@@ -234,12 +271,16 @@ async function handleStartRelayBridge(chatTabId: number, appTabId: number, recip
   // already pasted a primer manually in that case, same as before this
   // existed, so start-relay-bridge still succeeds either way.
   let initialPrimer: string | undefined;
-  try {
-    const primerCode = "return (typeof window.__humanMcpRelay?.getPrimer === 'function') ? window.__humanMcpRelay.getPrimer() : undefined;";
-    const result = await injectScriptOnce(appTabId, primerCode);
-    if (typeof result === 'string' && result.length > 0) initialPrimer = result;
-  } catch {
-    // ignored - see comment above
+  if (appTabId === EXTENSION_APP_TAB_SENTINEL) {
+    initialPrimer = buildExtensionPrimer();
+  } else {
+    try {
+      const primerCode = "return (typeof window.__humanMcpRelay?.getPrimer === 'function') ? window.__humanMcpRelay.getPrimer() : undefined;";
+      const result = await injectScriptOnce(appTabId, primerCode);
+      if (typeof result === 'string' && result.length > 0) initialPrimer = result;
+    } catch {
+      // ignored - see comment above
+    }
   }
 
   // The app's human-mcp-relay session name (possibly '' if unset) becomes
@@ -276,6 +317,10 @@ async function handleStartRelayBridge(chatTabId: number, appTabId: number, recip
 // unlike a missing primer, a human who explicitly typed a tag expects it to
 // actually be set, not silently dropped.
 async function assignSessionNameOnAppTab(appTabId: number, tag: string): Promise<void> {
+  if (appTabId === EXTENSION_APP_TAB_SENTINEL) {
+    setExtensionSessionName(tag);
+    return;
+  }
   const code =
     "if (typeof window.__humanMcpRelay?.setSessionName !== 'function') { throw new Error('This tab\\'s human-mcp-relay is too old to support setSessionName - reload the tab to pick up the latest version.'); } window.__humanMcpRelay.setSessionName(" +
     JSON.stringify(tag) +
@@ -289,6 +334,11 @@ async function assignSessionNameOnAppTab(appTabId: number, tag: string): Promise
 // Returns undefined (never throws) on any failure - an unreachable or
 // human-mcp-relay-less tab is simply not a valid candidate/tag source.
 async function pingAppTab(tabId: number): Promise<{ ok: boolean; version?: string; sessionName?: string } | undefined> {
+  if (tabId === EXTENSION_APP_TAB_SENTINEL) {
+    // Always ready - there's no real page to reach, so this never fails the
+    // way a closed/navigated-away/unscriptable real tab would.
+    return { ok: true, version: 'extension', sessionName: getExtensionSessionName() };
+  }
   try {
     const code = "return (typeof window.__humanMcpRelay?.ping === 'function') ? JSON.stringify(window.__humanMcpRelay.ping()) : undefined;";
     const result = await injectScriptOnce(tabId, code);
@@ -353,13 +403,17 @@ async function handleAddAppTab(chatTabId: number, appTabId: number, assignTag?: 
   const appTag = ping.sessionName ?? '';
 
   let primer: string | undefined;
-  try {
-    const primerCode = "return (typeof window.__humanMcpRelay?.getPrimer === 'function') ? window.__humanMcpRelay.getPrimer() : undefined;";
-    const result = await injectScriptOnce(appTabId, primerCode);
-    if (typeof result === 'string' && result.length > 0) primer = result;
-  } catch {
-    // Best-effort, same as handleStartRelayBridge - the human can paste it
-    // manually if this fails.
+  if (appTabId === EXTENSION_APP_TAB_SENTINEL) {
+    primer = buildExtensionPrimer();
+  } else {
+    try {
+      const primerCode = "return (typeof window.__humanMcpRelay?.getPrimer === 'function') ? window.__humanMcpRelay.getPrimer() : undefined;";
+      const result = await injectScriptOnce(appTabId, primerCode);
+      if (typeof result === 'string' && result.length > 0) primer = result;
+    } catch {
+      // Best-effort, same as handleStartRelayBridge - the human can paste it
+      // manually if this fails.
+    }
   }
 
   const code =

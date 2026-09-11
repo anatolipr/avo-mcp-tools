@@ -53,7 +53,24 @@ export type ExtensionRuntimeMessage =
   // sessionName is empty (two untagged app tabs can never be routed to or
   // addressed by the LLM distinctly), and the popup is expected to have
   // already prompted for it in that case (see relay-panel.ts).
-  | { type: 'add-app-tab'; chatTabId: number; appTabId: number; assignTag?: string };
+  | { type: 'add-app-tab'; chatTabId: number; appTabId: number; assignTag?: string }
+  // Relay-mode-panel-initiated (and reusable by anything else that wants to
+  // run a HUMAN-MCP CALL against the extension's own tools with no chat-tab
+  // loop involved at all): parses `callText`, dispatches it against
+  // getHostTools(), returns a formatted HUMAN-MCP RESULT string. `sessionName`,
+  // if given, gates the call's own tag the same way a real human-mcp-relay's
+  // expectedSession does (see host-tool-relay.ts's runCallAgainstHostTools).
+  | { type: 'run-host-tool-call'; callText: string; sessionName?: string }
+  // Relay-mode-panel-initiated: returns a ready-to-copy primer built from
+  // getHostTools(), tagged with sessionName if given - the background-side
+  // equivalent of a real app tab's window.__humanMcpRelay.getPrimer().
+  | { type: 'get-relay-primer'; sessionName?: string }
+  // Sets/renames the extension's own session tag (see host-tool-relay.ts's
+  // getExtensionSessionName/setExtensionSessionName) - used both by the
+  // Relay-mode panel's own session-name field and, indirectly, by
+  // message-handler.ts's assignSessionNameOnAppTab when the human names the
+  // extension as a bridged app tab (see relay-panel.ts's sentinel option).
+  | { type: 'set-extension-session-name'; tag: string };
 
 export interface ConnectActiveTabResult {
   ok: boolean;
@@ -166,4 +183,23 @@ export interface RelayListAppTabsResult {
 export interface AddAppTabResult {
   ok: boolean;
   error?: string;
+}
+
+// Response to 'run-host-tool-call'.
+export interface RunHostToolCallResult {
+  ok: boolean;
+  resultText?: string;
+  error?: string;
+}
+
+// Response to 'get-relay-primer'.
+export interface GetRelayPrimerResult {
+  ok: boolean;
+  primer?: string;
+  error?: string;
+}
+
+// Response to 'set-extension-session-name'.
+export interface SetExtensionSessionNameResult {
+  ok: boolean;
 }

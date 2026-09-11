@@ -135,6 +135,13 @@ export class PopupApp extends LitElement {
   #newChannel = new Signal('');
   #appLabel = new Signal('');
   #result = new Signal('');
+  // When true, render() shows ONLY relay-mode-panel (plus a Close button) -
+  // a deliberately uncluttered view for a human to copy a primer/paste a
+  // CALL block, hiding the connect/rename/disconnect UI and <relay-panel>
+  // entirely rather than showing both at once. See relay-mode-panel.ts's
+  // header comment for how this differs from relay-panel.ts's own automated
+  // "extension as app tab" bridging.
+  #relayModeActive = new Signal(false);
 
   constructor() {
     super();
@@ -206,6 +213,13 @@ export class PopupApp extends LitElement {
   }
 
   render() {
+    if (this.#relayModeActive.value) {
+      return html`
+        <button id="relay-close-btn" @click=${() => this.#relayModeActive.set(false)}>← Close relay mode</button>
+        <relay-mode-panel></relay-mode-panel>
+      `;
+    }
+
     const tabStatus = this.#tabStatus.value;
     const channelsError = this.#channelsError.value;
 
@@ -276,6 +290,9 @@ export class PopupApp extends LitElement {
       />
       <button id="connect-btn" ?disabled=${!tabStatus?.connectable} @click=${() => this.#connect()}>Connect</button>
       <div id="result">${this.#result.value}</div>
+
+      <hr />
+      <button id="relay-mode-btn" @click=${() => this.#relayModeActive.set(true)}>Relay — manual copy/paste bridging</button>
 
       <relay-panel></relay-panel>
     `;

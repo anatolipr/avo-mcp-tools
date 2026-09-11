@@ -20,6 +20,6 @@
       "32": "icons/icon32.png"
     }
   },
-  "permissions": ["scripting", "tabs", "webNavigation", "webRequest", "storage", "alarms", "notifications", "debugger"],
+  "permissions": ["scripting", "tabs", "webNavigation", "webRequest", "storage", "alarms", "notifications", "debugger", "clipboardRead", "clipboardWrite"],
   "host_permissions": ["http://localhost:8766/*", "<all_urls>"]
 }

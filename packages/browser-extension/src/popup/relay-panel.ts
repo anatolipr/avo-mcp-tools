@@ -20,6 +20,7 @@
 import { LitElement, html, css } from 'lit';
 import { Signal, SignalWatcher } from 'avosignals';
 import { validateRecipe } from '../shared/recipe-validator.js';
+import { EXTENSION_APP_TAB_SENTINEL } from '../shared/constants.js';
 import type { Recipe } from '../shared/recipe-types.js';
 import type {
   ListRecipesResult,
@@ -324,6 +325,7 @@ export class RelayPanel extends LitElement {
   // that tab isn't in the list anymore (e.g. closed since bridging it,
   // which the loop itself has no way to detect since it only holds ids).
   #titleForTabId(tabId: number): string {
+    if (tabId === EXTENSION_APP_TAB_SENTINEL) return 'This browser extension';
     return this.#tabs.value.find((t) => t.id === tabId)?.title ?? `tab ${tabId}`;
   }
 
@@ -509,6 +511,7 @@ export class RelayPanel extends LitElement {
             <label for="app-tab-select">App tab (running human-mcp-relay)</label>
             <select id="app-tab-select" .value=${this.#appTabId.value} @change=${(e: Event) => this.#onSelectAppTab((e.target as HTMLSelectElement).value)}>
               <option value="">— pick a tab —</option>
+              <option value=${EXTENSION_APP_TAB_SENTINEL}>— This browser extension —</option>
               ${this.#tabs.value
                 .filter((t) => String(t.id) !== this.#chatTabId.value)
                 .map((t) => html`<option value=${t.id}>${t.title}</option>`)}
@@ -566,6 +569,9 @@ export class RelayPanel extends LitElement {
               @change=${(e: Event) => this.#onSelectAddCandidate((e.target as HTMLSelectElement).value)}
             >
               <option value="">— pick a tab —</option>
+              ${!Object.values(bridged).includes(EXTENSION_APP_TAB_SENTINEL)
+                ? html`<option value=${EXTENSION_APP_TAB_SENTINEL}>— This browser extension —</option>`
+                : ''}
               ${this.#addCandidates.value.map((t) => html`<option value=${t.id}>${t.title}${t.sessionName ? ` [${t.sessionName}]` : ''}</option>`)}
             </select>
             ${this.#addCandidates.value.length === 0

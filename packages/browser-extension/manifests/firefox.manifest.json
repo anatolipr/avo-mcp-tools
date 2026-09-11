@@ -20,7 +20,7 @@
       "32": "icons/icon32.png"
     }
   },
-  "permissions": ["scripting", "tabs", "webNavigation", "webRequest", "storage", "alarms", "notifications"],
+  "permissions": ["scripting", "tabs", "webNavigation", "webRequest", "storage", "alarms", "notifications", "clipboardRead", "clipboardWrite"],
   "host_permissions": ["http://localhost:8766/*", "<all_urls>"],
   "browser_specific_settings": {
     "gecko": {
