@@ -6,7 +6,7 @@ export interface ParsedArgs {
   noOpen: boolean;
 }
 
-const DEFAULT_RELAY_URL = 'https://htmlpaint.com/human-mcp/relay.js';
+const DEFAULT_RELAY_URL = 'https://cdn.jsdelivr.net/npm/human-mcp-relay@0/src/relay.js';
 
 export function parseArgs(argv: string[]): ParsedArgs {
   let args: ParsedArgs = {

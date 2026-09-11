@@ -2,9 +2,9 @@
 // Human-relay front end: serves one local page whose window.__mcpTools/
 // __mcpSummary are populated from the SAME ToolRegistry the MCP stdio server
 // uses, then dynamically imports the human-mcp-relay popup (relay.js) from
-// wherever it's hosted (default: htmlpaint.com's copy, override with
-// --relay-url or a local path) - the exact same <human-mcp-relay> component
-// htmlpaint.com/mindfoo use, unmodified, since it's already host-agnostic
+// wherever it's hosted (default: the human-mcp-relay npm package via jsDelivr,
+// override with --relay-url or a local path) - the exact same <human-mcp-relay>
+// component htmlpaint.com/mindfoo use, unmodified, since it's already host-agnostic
 // (reads window.__mcpTools/__mcpSummary, no host-app-specific code).
 //
 // Unlike js-bridge-mcp this never leaves the local machine and only ever

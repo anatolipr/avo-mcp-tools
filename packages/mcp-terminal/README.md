@@ -9,7 +9,7 @@ shared tool registry:
   access (a plain chat session): it hosts `window.__mcpTools` and imports
   the same `<human-mcp-relay>` popup used by htmlpaint.com/mindfoo
   (`human-mcp-relay.js`, loaded live from `--relay-url`, default
-  `https://htmlpaint.com/human-mcp/relay.js`) — copy a primer into the chat,
+  `https://cdn.jsdelivr.net/npm/human-mcp-relay@0/src/relay.js`) — copy a primer into the chat,
   paste `HUMAN-MCP CALL` blocks back into the popup, no new UI to learn if
   you've used that popup before.
 
@@ -85,7 +85,7 @@ Flags (both entry points):
 - `--dir <path>` — sandbox root (default: cwd)
 - `--allow-exec` — enables `run_command` (default: disabled)
 - `--relay-url <url>` — where to import the relay popup from (relay mode
-  only; default `https://htmlpaint.com/human-mcp/relay.js`)
+  only; default `https://cdn.jsdelivr.net/npm/human-mcp-relay@0/src/relay.js`)
 - `--port <n>` — relay server port (relay mode only, default 8799)
 - `--no-open` — don't auto-open a browser tab (relay mode only)
 
