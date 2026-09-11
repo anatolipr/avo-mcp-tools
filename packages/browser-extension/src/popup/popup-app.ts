@@ -1,6 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { Signal, SignalWatcher } from 'avosignals';
-import { JSBRIDGE_HOST, VALID_CHANNEL_NAME } from '../shared/constants.js';
+import { JSBRIDGE_HOST, VALID_CHANNEL_NAME, RELAY_MODE_ACTIVE_STORAGE_KEY } from '../shared/constants.js';
 import type { ConnectActiveTabResult, ActiveTabStatus, ActionResult } from '../shared/types.js';
 
 // Structural subset of mcp-tenant-lib's DashboardChannel (dashboard.ts) -
@@ -152,6 +152,23 @@ export class PopupApp extends LitElement {
     super.connectedCallback();
     void this.#loadTabStatus();
     void this.#loadChannels();
+    void this.#loadRelayModeActive();
+  }
+
+  // Restores whether Relay mode was left open the last time the popup
+  // closed - a browser-action popup is torn down and fully recreated on
+  // every open, so #relayModeActive's own in-memory Signal can't survive
+  // that on its own; persisting the flag in chrome.storage.local (set by
+  // #setRelayModeActive below) is what makes it "stick" until the human
+  // explicitly clicks Close.
+  async #loadRelayModeActive(): Promise<void> {
+    const result = await chrome.storage.local.get(RELAY_MODE_ACTIVE_STORAGE_KEY);
+    this.#relayModeActive.set(!!result[RELAY_MODE_ACTIVE_STORAGE_KEY]);
+  }
+
+  async #setRelayModeActive(active: boolean): Promise<void> {
+    this.#relayModeActive.set(active);
+    await chrome.storage.local.set({ [RELAY_MODE_ACTIVE_STORAGE_KEY]: active });
   }
 
   async #loadTabStatus(): Promise<void> {
@@ -215,7 +232,7 @@ export class PopupApp extends LitElement {
   render() {
     if (this.#relayModeActive.value) {
       return html`
-        <button id="relay-close-btn" @click=${() => this.#relayModeActive.set(false)}>← Close relay mode</button>
+        <button id="relay-close-btn" @click=${() => this.#setRelayModeActive(false)}>← Close relay mode</button>
         <relay-mode-panel></relay-mode-panel>
       `;
     }
@@ -292,7 +309,7 @@ export class PopupApp extends LitElement {
       <div id="result">${this.#result.value}</div>
 
       <hr />
-      <button id="relay-mode-btn" @click=${() => this.#relayModeActive.set(true)}>Relay — manual copy/paste bridging</button>
+      <button id="relay-mode-btn" @click=${() => this.#setRelayModeActive(true)}>Relay — manual copy/paste bridging</button>
 
       <relay-panel></relay-panel>
     `;

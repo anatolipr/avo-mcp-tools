@@ -32,3 +32,11 @@ export const RELAY_RECIPE_KEY_PREFIX = 'relay-recipe:';
 // forward handlers, relay-chat-loop.ts's forwardToAppTab). Real tab ids are
 // always positive, so -1 can never collide with one.
 export const EXTENSION_APP_TAB_SENTINEL = -1;
+
+// chrome.storage.local key for whether the popup's Relay mode view (see
+// relay-mode-panel.ts) was left open - the popup itself is torn down and
+// recreated on every close/reopen (a normal browser-action popup, not a
+// persistent page), so popup-app.ts's own #relayModeActive signal alone
+// can't survive that; this key lets it restore the choice on next open
+// instead of always resetting to the normal view.
+export const RELAY_MODE_ACTIVE_STORAGE_KEY = 'relay-mode-active';
