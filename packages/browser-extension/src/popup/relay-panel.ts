@@ -161,14 +161,14 @@ export class RelayPanel extends LitElement {
   #addCandidates = new Signal<AddCandidate[]>([]);
   #addCandidatesChecked = new Signal<boolean>(false);
   #selectedAddTabId = new Signal<string>('');
-  // Human-entered tag for the selected candidate, shown only when that
-  // candidate's own sessionName came back empty from the ping - see
-  // #renderAddAppTab and #onAddAppTab.
+  // Human-entered/edited session name for the selected "Add app tab"
+  // candidate - always shown and always required (see #onAddAppTab),
+  // pre-filled from that candidate's existing sessionName by
+  // #onSelectAddCandidate so the human can just keep it if it's already
+  // right, or change it.
   #newTagInput = new Signal<string>('');
-  // Optional session name for the FIRST app tab, entered up front in "Start
-  // bridging" rather than discovered later as an empty tag - same field
-  // shape as #newTagInput, but never required (a lone app tab has nothing
-  // to collide with), so #onStartBridging sends it as-is, blank or not.
+  // Same idea as #newTagInput, for the FIRST app tab in "Start bridging" -
+  // pre-filled by #onSelectAppTab, always required (see #onStartBridging).
   #firstAppTagInput = new Signal<string>('');
 
   constructor() {
@@ -327,6 +327,19 @@ export class RelayPanel extends LitElement {
     return this.#tabs.value.find((t) => t.id === tabId)?.title ?? `tab ${tabId}`;
   }
 
+  // Pings the picked app tab so its EXISTING session name (if any) shows up
+  // pre-filled, ready to keep as-is or change - same pattern
+  // #onSelectAddCandidate uses for "Add app tab", now applied to the first
+  // app too for consistency (and because the name is required either way,
+  // see #onStartBridging).
+  async #onSelectAppTab(value: string): Promise<void> {
+    this.#appTabId.set(value);
+    this.#firstAppTagInput.set('');
+    if (!value) return;
+    const res: RelayPingTabResult = await chrome.runtime.sendMessage({ type: 'relay-ping-tab', tabId: Number(value) });
+    if (res.ok) this.#firstAppTagInput.set(res.sessionName ?? '');
+  }
+
   async #onStartBridging(): Promise<void> {
     const chatTabId = Number(this.#chatTabId.value);
     const appTabId = Number(this.#appTabId.value);
@@ -335,14 +348,18 @@ export class RelayPanel extends LitElement {
       this.#setStatus('Pick a chat tab, an app tab, and a recipe first.', true);
       return;
     }
-    this.#setStatus('Starting…');
     const assignTag = this.#firstAppTagInput.value.trim();
+    if (!assignTag) {
+      this.#setStatus('Type a session name for this app so the agent can address it distinctly.', true);
+      return;
+    }
+    this.#setStatus('Starting…');
     const res: StartRelayBridgeResult = await chrome.runtime.sendMessage({
       type: 'start-relay-bridge',
       chatTabId,
       appTabId,
       recipeId,
-      assignTag: assignTag || undefined,
+      assignTag,
     });
     // Fire-and-forget beyond this point: the background holds no session
     // state to poll, and the chat tab's own injected loop runs
@@ -383,19 +400,20 @@ export class RelayPanel extends LitElement {
     this.#setStatus(`Found ${this.#addCandidates.value.length} bridgeable tab(s).`);
   }
 
-  // Two untagged app tabs can never be told apart - neither by this loop's
-  // own tag -> tab map, nor by the LLM reading HUMAN-MCP CALL/RESULT
-  // sentinels (see human-mcp-relay/protocol.js's [sessionName] tagging).
-  // Since ANY already-bridged app tab existing means the current selection
-  // would collide with it whenever both are untagged, a candidate with no
-  // session name of its own requires the human to type one here - sent
-  // through as add-app-tab's assignTag, which the background writes into
-  // that tab's own human-mcp-relay via setSessionName BEFORE bridging it
-  // (see message-handler.ts's handleAddAppTab), so that tab's own popup
-  // stays in sync with what the LLM is told to call it.
-  get #selectedCandidateNeedsTag(): boolean {
-    const candidate = this.#addCandidates.value.find((t) => String(t.id) === this.#selectedAddTabId.value);
-    return !!candidate && !candidate.sessionName;
+  // Always shown for the selected candidate (pre-filled with whatever
+  // session name it already has, if any) rather than only appearing when
+  // empty - keeps "Add app tab" and "Start bridging"'s own tag field
+  // consistent, and lets the human rename an already-tagged app right here
+  // instead of it being invisible. Always REQUIRED regardless: two untagged
+  // app tabs can never be told apart, neither by this loop's own tag -> tab
+  // map nor by the LLM reading HUMAN-MCP CALL/RESULT sentinels (see
+  // human-mcp-relay/protocol.js's [sessionName] tagging), and since some
+  // other app tab is always already bridged by the time "Add app tab" is
+  // even shown, leaving this blank always risks that exact collision.
+  async #onSelectAddCandidate(value: string): Promise<void> {
+    this.#selectedAddTabId.set(value);
+    const candidate = this.#addCandidates.value.find((t) => String(t.id) === value);
+    this.#newTagInput.set(candidate?.sessionName ?? '');
   }
 
   async #onAddAppTab(): Promise<void> {
@@ -406,8 +424,8 @@ export class RelayPanel extends LitElement {
       return;
     }
     const assignTag = this.#newTagInput.value.trim();
-    if (this.#selectedCandidateNeedsTag && !assignTag) {
-      this.#setStatus('This tab has no session name set - type one above so the agent can address it distinctly.', true);
+    if (!assignTag) {
+      this.#setStatus('Type a session name for this app so the agent can address it distinctly.', true);
       return;
     }
     this.#setStatus('Adding…');
@@ -415,7 +433,7 @@ export class RelayPanel extends LitElement {
       type: 'add-app-tab',
       chatTabId,
       appTabId,
-      assignTag: assignTag || undefined,
+      assignTag,
     });
     this.#setStatus(res.ok ? 'App tab added.' : `Failed: ${res.error}`, !res.ok);
     if (res.ok) {
@@ -489,7 +507,7 @@ export class RelayPanel extends LitElement {
         ? ''
         : html`
             <label for="app-tab-select">App tab (running human-mcp-relay)</label>
-            <select id="app-tab-select" .value=${this.#appTabId.value} @change=${(e: Event) => this.#appTabId.set((e.target as HTMLSelectElement).value)}>
+            <select id="app-tab-select" .value=${this.#appTabId.value} @change=${(e: Event) => this.#onSelectAppTab((e.target as HTMLSelectElement).value)}>
               <option value="">— pick a tab —</option>
               ${this.#tabs.value
                 .filter((t) => String(t.id) !== this.#chatTabId.value)
@@ -500,7 +518,7 @@ export class RelayPanel extends LitElement {
               <option value="">— pick a recipe —</option>
               ${this.#recipes.value.map((r) => html`<option value=${r.id}>${r.displayName ?? r.hostname}</option>`)}
             </select>
-            <label for="first-app-tag-input">Session name (optional - name this app now so a later "Add app tab" can tell it apart)</label>
+            <label for="first-app-tag-input">Session name (required - lets the agent address this app distinctly)</label>
             <input
               id="first-app-tag-input"
               type="text"
@@ -545,10 +563,7 @@ export class RelayPanel extends LitElement {
             <select
               id="add-tab-select"
               .value=${this.#selectedAddTabId.value}
-              @change=${(e: Event) => {
-                this.#selectedAddTabId.set((e.target as HTMLSelectElement).value);
-                this.#newTagInput.set('');
-              }}
+              @change=${(e: Event) => this.#onSelectAddCandidate((e.target as HTMLSelectElement).value)}
             >
               <option value="">— pick a tab —</option>
               ${this.#addCandidates.value.map((t) => html`<option value=${t.id}>${t.title}${t.sessionName ? ` [${t.sessionName}]` : ''}</option>`)}
@@ -556,18 +571,14 @@ export class RelayPanel extends LitElement {
             ${this.#addCandidates.value.length === 0
               ? html`<div class="status">No open tabs responded as human-mcp-relay-ready.</div>`
               : ''}
-            ${this.#selectedCandidateNeedsTag
-              ? html`
-                  <label for="new-tag-input">Session name for this app (required - lets the agent address it distinctly)</label>
-                  <input
-                    id="new-tag-input"
-                    type="text"
-                    placeholder="e.g. htmlpaint2"
-                    .value=${this.#newTagInput.value}
-                    @input=${(e: Event) => this.#newTagInput.set((e.target as HTMLInputElement).value)}
-                  />
-                `
-              : ''}
+            <label for="new-tag-input">Session name (required - lets the agent address this app distinctly)</label>
+            <input
+              id="new-tag-input"
+              type="text"
+              placeholder="e.g. htmlpaint2"
+              .value=${this.#newTagInput.value}
+              @input=${(e: Event) => this.#newTagInput.set((e.target as HTMLInputElement).value)}
+            />
             <button @click=${() => this.#onAddAppTab()}>Add app tab</button>
             <button class="secondary" @click=${() => this.#onFindAddCandidates()}>Rescan open tabs</button>`
         : html`<div class="status">Scanning open tabs…</div>`}
