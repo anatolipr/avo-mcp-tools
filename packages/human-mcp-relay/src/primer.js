@@ -11,7 +11,15 @@
 
 /**
  * @param {Array<{name:string, description:string, params:Record<string,any>, example?:any}>} tools
- * @param {{appName?: string, summary?: string, sessionName?: string}} [context]
+ * @param {{appName?: string, summary?: string, sessionName?: string, closingNote?: string}} [context]
+ *   closingNote overrides the primer's final instruction to the LLM (default:
+ *   "start by calling a read-only tool"). Host apps whose tool list spans
+ *   several unrelated things (e.g. a hub merging multiple proxied MCP
+ *   servers) should pass one telling the LLM to ask the human what they
+ *   actually want BEFORE calling anything — the default's "just start
+ *   exploring" advice assumes a single coherent app/document, which doesn't
+ *   hold when the tool list is really N different tools from N different
+ *   sources with no shared context.
  */
 export function buildPrimer(tools, context = {}) {
   let appName = context.appName || document.title || 'this app';
@@ -140,8 +148,10 @@ export function buildPrimer(tools, context = {}) {
 
   lines.push('---');
   lines.push(
-    'End of primer. Start by asking the human to run a read-only call (like get_nodes or get_selection) ' +
-    'so you can see the current state before proposing changes.'
+    'End of primer. ' +
+    (context.closingNote ||
+      'Start by asking the human to run a read-only call (like get_nodes or get_selection) so you can see ' +
+      'the current state before proposing changes.')
   );
 
   return lines.join('\n');

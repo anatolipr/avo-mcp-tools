@@ -7,7 +7,11 @@
 // global keyboard shortcut to open it. Does not import or modify that host
 // app's own mcpbridge file - it only reads window.__mcpTools/__mcpSummary at
 // popup-open time, and reads document.title for display, so it needs zero
-// per-app configuration to be pluggable elsewhere.
+// per-app configuration to be pluggable elsewhere. window.__mcpClosingNote
+// (optional string) overrides the primer's final instruction to the LLM -
+// see primer.js's own doc comment for when a host app should set this
+// (e.g. a hub page merging tools from several unrelated sources, where
+// "just start calling something" is bad default advice).
 //
 // Usage (identical in every host app), via jsDelivr - no install needed:
 //   <script type="module"
@@ -277,6 +281,7 @@ class HumanMcpRelay extends LitElement {
     this.primerText = buildPrimer(this._tools, {
       appName: document.title,
       sessionName: this.sessionName,
+      closingNote: window.__mcpClosingNote,
     });
   }
 
@@ -398,6 +403,7 @@ class HumanMcpRelay extends LitElement {
     return buildPrimer(this._tools, {
       appName: document.title,
       sessionName: this.sessionName,
+      closingNote: window.__mcpClosingNote,
     });
   }
 
