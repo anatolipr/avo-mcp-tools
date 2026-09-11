@@ -21,7 +21,26 @@ export type ExtensionRuntimeMessage =
   // tab (see relay-chat-loop.ts) - does NOT involve any background state,
   // just a direct injectScriptOnce read, same mechanism as relay-bus-forward
   // but for a human checking status rather than the loop relaying a call.
-  | { type: 'relay-check-status'; chatTabId: number };
+  | { type: 'relay-check-status'; chatTabId: number }
+  // Popup-initiated vetting probe: one-shot inject-and-call of
+  // window.__humanMcpRelay.ping() on a candidate tab, used to decide
+  // whether it's offered as an "Add app tab" option at all. Distinct from
+  // relay-check-status (which reads a CHAT tab's loop state) - this probes
+  // an APP tab for human-mcp-relay's mere presence/readiness.
+  | { type: 'relay-ping-tab'; tabId: number }
+  // Popup-initiated read of the chat tab's own win.__mcpRelayAppTabs map
+  // (see relay-chat-loop.ts) - lets the popup show which app tabs are
+  // already bridged, so it can exclude them from the "Add app tab" list.
+  // Same one-shot injectScriptOnce mechanism as relay-check-status.
+  | { type: 'relay-list-app-tabs'; chatTabId: number }
+  // Popup-initiated: adds a second (or further) app tab to an ALREADY
+  // running bridge on chatTabId, keyed by that app tab's human-mcp-relay
+  // session name/tag. Fetches the new app's primer server-side (same
+  // best-effort injectScriptOnce read start-relay-bridge already does) and
+  // hands it to the chat tab's own win.__mcpRelayAddAppTab, which enqueues
+  // it as a chat message and registers the tag -> tab id mapping - all
+  // still inside that one page's realm, not the background.
+  | { type: 'add-app-tab'; chatTabId: number; appTabId: number };
 
 export interface ConnectActiveTabResult {
   ok: boolean;
@@ -105,5 +124,33 @@ export interface RelayCheckStatusResult {
   lastPollAt?: number;
   roundsCompleted?: number;
   lastError?: string;
+  error?: string;
+}
+
+// Response to 'relay-ping-tab' - mirrors human-mcp-relay's own
+// window.__humanMcpRelay.ping() return shape. `ok: false` (with no
+// version/sessionName) covers both "no human-mcp-relay on this tab at all"
+// and "couldn't be reached" (e.g. a chrome://, PDF viewer, or otherwise
+// unscriptable tab) - the popup treats either the same way: don't offer it.
+export interface RelayPingTabResult {
+  ok: boolean;
+  version?: string;
+  sessionName?: string;
+}
+
+// Response to 'relay-list-app-tabs' - mirrors relay-chat-loop.ts's own
+// win.__mcpRelayAppTabs shape (tag -> app tab id; '' key = untagged).
+// `active: false` means the chat tab has no bridge loop running at all
+// (never started, or reloaded/closed since), matching
+// RelayCheckStatusResult's own `active` semantics.
+export interface RelayListAppTabsResult {
+  active: boolean;
+  appTabs: Record<string, number>;
+  error?: string;
+}
+
+// Response to 'add-app-tab'.
+export interface AddAppTabResult {
+  ok: boolean;
   error?: string;
 }

@@ -4,10 +4,15 @@
 // session loop, running permanently in the page's own JS realm - the
 // extension's background service worker has no further involvement beyond
 // acting as a one-hop, opaque message bus for forwarding calls to the app
-// tab (see relay-bus-isolated.ts). There is no session registry anywhere:
-// the chat tab either has this loop running or it doesn't, and stopping a
-// bridge is done by reloading or closing the chat tab - not by any message
-// or signal this code listens for.
+// tab(s) (see relay-bus-isolated.ts). There is no session registry in the
+// extension itself: the chat tab either has this loop running or it
+// doesn't, and stopping a bridge is done by reloading or closing the chat
+// tab - not by any message or signal this code listens for. The ONE piece
+// of session state that does exist (win.__mcpRelayAppTabs, a tag -> app
+// tab id map supporting more than one bridged app tab per chat) lives only
+// in this same injected page realm, for the same reason and with the same
+// reload-wipes-it lifetime as everything else here - it is not a
+// background-held registry.
 //
 // Lives under src/background/ (not src/content-scripts/), matching how the
 // deleted relay-completion-strategies.ts worked: chrome.scripting.executeScript's
@@ -24,7 +29,15 @@
 import type { CompletionConfig, Recipe, SetViaStrategy } from '../shared/recipe-types.js';
 
 export interface ChatLoopConfig {
-  appTabId: number;
+  // The first app tab bridged at "Start bridging" time, keyed by its
+  // human-mcp-relay session name/tag (see human-mcp-relay/protocol.js's
+  // [sessionName] sentinel tagging) - '' if that app tab had no session name
+  // set, matching the untagged-sentinel case. Additional app tabs are added
+  // later via the addAppTab bus message (see below); all live entries are
+  // held in the injected loop's own appTabsByTag map, not here - this is
+  // only the seed for that map at injection time.
+  initialAppTag: string;
+  initialAppTabId: number;
   inputSelector: string;
   setVia: SetViaStrategy;
   submitSelector: string;
@@ -42,9 +55,10 @@ export interface ChatLoopConfig {
   initialPrimer?: string;
 }
 
-export function buildChatLoopConfig(appTabId: number, recipe: Recipe, initialPrimer?: string): ChatLoopConfig {
+export function buildChatLoopConfig(appTabId: number, appTag: string, recipe: Recipe, initialPrimer?: string): ChatLoopConfig {
   return {
-    appTabId,
+    initialAppTag: appTag,
+    initialAppTabId: appTabId,
     inputSelector: recipe.input.selector,
     setVia: recipe.input.setVia,
     submitSelector: recipe.submit.selector,
@@ -68,7 +82,8 @@ export function buildChatLoopConfig(appTabId: number, recipe: Recipe, initialPri
 // every step.
 export function chatLoopMainFunction(configJson: string): void {
   const config = JSON.parse(configJson) as {
-    appTabId: number;
+    initialAppTag: string;
+    initialAppTabId: number;
     inputSelector: string;
     setVia: string;
     submitSelector: string;
@@ -92,6 +107,17 @@ export function chatLoopMainFunction(configJson: string): void {
   // along with the whole JS realm.
   if (win.__mcpRelayLoopActive) return;
   win.__mcpRelayLoopActive = true;
+
+  // The entire multi-app-tab session state: tag (human-mcp-relay session
+  // name, '' if untagged) -> app tab id. Lives ONLY here, in this chat tab's
+  // own JS realm - not in the background, not on any server (see this
+  // file's header comment on the extension's stateless design, which this
+  // extends rather than breaks). A page reload wipes it along with
+  // everything else, which is the desired "refresh releases the extension
+  // from this mode" behavior. Read by the popup (for the "already added"
+  // list, see message-handler.ts's relay-list-app-tabs) via the same
+  // one-shot injectScriptOnce read __mcpRelayStats already uses.
+  win.__mcpRelayAppTabs = { [config.initialAppTag]: config.initialAppTabId };
 
   // Lightweight, read-only stats a human can check from the popup (via a
   // one-shot injectScriptOnce read, see message-handler.ts's
@@ -324,11 +350,23 @@ export function chatLoopMainFunction(configJson: string): void {
     });
   }
 
-  // Relays a HUMAN-MCP CALL block to the app tab via the extension bus (an
-  // OPAQUE transport - the background never inspects `code`, see
-  // relay-bus-isolated.ts / message-handler.ts's relay-bus-forward) and
-  // returns the app tab's HUMAN-MCP RESULT text.
-  function forwardToAppTab(callText: string): Promise<string> {
+  // Relays a HUMAN-MCP CALL block to the app tab matching its sentinel tag
+  // via the extension bus (an OPAQUE transport - the background never
+  // inspects `code`, see relay-bus-isolated.ts / message-handler.ts's
+  // relay-bus-forward) and returns that app tab's HUMAN-MCP RESULT text.
+  // `tag` is '' for an untagged call, matching win.__mcpRelayAppTabs' own
+  // '' key for a session with no name set.
+  function forwardToAppTab(tag: string, callText: string): Promise<string> {
+    const targetTabId = win.__mcpRelayAppTabs[tag];
+    if (targetTabId === undefined) {
+      return Promise.reject(
+        new Error(
+          tag
+            ? `No app tab is bridged under session tag "${tag}" - available tags: ${Object.keys(win.__mcpRelayAppTabs).join(', ') || '(none)'}.`
+            : 'No untagged app tab is bridged, and this call has no session tag.'
+        )
+      );
+    }
     const requestId = 'req-' + Math.random().toString(36).slice(2) + '-' + Date.now();
     const code =
       "return (async () => { if (!window.__humanMcpRelay) { throw new Error('window.__humanMcpRelay not found on this tab - is human-mcp-relay loaded here?'); } return await window.__humanMcpRelay.runCall(" +
@@ -350,30 +388,45 @@ export function chatLoopMainFunction(configJson: string): void {
       win.addEventListener('__mcp_relay_bus_response__', onResponse);
       win.dispatchEvent(
         new win.CustomEvent('__mcp_relay_bus_request__', {
-          detail: { requestId, targetTabId: config.appTabId, code },
+          detail: { requestId, targetTabId, code },
         })
       );
     });
   }
 
+  // FIFO queue of messages waiting to be sent into the chat. Normally holds
+  // at most one entry (the previous round's HUMAN-MCP RESULT), but
+  // win.__mcpRelayAddAppTab (below) can push a second app's primer onto it
+  // independently of the loop's own request/result cycle - e.g. a human
+  // clicks "Add app tab" while a call is still in flight to the first app.
+  // Drained strictly in order, one per loop iteration, so an added app's
+  // primer is never lost or overwritten by a concurrently-arriving result.
+  const outbox: string[] = config.initialPrimer !== undefined ? [config.initialPrimer] : [];
+
+  // Exposed for the background to invoke via a one-shot injectScriptOnce
+  // call (see message-handler.ts's handleAddAppTab) - the extension's ONLY
+  // way to reach into an already-running loop, matching how
+  // relay-check-status already reads __mcpRelayStats the same way. Adding a
+  // tag that's already in win.__mcpRelayAppTabs is rejected here too
+  // (defense in depth - the popup already excludes/blocks this before
+  // calling), since silently overwriting an existing tag's target tab would
+  // leave in-flight calls for the old tab's session ambiguous.
+  win.__mcpRelayAddAppTab = (tag: string, appTabId: number, primer?: string) => {
+    if (Object.prototype.hasOwnProperty.call(win.__mcpRelayAppTabs, tag)) {
+      throw new Error(`Session tag "${tag}" is already bridged to a different app tab.`);
+    }
+    win.__mcpRelayAppTabs[tag] = appTabId;
+    if (primer) outbox.push(primer);
+  };
+
   async function loop() {
-    // If a primer was fetched from the app tab at "Start bridging" time,
-    // send it as the very first message - reusing the exact same
-    // send-then-wait-for-a-newer-reply path the loop already uses for
-    // every subsequent HUMAN-MCP RESULT, so no separate first-message logic
-    // is needed. Replaces the human's own "copy primer from app tab, paste
-    // into chat tab" step. If no primer was available (e.g. the app tab had
-    // no window.__humanMcpRelay), the human is expected to have already
-    // pasted one manually before clicking Start, matching the original
-    // behavior - the first wait then accepts whatever reply already exists.
-    let nextMessageForChat: string | undefined = config.initialPrimer;
     let previousLastReplyText: string | undefined = undefined;
 
     for (;;) {
       try {
-        if (nextMessageForChat !== undefined) {
+        if (outbox.length > 0) {
+          const nextMessageForChat = outbox.shift()!;
           await sendMessage(nextMessageForChat);
-          nextMessageForChat = undefined;
           // Snapshot AFTER sending (not before loop start) - whatever the
           // last reply's text is right now is "already seen," so the next
           // wait correctly requires something newer than this specific
@@ -395,9 +448,10 @@ export function chatLoopMainFunction(configJson: string): void {
         }
 
         const resultText = await forwardToAppTab(
+          match.tag,
           config.startSentinel + (match.tag ? '[' + match.tag + ']' : '') + '\n' + match.body + '\n' + config.endSentinel
         );
-        nextMessageForChat = resultText;
+        outbox.push(resultText);
         win.__mcpRelayStats.roundsCompleted += 1;
       } catch (e) {
         // No status reporting of any kind beyond __mcpRelayStats (fully

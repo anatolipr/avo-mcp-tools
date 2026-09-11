@@ -1,6 +1,6 @@
 {
   "name": "human-mcp-relay",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "description": "Drop-in <human-mcp-relay> popup that lets a human manually relay MCP tool calls into a chat session with no direct MCP connection, by reading window.__mcpTools.",
   "repository": {

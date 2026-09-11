@@ -23,7 +23,7 @@ const OPEN_SHORTCUT = {key: 'a', metaOrCtrl: true, shift: true};
 // (runs via prepublishOnly) - this file is loaded standalone via jsDelivr
 // (see header comment), not bundled, so it can't import package.json at
 // runtime.
-const VERSION = '0.3.1';
+const VERSION = '0.4.0';
 
 // Persisted per-origin so a given app's tab remembers its session name
 // across reloads/reopens of the popup - set once when bridging multiple apps
@@ -476,5 +476,16 @@ window.__humanMcpRelay = {
     let el = document.querySelector('human-mcp-relay');
     if (!el) throw new Error('human-mcp-relay element not found on this page.');
     return el.getPrimerText();
+  },
+  // Cheap, synchronous vetting probe for an automated caller (e.g. the
+  // browser extension's "Add app tab" picker) to distinguish a page that
+  // actually has this relay loaded from any other open tab, before
+  // presenting it as a bridge candidate - checking for
+  // window.__humanMcpRelay's mere existence would work too, but a real
+  // call+response round trip through the same injection path runCall uses
+  // is a more faithful test of "this tab can actually be bridged to."
+  ping: () => {
+    let el = document.querySelector('human-mcp-relay');
+    return { ok: !!el, version: VERSION, sessionName: el?.sessionName || '' };
   },
 };

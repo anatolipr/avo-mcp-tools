@@ -8,6 +8,9 @@ import type {
   StartRelayBridgeResult,
   RelayBusForwardResult,
   RelayCheckStatusResult,
+  RelayPingTabResult,
+  RelayListAppTabsResult,
+  AddAppTabResult,
 } from '../shared/types.js';
 import { injectConnectSnippet, changeChannel, renameConnection, disconnectTab, tabAlreadyConnected } from './connect-tab.js';
 import { getKnownOrigin, setKnownOrigin, deleteKnownOrigin } from './storage.js';
@@ -162,6 +165,27 @@ export function startMessageHandler(onConsoleCapture: (tabId: number, level: str
       return true;
     }
 
+    if (message.type === 'relay-ping-tab') {
+      handleRelayPingTab(message.tabId)
+        .then((result) => sendResponse(result satisfies RelayPingTabResult))
+        .catch(() => sendResponse({ ok: false } satisfies RelayPingTabResult));
+      return true;
+    }
+
+    if (message.type === 'relay-list-app-tabs') {
+      handleRelayListAppTabs(message.chatTabId)
+        .then((result) => sendResponse(result satisfies RelayListAppTabsResult))
+        .catch((err) => sendResponse({ active: false, appTabs: {}, error: String(err?.message ?? err) } satisfies RelayListAppTabsResult));
+      return true;
+    }
+
+    if (message.type === 'add-app-tab') {
+      handleAddAppTab(message.chatTabId, message.appTabId)
+        .then((result) => sendResponse(result satisfies AddAppTabResult))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies AddAppTabResult));
+      return true;
+    }
+
     return false;
   });
 }
@@ -206,7 +230,15 @@ async function handleStartRelayBridge(chatTabId: number, appTabId: number, recip
     // ignored - see comment above
   }
 
-  const config = buildChatLoopConfig(appTabId, recipe, initialPrimer);
+  // The app's human-mcp-relay session name (possibly '' if unset) becomes
+  // this app tab's tag in the chat loop's win.__mcpRelayAppTabs map - see
+  // relay-chat-loop.ts. Read via the same ping() used to vet "Add app tab"
+  // candidates (handleRelayPingTab below), so a first bridged app and one
+  // added later are tagged identically either way.
+  const ping = await pingAppTab(appTabId);
+  const appTag = ping?.sessionName ?? '';
+
+  const config = buildChatLoopConfig(appTabId, appTag, recipe, initialPrimer);
   await chrome.scripting.executeScript({
     target: { tabId: chatTabId },
     world: 'ISOLATED',
@@ -219,6 +251,81 @@ async function handleStartRelayBridge(chatTabId: number, appTabId: number, recip
     args: [JSON.stringify(config)],
   });
 
+  return { ok: true };
+}
+
+// Shared by handleStartRelayBridge (to learn the first app tab's tag) and
+// handleRelayPingTab (the popup's own vetting probe) - a one-shot
+// injectScriptOnce call of window.__humanMcpRelay.ping(), see relay.js.
+// Returns undefined (never throws) on any failure - an unreachable or
+// human-mcp-relay-less tab is simply not a valid candidate/tag source.
+async function pingAppTab(tabId: number): Promise<{ ok: boolean; version?: string; sessionName?: string } | undefined> {
+  try {
+    const code = "return (typeof window.__humanMcpRelay?.ping === 'function') ? JSON.stringify(window.__humanMcpRelay.ping()) : undefined;";
+    const result = await injectScriptOnce(tabId, code);
+    if (typeof result !== 'string' || result.length === 0) return undefined;
+    return JSON.parse(result) as { ok: boolean; version?: string; sessionName?: string };
+  } catch {
+    return undefined;
+  }
+}
+
+async function handleRelayPingTab(tabId: number): Promise<RelayPingTabResult> {
+  const result = await pingAppTab(tabId);
+  return result?.ok ? { ok: true, version: result.version, sessionName: result.sessionName } : { ok: false };
+}
+
+// One-shot read of window.__mcpRelayAppTabs (see relay-chat-loop.ts) from
+// the given chat tab - purely for the popup to know which app tabs are
+// already bridged, so "Add app tab" can exclude them. Same
+// injectScriptOnce mechanism and active-flag semantics as
+// handleRelayCheckStatus.
+async function handleRelayListAppTabs(chatTabId: number): Promise<RelayListAppTabsResult> {
+  const code =
+    'return window.__mcpRelayAppTabs ? JSON.stringify({ active: !!window.__mcpRelayLoopActive, appTabs: window.__mcpRelayAppTabs }) : JSON.stringify({ active: false, appTabs: {} });';
+  const result = await injectScriptOnce(chatTabId, code);
+  if (typeof result !== 'string') return { active: false, appTabs: {}, error: 'relay-list-app-tabs: injected script returned no result.' };
+  return JSON.parse(result) as RelayListAppTabsResult;
+}
+
+// Adds a second (or further) app tab to an already-running bridge, by
+// invoking win.__mcpRelayAddAppTab inside the chat tab's own running loop
+// (see relay-chat-loop.ts) - the only extension-side involvement in "Add
+// app tab" beyond fetching this new app's primer/tag, mirroring
+// handleStartRelayBridge's own best-effort primer fetch. Fails if the chat
+// tab has no loop running (reloaded/closed since bridging started - see
+// this package's "refresh releases the extension from this mode" design),
+// the app tab has no human-mcp-relay loaded, or its tag is already bridged
+// (checked both here, defense in depth, and by win.__mcpRelayAddAppTab
+// itself inside the chat tab).
+async function handleAddAppTab(chatTabId: number, appTabId: number): Promise<AddAppTabResult> {
+  const ping = await pingAppTab(appTabId);
+  if (!ping?.ok) return { ok: false, error: 'The selected tab does not appear to have human-mcp-relay loaded (ping failed).' };
+  const appTag = ping.sessionName ?? '';
+
+  let primer: string | undefined;
+  try {
+    const primerCode = "return (typeof window.__humanMcpRelay?.getPrimer === 'function') ? window.__humanMcpRelay.getPrimer() : undefined;";
+    const result = await injectScriptOnce(appTabId, primerCode);
+    if (typeof result === 'string' && result.length > 0) primer = result;
+  } catch {
+    // Best-effort, same as handleStartRelayBridge - the human can paste it
+    // manually if this fails.
+  }
+
+  const code =
+    "return (async () => { if (!window.__mcpRelayAddAppTab) { throw new Error('No relay bridge is running on this tab - has it been reloaded since bridging started?'); } window.__mcpRelayAddAppTab(" +
+    JSON.stringify(appTag) +
+    ', ' +
+    JSON.stringify(appTabId) +
+    ', ' +
+    JSON.stringify(primer ?? '') +
+    "); return 'ok'; })();";
+  try {
+    await injectScriptOnce(chatTabId, code);
+  } catch (err) {
+    return { ok: false, error: String((err as Error)?.message ?? err) };
+  }
   return { ok: true };
 }
 
