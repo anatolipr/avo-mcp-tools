@@ -19,6 +19,12 @@ import {parseCall, formatResult} from './protocol.js';
 
 const OPEN_SHORTCUT = {key: 'a', metaOrCtrl: true, shift: true};
 
+// Stamped from package.json's "version" by scripts/stamp-version.mjs
+// (runs via prepublishOnly) - this file is loaded standalone via jsDelivr
+// (see header comment), not bundled, so it can't import package.json at
+// runtime.
+const VERSION = '0.3.1';
+
 // Persisted per-origin so a given app's tab remembers its session name
 // across reloads/reopens of the popup - set once when bridging multiple apps
 // into one agent conversation, not re-typed every time.
@@ -62,6 +68,11 @@ class HumanMcpRelay extends LitElement {
     h2 {
       margin: 0 0 4px;
       font-size: 16px;
+    }
+    .version {
+      color: #999;
+      font-weight: normal;
+      font-size: 12px;
     }
     .sub {
       color: #999;
@@ -389,7 +400,7 @@ class HumanMcpRelay extends LitElement {
       <div class="backdrop" @click=${(e) => { if (e.target === e.currentTarget) this.open = false; }}>
         <div class="panel wrap">
           <button class="close" @click=${() => (this.open = false)}>&times;</button>
-          <h2>human-relay MCP (prototype)</h2>
+          <h2>human-relay MCP (prototype) <span class="version">v${VERSION}</span></h2>
           <p class="sub">Cmd/Ctrl+Shift+A to toggle. Round-trip tool calls through a chat session with no direct MCP access.</p>
 
           ${toolsMissing
