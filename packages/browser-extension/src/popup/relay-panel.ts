@@ -165,6 +165,11 @@ export class RelayPanel extends LitElement {
   // candidate's own sessionName came back empty from the ping - see
   // #renderAddAppTab and #onAddAppTab.
   #newTagInput = new Signal<string>('');
+  // Optional session name for the FIRST app tab, entered up front in "Start
+  // bridging" rather than discovered later as an empty tag - same field
+  // shape as #newTagInput, but never required (a lone app tab has nothing
+  // to collide with), so #onStartBridging sends it as-is, blank or not.
+  #firstAppTagInput = new Signal<string>('');
 
   constructor() {
     super();
@@ -331,11 +336,13 @@ export class RelayPanel extends LitElement {
       return;
     }
     this.#setStatus('Starting…');
+    const assignTag = this.#firstAppTagInput.value.trim();
     const res: StartRelayBridgeResult = await chrome.runtime.sendMessage({
       type: 'start-relay-bridge',
       chatTabId,
       appTabId,
       recipeId,
+      assignTag: assignTag || undefined,
     });
     // Fire-and-forget beyond this point: the background holds no session
     // state to poll, and the chat tab's own injected loop runs
@@ -343,7 +350,10 @@ export class RelayPanel extends LitElement {
     // injection itself succeeded, not that the loop is doing anything
     // useful yet.
     this.#setStatus(res.ok ? 'Bridging started.' : `Failed: ${res.error}`, !res.ok);
-    if (res.ok) await this.#refreshBridgedAppTabs();
+    if (res.ok) {
+      this.#firstAppTagInput.set('');
+      await this.#refreshBridgedAppTabs();
+    }
   }
 
   // Pings every open tab (minus the chat tab and any already-bridged app
@@ -490,6 +500,14 @@ export class RelayPanel extends LitElement {
               <option value="">— pick a recipe —</option>
               ${this.#recipes.value.map((r) => html`<option value=${r.id}>${r.displayName ?? r.hostname}</option>`)}
             </select>
+            <label for="first-app-tag-input">Session name (optional - name this app now so a later "Add app tab" can tell it apart)</label>
+            <input
+              id="first-app-tag-input"
+              type="text"
+              placeholder="e.g. htmlpaint"
+              .value=${this.#firstAppTagInput.value}
+              @input=${(e: Event) => this.#firstAppTagInput.set((e.target as HTMLInputElement).value)}
+            />
             <button @click=${() => this.#onStartBridging()}>Start bridging</button>
           `}
       <button class="secondary" @click=${() => this.#onCheckStatus()}>Check status</button>

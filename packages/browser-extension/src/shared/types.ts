@@ -11,7 +11,15 @@ export type ExtensionRuntimeMessage =
   | { type: 'list-recipes' }
   | { type: 'save-recipe'; recipe: unknown }
   | { type: 'delete-recipe'; id: string }
-  | { type: 'start-relay-bridge'; chatTabId: number; appTabId: number; recipeId: string }
+  // `assignTag`, if given, is written into the app tab's own human-mcp-relay
+  // via setSessionName BEFORE bridging - lets the human name the first app
+  // up front (see relay-panel.ts's "Session name" field under Start
+  // bridging) instead of only discovering it was left untagged later, when
+  // a second "Add app tab" needs a name to disambiguate against it. Optional
+  // here (unlike add-app-tab's assignTag, which becomes required once a
+  // second app tab is untagged) since a lone app tab has nothing to collide
+  // with yet.
+  | { type: 'start-relay-bridge'; chatTabId: number; appTabId: number; recipeId: string; assignTag?: string }
   // Sent by the chat tab's OWN injected relay-bus-isolated.ts script, never
   // by the popup - the background never initiates this, only responds. See
   // relay-chat-loop.ts's header comment: this is opaque transport, the

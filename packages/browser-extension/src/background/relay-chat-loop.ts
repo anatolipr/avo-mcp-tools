@@ -234,9 +234,43 @@ export function chatLoopMainFunction(configJson: string): void {
   // back - no state is lost across a pause, since each tick re-reads
   // whatever the DOM currently looks like rather than tracking missed
   // events.
+  // Distinguishes a deliberate interrupt (see interruptCurrentWait below)
+  // from a genuine failure in loop()'s catch block, so an "Add app tab"
+  // interrupting an idle wait is never logged/surfaced as if it were an
+  // error - it's the intended, successful path.
+  class WaitInterrupted extends Error {}
+
+  // Set while a waitForReply() is in-flight, cleared when it settles -
+  // lets outbox-push interrupt an in-progress wait (see win.__mcpRelayAddAppTab
+  // and loop() below). Without this, pushing a new app's primer onto outbox
+  // while the loop is idle inside waitForReply (its normal state - waiting
+  // for the human/LLM's next chat message, which can take an unbounded
+  // amount of time) would queue the primer correctly but never actually
+  // send it until a reply happened to arrive on its own for an unrelated
+  // reason - found live: "Add app tab" reported success (the tag/primer
+  // fetch both worked) but nothing appeared in the chat, because the loop
+  // was sitting in an open-ended wait with nothing pushing it forward.
+  let interruptCurrentWait: (() => void) | undefined;
+
   function waitForReply(previousLastReplyText: string | undefined): Promise<string> {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolveRaw, rejectRaw) => {
+      // Clearing interruptCurrentWait on every settle path (not just the
+      // interrupt path itself) means a wait that finishes normally never
+      // leaves a stale interrupt handler around that a LATER, unrelated
+      // outbox push could mistakenly fire against a wait that already ended.
+      const resolve = (text: string) => {
+        interruptCurrentWait = undefined;
+        resolveRaw(text);
+      };
+      const reject = (err: Error) => {
+        interruptCurrentWait = undefined;
+        rejectRaw(err);
+      };
       const POLL_MS = 1000;
+      interruptCurrentWait = () => {
+        stop();
+        reject(new WaitInterrupted());
+      };
       const completion = config.completion;
       // maxWaitMs bounds ONLY the completion-detection phase (how long a
       // reply is allowed to take to finish streaming, once it has started
@@ -416,7 +450,19 @@ export function chatLoopMainFunction(configJson: string): void {
       throw new Error(`Session tag "${tag}" is already bridged to a different app tab.`);
     }
     win.__mcpRelayAppTabs[tag] = appTabId;
-    if (primer) outbox.push(primer);
+    if (primer) {
+      outbox.push(primer);
+      // If the loop is currently idle inside waitForReply (its normal
+      // state most of the time - see interruptCurrentWait's own comment),
+      // pushing to outbox alone would queue the primer but never actually
+      // send it until a reply happened to arrive on its own for an
+      // unrelated reason. Interrupting the wait sends loop() back to the
+      // top of its for(;;), where the outbox check now finds this primer
+      // and sends it immediately. A no-op if the loop is currently doing
+      // something else (mid-send, mid-forwardToAppTab) - outbox will still
+      // be drained on schedule once that finishes.
+      interruptCurrentWait?.();
+    }
   };
 
   async function loop() {
@@ -454,6 +500,13 @@ export function chatLoopMainFunction(configJson: string): void {
         outbox.push(resultText);
         win.__mcpRelayStats.roundsCompleted += 1;
       } catch (e) {
+        if (e instanceof WaitInterrupted) {
+          // Deliberate, successful interruption (see interruptCurrentWait) -
+          // not a failure, so skip the logging/stats-recording below and go
+          // straight back to the top of the loop, where the outbox check
+          // now finds and sends whatever triggered the interrupt.
+          continue;
+        }
         // No status reporting of any kind beyond __mcpRelayStats (fully
         // stateless extension, no popup polling) - log to the page's own
         // console so a human inspecting this tab's DevTools can see what

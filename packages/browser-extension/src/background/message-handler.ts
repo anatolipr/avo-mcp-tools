@@ -140,7 +140,7 @@ export function startMessageHandler(onConsoleCapture: (tabId: number, level: str
     }
 
     if (message.type === 'start-relay-bridge') {
-      handleStartRelayBridge(message.chatTabId, message.appTabId, message.recipeId)
+      handleStartRelayBridge(message.chatTabId, message.appTabId, message.recipeId, message.assignTag)
         .then((result) => sendResponse(result satisfies StartRelayBridgeResult))
         .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) } satisfies StartRelayBridgeResult));
       return true;
@@ -210,9 +210,21 @@ async function handleSaveRecipe(rawRecipe: unknown): Promise<SaveRecipeResult> {
 // everything from here, reaching back into the background only via
 // relay-bus-forward messages it initiates itself. Stopping a bridge means
 // reloading or closing the chat tab, not any message this background sends.
-async function handleStartRelayBridge(chatTabId: number, appTabId: number, recipeId: string): Promise<StartRelayBridgeResult> {
+async function handleStartRelayBridge(chatTabId: number, appTabId: number, recipeId: string, assignTag?: string): Promise<StartRelayBridgeResult> {
   const recipe = await getRecipe(recipeId);
   if (!recipe) return { ok: false, error: `No recipe found with id "${recipeId}".` };
+
+  // `assignTag`, if given (see relay-panel.ts's "Session name" field under
+  // Start bridging), names this app up front - written into ITS OWN
+  // human-mcp-relay before anything else, same helper and reasoning as
+  // handleAddAppTab's own assignTag handling below.
+  if (assignTag) {
+    try {
+      await assignSessionNameOnAppTab(appTabId, assignTag);
+    } catch (err) {
+      return { ok: false, error: String((err as Error)?.message ?? err) };
+    }
+  }
 
   // Best-effort: fetch the current primer from the app tab so the loop can
   // send it as its first message, replacing the human's own "copy primer,
@@ -252,6 +264,23 @@ async function handleStartRelayBridge(chatTabId: number, appTabId: number, recip
   });
 
   return { ok: true };
+}
+
+// Shared by handleStartRelayBridge and handleAddAppTab - writes a
+// human-chosen session name into an app tab's OWN human-mcp-relay via
+// window.__humanMcpRelay.setSessionName, BEFORE that tab is pinged/primed,
+// so its own popup UI (if later opened) shows the same name the LLM is
+// told to address it by - see relay.js's setSessionName comment. Throws
+// (callers turn this into an error response) rather than silently ignoring
+// failure, unlike this file's other best-effort injectScriptOnce calls -
+// unlike a missing primer, a human who explicitly typed a tag expects it to
+// actually be set, not silently dropped.
+async function assignSessionNameOnAppTab(appTabId: number, tag: string): Promise<void> {
+  const code =
+    "if (typeof window.__humanMcpRelay?.setSessionName !== 'function') { throw new Error('This tab\\'s human-mcp-relay is too old to support setSessionName - reload the tab to pick up the latest version.'); } window.__humanMcpRelay.setSessionName(" +
+    JSON.stringify(tag) +
+    ');';
+  await injectScriptOnce(appTabId, code);
 }
 
 // Shared by handleStartRelayBridge (to learn the first app tab's tag) and
@@ -313,8 +342,7 @@ async function handleRelayListAppTabs(chatTabId: number): Promise<RelayListAppTa
 async function handleAddAppTab(chatTabId: number, appTabId: number, assignTag?: string): Promise<AddAppTabResult> {
   if (assignTag) {
     try {
-      const setNameCode = "if (typeof window.__humanMcpRelay?.setSessionName !== 'function') { throw new Error('This tab\\'s human-mcp-relay is too old to support setSessionName - reload the tab to pick up the latest version.'); } window.__humanMcpRelay.setSessionName(" + JSON.stringify(assignTag) + ');';
-      await injectScriptOnce(appTabId, setNameCode);
+      await assignSessionNameOnAppTab(appTabId, assignTag);
     } catch (err) {
       return { ok: false, error: String((err as Error)?.message ?? err) };
     }
