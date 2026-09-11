@@ -42,7 +42,8 @@
   button:hover { background: var(--hover); border-color: var(--accent); }
   form { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 0.6rem; margin: 1rem 0; max-width: 500px; }
   form label { align-self: center; }
-  input, select { font: inherit; padding: 2px 4px; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; }
+  input, select, textarea { font: inherit; padding: 2px 4px; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; }
+  textarea { resize: vertical; }
   .err { color: var(--danger); font-size: 12px; }
   .hint { opacity: 0.7; font-size: 12px; }
   .config-row td { background: var(--bg-subtle); }
@@ -81,6 +82,7 @@
   </select>
   <label>Command</label><input name="command" placeholder="npx (stdio only)">
   <label>Args</label><input name="args" placeholder="space-separated (stdio only)">
+  <label>Env vars</label><textarea name="env" rows="3" placeholder="stdio only — one KEY=VALUE per line for multiple vars, e.g.&#10;DSN=mysql://root:@127.0.0.1:3306/iram&#10;LOG_LEVEL=debug"></textarea>
   <label>URL</label><input name="url" placeholder="http(s)://... (sse/streamableHttp only)">
   <label></label>
   <div>
@@ -156,6 +158,24 @@ function formatArgs(args) {
   return (args ?? []).map((a) => (/\s/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(' ');
 }
 
+// One KEY=VALUE per line, e.g. a DSN like DSN=mysql://root:@127.0.0.1:3306/iram —
+// everything after the first "=" is the value verbatim, so it may itself contain "=".
+function parseEnv(text) {
+  const env = {};
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq === -1) continue;
+    env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1);
+  }
+  return env;
+}
+
+function formatEnv(env) {
+  return Object.entries(env ?? {}).map(([k, v]) => `${k}=${v}`).join('\n');
+}
+
 function exitEditMode() {
   form.reset();
   form.editId.value = '';
@@ -171,6 +191,7 @@ function enterEditMode(config) {
   form.transport.value = config.transport;
   form.command.value = config.command ?? '';
   form.args.value = formatArgs(config.args);
+  form.env.value = formatEnv(config.env);
   form.url.value = config.url ?? '';
   formTitle.textContent = `Edit proxy "${config.slug}"`;
   submitBtn.textContent = 'Save changes';
@@ -240,7 +261,7 @@ form.addEventListener('submit', async (e) => {
     description: data.get('description') || undefined,
     transport,
     ...(transport === 'stdio'
-      ? { command: data.get('command'), args: parseArgs(data.get('args') || '') }
+      ? { command: data.get('command'), args: parseArgs(data.get('args') || ''), env: parseEnv(data.get('env') || '') }
       : { url: data.get('url') }),
   };
   const res = editId
@@ -284,17 +305,18 @@ window.__mcpTools = [
   {
     name: 'add_mcp_proxy',
     description:
-      'Adds and starts a new MCP-server proxy. For transport "stdio", pass command (and optionally args as a space-separated string — wrap any single arg containing spaces in double quotes, e.g. --dsn "mysql://user:pass@host/db", NOT needed for a value with no spaces even if it contains other punctuation like : or @). For "sse" or "streamableHttp", pass url instead. The proxy\'s tools then appear on its own channel named after slug, prefixed "<slug>__".',
+      'Adds and starts a new MCP-server proxy. For transport "stdio", pass command (and optionally args as a space-separated string — wrap any single arg containing spaces in double quotes, e.g. --dsn "mysql://user:pass@host/db", NOT needed for a value with no spaces even if it contains other punctuation like : or @; and optionally env as newline-separated KEY=VALUE pairs, one per line, for multiple vars). For "sse" or "streamableHttp", pass url instead. The proxy\'s tools then appear on its own channel named after slug, prefixed "<slug>__".',
     params: {
       slug: { type: 'string', description: 'URL-safe name for this proxy, e.g. "atlassian" — also its channel name and tool-name prefix.' },
       transport: { type: 'string', description: '"stdio", "sse", or "streamableHttp".' },
       command: { type: 'string', description: 'Executable to spawn (stdio only), e.g. "npx".', optional: true },
       args: { type: 'string', description: 'Space-separated command-line args (stdio only), e.g. -y some-mcp-server --dsn "mysql://user:pass@host/db". Only quote an arg if it itself contains a space — quotes are stripped, not passed through to the process.', optional: true },
+      env: { type: 'string', description: 'Environment variables to set on the spawned process (stdio only), as KEY=VALUE — one per line for multiple, e.g. "DSN=mysql://root:@127.0.0.1:3306/iram\\nLOG_LEVEL=debug".', optional: true },
       url: { type: 'string', description: 'Upstream server URL (sse/streamableHttp only).', optional: true },
       description: { type: 'string', description: 'Optional human-readable note about this proxy.', optional: true },
     },
-    fn: async ({ slug, transport, command, args, url, description }) => {
-      const body = { slug, transport, description: description || undefined, command, args: args ? parseArgs(args) : undefined, url };
+    fn: async ({ slug, transport, command, args, env, url, description }) => {
+      const body = { slug, transport, description: description || undefined, command, args: args ? parseArgs(args) : undefined, env: env ? parseEnv(env) : undefined, url };
       const res = await fetch('/api/proxies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       return res.json();
     },
@@ -309,12 +331,13 @@ window.__mcpTools = [
       transport: { type: 'string', description: '"stdio", "sse", or "streamableHttp".' },
       command: { type: 'string', description: 'Executable to spawn (stdio only).', optional: true },
       args: { type: 'string', description: 'Space-separated command-line args (stdio only) — same quoting rule as add_mcp_proxy: only quote an arg containing spaces.', optional: true },
+      env: { type: 'string', description: 'Environment variables for the spawned process (stdio only), as KEY=VALUE — one per line for multiple.', optional: true },
       url: { type: 'string', description: 'Upstream server URL (sse/streamableHttp only).', optional: true },
       description: { type: 'string', description: 'Optional human-readable note about this proxy.', optional: true },
     },
-    fn: async ({ slug, newSlug, transport, command, args, url, description }) => {
+    fn: async ({ slug, newSlug, transport, command, args, env, url, description }) => {
       const id = await resolveIdBySlug(slug);
-      const body = { slug: newSlug || slug, transport, description: description || undefined, command, args: args ? parseArgs(args) : undefined, url };
+      const body = { slug: newSlug || slug, transport, description: description || undefined, command, args: args ? parseArgs(args) : undefined, env: env ? parseEnv(env) : undefined, url };
       const res = await fetch(`/api/proxies/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       return res.json();
     },
