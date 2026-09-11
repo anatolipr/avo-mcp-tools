@@ -6,6 +6,26 @@ import { toast } from './toast.js';
 import './docs-section.js';
 import './tools-modal.js';
 
+// 3-way (system/light/dark) theme toggle — see the light-dark-theme-toggle
+// pattern: CSS light-dark() tokens (already defined in index.html) resolve
+// automatically from the OS/browser preference; this JS layer only handles
+// the explicit override + persistence via the `data-theme` attribute.
+type ThemeMode = 'system' | 'light' | 'dark';
+const THEME_STORAGE_KEY = 'js-bridge-mcp-theme';
+const THEME_CYCLE: ThemeMode[] = ['system', 'light', 'dark'];
+const THEME_ICON: Record<ThemeMode, string> = { system: '◐', light: '☀', dark: '☾' };
+const THEME_LABEL: Record<ThemeMode, string> = { system: 'Auto', light: 'Light', dark: 'Dark' };
+
+function loadTheme(): ThemeMode {
+  const raw = localStorage.getItem(THEME_STORAGE_KEY);
+  return raw === 'light' || raw === 'dark' ? raw : 'system';
+}
+
+function applyTheme(mode: ThemeMode) {
+  if (mode === 'system') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', mode);
+}
+
 function formatAge(ms: number): string {
   const diff = Date.now() - ms;
   const min = Math.floor(diff / 60000);
@@ -29,6 +49,19 @@ export class DashboardApp extends LitElement {
     }
     .copy-snippet-btn:hover { background: var(--hover); border-color: var(--accent); }
     .copy-snippet-btn:active { background: var(--accent-tint); }
+    .header-actions { display: flex; gap: 8px; align-items: baseline; }
+    .theme-toggle {
+      flex: 0 0 auto; font-size: 14px; width: 28px; height: 28px; padding: 0; border-radius: 6px;
+      border: 1px solid var(--border-strong); background: var(--bg); color: inherit; cursor: pointer;
+    }
+    .theme-toggle:hover { background: var(--hover); border-color: var(--accent); }
+    .nav-link {
+      flex: 0 0 auto; font-size: 12px; padding: 6px 12px; border-radius: 6px;
+      border: 1px solid var(--border-strong); background: var(--bg); color: inherit; cursor: pointer;
+      text-decoration: none; box-sizing: border-box; display: inline-block;
+    }
+    .nav-link:hover { background: var(--hover); border-color: var(--accent); }
+    .connection-kind { flex: 0 0 auto; font-size: 12px; }
     .empty {
       padding: 40px 20px; text-align: center; opacity: 0.6; font-size: 13px;
       border: 1px dashed var(--border-strong); border-radius: 8px;
@@ -108,10 +141,22 @@ export class DashboardApp extends LitElement {
   // in the log on that first snapshot are pre-existing history, not new
   // events, so they're recorded as seen without toasting.
   #seenFirstSnapshot = false;
+  #theme = new Signal<ThemeMode>(loadTheme());
 
   constructor() {
     super();
     new SignalWatcher(this);
+    // Applied here (before first render), not just on toggle-click, so a
+    // reload doesn't flash the default OS theme before the stored override
+    // kicks in — see the pattern's own note on why this must happen early.
+    applyTheme(this.#theme.value);
+  }
+
+  #cycleTheme() {
+    const next = THEME_CYCLE[(THEME_CYCLE.indexOf(this.#theme.value) + 1) % THEME_CYCLE.length]!;
+    this.#theme.set(next);
+    localStorage.setItem(THEME_STORAGE_KEY, next);
+    applyTheme(next);
   }
 
   connectedCallback() {
@@ -254,7 +299,17 @@ export class DashboardApp extends LitElement {
           <h1>Connected apps</h1>
           <p class="subtitle">Live channels and bridged browser tabs — updates automatically.</p>
         </div>
-        <button class="copy-snippet-btn" @click=${() => this.#copyEmbedSnippet()}>Copy embed snippet…</button>
+        <div class="header-actions">
+          <a class="nav-link" href="/admin">Proxies (admin)</a>
+          <a class="nav-link" href="/hub">Hub</a>
+          <button class="copy-snippet-btn" @click=${() => this.#copyEmbedSnippet()}>Copy embed snippet…</button>
+          <button
+            class="theme-toggle"
+            title=${`Theme: ${THEME_LABEL[this.#theme.value]} (click to change)`}
+            aria-label="Toggle color theme"
+            @click=${() => this.#cycleTheme()}
+          >${THEME_ICON[this.#theme.value]}</button>
+        </div>
       </div>
       ${channels.length === 0
         ? html`<div class="empty">No channels yet. A channel appears here once an agent calls join_channel, or a page connects and lands on the default channel.</div>`
@@ -307,6 +362,7 @@ export class DashboardApp extends LitElement {
                 return html`
                   <div class="connection-row">
                     <span class="connection-dot"></span>
+                    <span class="connection-kind" title=${conn.kind === 'proxy' ? 'MCP server proxy' : 'Browser tab'}>${conn.kind === 'proxy' ? '🔌' : '🌐'}</span>
                     <span class="connection-label">${conn.label ?? '(unlabeled)'}</span>
                     <span
                       class="connection-summary"

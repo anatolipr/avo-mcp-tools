@@ -1,0 +1,364 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>js-bridge-mcp — Proxies</title>
+<style>
+  /* Same token set as the dashboard (src/dashboard/index.html) — kept in
+     sync manually since these are hand-written static pages with no shared
+     build step (see the copy-proxy-ui vite plugin's own comment). */
+  :root {
+    color-scheme: light dark;
+    --border: light-dark(#0000001f, #ffffff2e);
+    --border-strong: light-dark(#00000038, #ffffff4a);
+    --hover: light-dark(#00000010, #ffffff14);
+    --bg: light-dark(#ffffff, #1a1a1a);
+    --bg-subtle: light-dark(#00000008, #ffffff0d);
+    --fg: light-dark(#111111, #f0f0f0);
+    --accent: light-dark(#2563eb, #3b82f6);
+    --accent-tint: light-dark(#2563eb11, #3b82f622);
+    --danger: light-dark(#dc2626, #fca5a5);
+    --success: light-dark(#16a34a, #4ade80);
+    --warning: light-dark(#ca8a04, #facc15);
+    --shadow: light-dark(#00000026, #00000080);
+  }
+  :root[data-theme='light'] { color-scheme: light; }
+  :root[data-theme='dark']  { color-scheme: dark; }
+
+  body { font: 14px/1.4 system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 1.2rem; }
+  .header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .theme-toggle {
+    flex: 0 0 auto; font-size: 14px; width: 28px; height: 28px; padding: 0; border-radius: 6px;
+    border: 1px solid var(--border-strong); background: var(--bg); color: inherit; cursor: pointer;
+  }
+  .theme-toggle:hover { background: var(--hover); border-color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .status-ok { color: var(--success); }
+  .status-err { color: var(--danger); }
+  .status-paused { opacity: 0.6; }
+  button { font: inherit; font-size: 12px; padding: 2px 8px; margin-right: 4px; cursor: pointer; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--bg); color: inherit; }
+  button:hover { background: var(--hover); border-color: var(--accent); }
+  form { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 0.6rem; margin: 1rem 0; max-width: 500px; }
+  form label { align-self: center; }
+  input, select { font: inherit; padding: 2px 4px; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; }
+  .err { color: var(--danger); font-size: 12px; }
+  .hint { opacity: 0.7; font-size: 12px; }
+  .config-row td { background: var(--bg-subtle); }
+  .config-row pre { margin: 0.3rem 0; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .cancel-edit { display: none; }
+</style>
+<script>
+  // Applied synchronously, before first paint, to avoid a flash of the
+  // wrong theme — see the light-dark-theme-toggle pattern's own note on why
+  // this can't wait for the deferred module script below.
+  (function () {
+    var stored = localStorage.getItem('js-bridge-mcp-theme');
+    if (stored === 'light' || stored === 'dark') document.documentElement.setAttribute('data-theme', stored);
+  })();
+</script>
+</head>
+<body>
+<div class="header-row">
+  <h1>MCP server proxies</h1>
+  <button class="theme-toggle" id="theme-toggle" title="Theme: Auto (click to change)" aria-label="Toggle color theme">◐</button>
+</div>
+<p class="hint">Each proxy spawns/connects to an upstream MCP server and exposes its tools on a dedicated channel, prefixed <code>&lt;slug&gt;__</code>. See <a href="/hub">/hub</a> to bridge every active proxy into one browser tab. This page can also be bridged (or opened with <strong>Cmd/Ctrl+Shift+A</strong> for Human MCP Relay) to manage proxies by name: add/view/edit/pause/resume/restart/remove.</p>
+
+<table id="rows"><thead><tr><th></th><th>slug</th><th>transport</th><th>status</th><th>tools</th><th></th></tr></thead><tbody></tbody></table>
+
+<h2 id="form-title">Add a proxy</h2>
+<form id="proxy-form">
+  <input type="hidden" name="editId">
+  <label>Slug</label><input name="slug" required pattern="[a-zA-Z0-9_-]+" placeholder="atlassian">
+  <label>Description</label><input name="description" placeholder="optional">
+  <label>Transport</label>
+  <select name="transport">
+    <option value="stdio">stdio</option>
+    <option value="sse">sse</option>
+    <option value="streamableHttp">streamableHttp</option>
+  </select>
+  <label>Command</label><input name="command" placeholder="npx (stdio only)">
+  <label>Args</label><input name="args" placeholder="space-separated (stdio only)">
+  <label>URL</label><input name="url" placeholder="http(s)://... (sse/streamableHttp only)">
+  <label></label>
+  <div>
+    <button type="submit" id="submit-btn">Add proxy</button>
+    <button type="button" class="cancel-edit" id="cancel-edit">Cancel edit</button>
+  </div>
+</form>
+<p class="err" id="add-err"></p>
+
+<script type="module">
+// Theme toggle — same 3-way (system/light/dark) pattern as the dashboard,
+// via CSS light-dark() tokens + a data-theme override (see this file's
+// <style> block for the token definitions).
+const THEME_STORAGE_KEY = 'js-bridge-mcp-theme';
+const THEME_CYCLE = ['system', 'light', 'dark'];
+const THEME_ICON = { system: '◐', light: '☀', dark: '☾' };
+const THEME_LABEL = { system: 'Auto', light: 'Light', dark: 'Dark' };
+function loadTheme() {
+  const raw = localStorage.getItem(THEME_STORAGE_KEY);
+  return raw === 'light' || raw === 'dark' ? raw : 'system';
+}
+function applyTheme(mode) {
+  if (mode === 'system') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', mode);
+}
+const themeToggleBtn = document.querySelector('#theme-toggle');
+function renderThemeButton(mode) {
+  themeToggleBtn.textContent = THEME_ICON[mode];
+  themeToggleBtn.title = `Theme: ${THEME_LABEL[mode]} (click to change)`;
+}
+let currentTheme = loadTheme();
+renderThemeButton(currentTheme);
+themeToggleBtn.addEventListener('click', () => {
+  currentTheme = THEME_CYCLE[(THEME_CYCLE.indexOf(currentTheme) + 1) % THEME_CYCLE.length];
+  localStorage.setItem(THEME_STORAGE_KEY, currentTheme);
+  applyTheme(currentTheme);
+  renderThemeButton(currentTheme);
+});
+
+const rows = document.querySelector('#rows tbody');
+const form = document.querySelector('#proxy-form');
+const formTitle = document.querySelector('#form-title');
+const submitBtn = document.querySelector('#submit-btn');
+const cancelEditBtn = document.querySelector('#cancel-edit');
+let expandedId = null; // id currently showing its "View" config row, if any
+
+// Args are spawned via child_process directly (no shell in between — see
+// proxy-manager.ts's StdioClientTransport), so each array element reaches
+// the OS as a literal argv entry: no shell ever strips quotes. A human
+// typing --dsn "mysql://..." into a single text field naturally quotes it
+// out of command-line habit, expecting shell-style quote-stripping — a
+// naive .split(/\s+/) instead passed the literal quote characters through
+// to the child process, corrupting the value (e.g. dbhub's DSN parser
+// choking on a leading `"` before "mysql:"). This tokenizer strips matching
+// single/double quotes around a token the same way a shell would, while
+// still splitting on unquoted whitespace.
+function parseArgs(text) {
+  const args = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    args.push(match[1] ?? match[2] ?? match[3]);
+  }
+  return args;
+}
+
+// Inverse of parseArgs, for displaying an existing config's args back into
+// the single text field — re-quotes any arg containing whitespace so a
+// round-trip (view → edit → save with no changes) reproduces the exact same
+// args array, instead of a multi-word arg silently splitting into several
+// args on save.
+function formatArgs(args) {
+  return (args ?? []).map((a) => (/\s/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(' ');
+}
+
+function exitEditMode() {
+  form.reset();
+  form.editId.value = '';
+  formTitle.textContent = 'Add a proxy';
+  submitBtn.textContent = 'Add proxy';
+  cancelEditBtn.style.display = 'none';
+}
+
+function enterEditMode(config) {
+  form.editId.value = config.id;
+  form.slug.value = config.slug;
+  form.description.value = config.description ?? '';
+  form.transport.value = config.transport;
+  form.command.value = config.command ?? '';
+  form.args.value = formatArgs(config.args);
+  form.url.value = config.url ?? '';
+  formTitle.textContent = `Edit proxy "${config.slug}"`;
+  submitBtn.textContent = 'Save changes';
+  cancelEditBtn.style.display = 'inline-block';
+  form.scrollIntoView({ behavior: 'smooth' });
+}
+
+async function refresh() {
+  const proxies = await fetch('/api/proxies').then((r) => r.json());
+  rows.innerHTML = '';
+  for (const p of proxies) {
+    const tr = document.createElement('tr');
+    const statusClass = p.paused ? 'status-paused' : p.connected ? 'status-ok' : 'status-err';
+    const statusText = p.paused ? 'paused' : p.connected ? 'connected' : (p.lastError ? `error: ${p.lastError}` : 'not connected');
+    // A proxy can be fully "connected" (no lastError) yet still have some
+    // upstream tools silently dropped (unsupported param schema — see
+    // proxy-manager.ts's translateTools) — surface that here so
+    // toolCount looking lower than expected has a visible explanation
+    // instead of only ever showing up in server stderr.
+    const skippedNote = p.skippedTools?.length
+      ? `<br><span class="status-err" title="${p.skippedTools.join(', ')}">${p.skippedTools.length} tool(s) skipped (unsupported schema)</span>`
+      : '';
+    tr.innerHTML = `
+      <td>🔌</td>
+      <td>${p.slug}</td>
+      <td>${p.transport}</td>
+      <td class="${statusClass}">${statusText}${skippedNote}</td>
+      <td>${p.toolCount}</td>
+      <td>
+        <button data-action="view">View</button>
+        <button data-action="edit">Edit</button>
+        ${p.paused ? '<button data-action="resume">Resume</button>' : '<button data-action="pause">Pause</button>'}
+        <button data-action="restart">Restart</button>
+        <button data-action="remove">Remove</button>
+      </td>`;
+    tr.querySelectorAll('button').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const action = btn.dataset.action;
+        if (action === 'remove') { await fetch(`/api/proxies/${p.id}`, { method: 'DELETE' }); expandedId = null; }
+        else if (action === 'view') { expandedId = expandedId === p.id ? null : p.id; }
+        else if (action === 'edit') { const config = await fetch(`/api/proxies/${p.id}`).then((r) => r.json()); enterEditMode(config); return; }
+        else await fetch(`/api/proxies/${p.id}/${action}`, { method: 'POST' });
+        refresh();
+      });
+    });
+    rows.appendChild(tr);
+
+    if (expandedId === p.id) {
+      const config = await fetch(`/api/proxies/${p.id}`).then((r) => r.json());
+      const configRow = document.createElement('tr');
+      configRow.className = 'config-row';
+      configRow.innerHTML = `<td></td><td colspan="5"><pre>${JSON.stringify(config, null, 2).replace(/</g, '&lt;')}</pre></td>`;
+      rows.appendChild(configRow);
+    }
+  }
+}
+
+cancelEditBtn.addEventListener('click', exitEditMode);
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const data = new FormData(form);
+  const transport = data.get('transport');
+  const editId = data.get('editId');
+  const body = {
+    slug: data.get('slug'),
+    description: data.get('description') || undefined,
+    transport,
+    ...(transport === 'stdio'
+      ? { command: data.get('command'), args: parseArgs(data.get('args') || '') }
+      : { url: data.get('url') }),
+  };
+  const res = editId
+    ? await fetch(`/api/proxies/${editId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    : await fetch('/api/proxies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const result = await res.json();
+  document.querySelector('#add-err').textContent = result.ok ? '' : (result.error ?? 'failed to save proxy');
+  if (result.ok) { exitEditMode(); refresh(); }
+});
+
+refresh();
+setInterval(refresh, 3000);
+
+// window.__mcpTools — lets an MCP client (join_channel into this page's own
+// bridged channel) or a human via Human MCP Relay (Cmd/Ctrl+Shift+A below)
+// do this same add/view/edit/pause/resume/restart/remove CRUD by name
+// instead of only through the form above. Each tool forwards to the exact
+// same /api/proxies routes the UI itself calls — one implementation, two
+// front doors, same convention mcp-tenant-lib's dashboard.ts already uses
+// for its own register/unregister routes.
+async function resolveIdBySlug(slug) {
+  const proxies = await fetch('/api/proxies').then((r) => r.json());
+  const match = proxies.find((p) => p.slug === slug);
+  if (!match) throw new Error(`no proxy with slug "${slug}" — call list_mcp_proxies to see what's configured`);
+  return match.id;
+}
+
+window.__mcpTools = [
+  {
+    name: 'list_mcp_proxies',
+    description: 'Lists every configured MCP-server proxy with its live status (connected, paused, tool count, last error).',
+    params: {},
+    fn: async () => fetch('/api/proxies').then((r) => r.json()),
+  },
+  {
+    name: 'view_mcp_proxy',
+    description: 'Returns one proxy\'s full config (transport, command/args or url, description) by slug.',
+    params: { slug: { type: 'string', description: 'The proxy\'s slug, e.g. "atlassian".' } },
+    fn: async ({ slug }) => fetch(`/api/proxies/${await resolveIdBySlug(slug)}`).then((r) => r.json()),
+  },
+  {
+    name: 'add_mcp_proxy',
+    description:
+      'Adds and starts a new MCP-server proxy. For transport "stdio", pass command (and optionally args as a space-separated string — wrap any single arg containing spaces in double quotes, e.g. --dsn "mysql://user:pass@host/db", NOT needed for a value with no spaces even if it contains other punctuation like : or @). For "sse" or "streamableHttp", pass url instead. The proxy\'s tools then appear on its own channel named after slug, prefixed "<slug>__".',
+    params: {
+      slug: { type: 'string', description: 'URL-safe name for this proxy, e.g. "atlassian" — also its channel name and tool-name prefix.' },
+      transport: { type: 'string', description: '"stdio", "sse", or "streamableHttp".' },
+      command: { type: 'string', description: 'Executable to spawn (stdio only), e.g. "npx".', optional: true },
+      args: { type: 'string', description: 'Space-separated command-line args (stdio only), e.g. -y some-mcp-server --dsn "mysql://user:pass@host/db". Only quote an arg if it itself contains a space — quotes are stripped, not passed through to the process.', optional: true },
+      url: { type: 'string', description: 'Upstream server URL (sse/streamableHttp only).', optional: true },
+      description: { type: 'string', description: 'Optional human-readable note about this proxy.', optional: true },
+    },
+    fn: async ({ slug, transport, command, args, url, description }) => {
+      const body = { slug, transport, description: description || undefined, command, args: args ? parseArgs(args) : undefined, url };
+      const res = await fetch('/api/proxies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      return res.json();
+    },
+  },
+  {
+    name: 'edit_mcp_proxy',
+    description:
+      'Replaces an existing proxy\'s config (same fields and quoting rules as add_mcp_proxy) and restarts it under the new config. Its current paused/running state is preserved. Fields not given fall back to empty, so pass the full desired config, not just what changed.',
+    params: {
+      slug: { type: 'string', description: 'The EXISTING proxy\'s current slug, to find it.' },
+      newSlug: { type: 'string', description: 'The slug to rename it to — same as slug if not renaming.' },
+      transport: { type: 'string', description: '"stdio", "sse", or "streamableHttp".' },
+      command: { type: 'string', description: 'Executable to spawn (stdio only).', optional: true },
+      args: { type: 'string', description: 'Space-separated command-line args (stdio only) — same quoting rule as add_mcp_proxy: only quote an arg containing spaces.', optional: true },
+      url: { type: 'string', description: 'Upstream server URL (sse/streamableHttp only).', optional: true },
+      description: { type: 'string', description: 'Optional human-readable note about this proxy.', optional: true },
+    },
+    fn: async ({ slug, newSlug, transport, command, args, url, description }) => {
+      const id = await resolveIdBySlug(slug);
+      const body = { slug: newSlug || slug, transport, description: description || undefined, command, args: args ? parseArgs(args) : undefined, url };
+      const res = await fetch(`/api/proxies/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      return res.json();
+    },
+  },
+  {
+    name: 'pause_mcp_proxy',
+    description: 'Pauses a proxy — its tools disappear from its channel immediately, but its config is kept for resume_mcp_proxy.',
+    params: { slug: { type: 'string', description: 'The proxy\'s slug.' } },
+    fn: async ({ slug }) => { const ok = await fetch(`/api/proxies/${await resolveIdBySlug(slug)}/pause`, { method: 'POST' }).then((r) => r.json()); return ok; },
+  },
+  {
+    name: 'resume_mcp_proxy',
+    description: 'Resumes a previously paused proxy — reconnects it and its tools reappear.',
+    params: { slug: { type: 'string', description: 'The proxy\'s slug.' } },
+    fn: async ({ slug }) => fetch(`/api/proxies/${await resolveIdBySlug(slug)}/resume`, { method: 'POST' }).then((r) => r.json()),
+  },
+  {
+    name: 'restart_mcp_proxy',
+    description: 'Restarts a proxy\'s connection to its upstream server — useful if it\'s stuck in an error state. Any call in flight against it at the moment of restart fails cleanly rather than hanging.',
+    params: { slug: { type: 'string', description: 'The proxy\'s slug.' } },
+    fn: async ({ slug }) => fetch(`/api/proxies/${await resolveIdBySlug(slug)}/restart`, { method: 'POST' }).then((r) => r.json()),
+  },
+  {
+    name: 'remove_mcp_proxy',
+    description: 'Permanently removes a proxy and its config — this cannot be undone; add_mcp_proxy would be needed to recreate it.',
+    params: { slug: { type: 'string', description: 'The proxy\'s slug.' } },
+    fn: async ({ slug }) => { const ok = await fetch(`/api/proxies/${await resolveIdBySlug(slug)}`, { method: 'DELETE' }).then((r) => r.json()); return ok; },
+  },
+];
+window.__mcpSummary = 'Manage MCP-server proxies for js-bridge-mcp: add/view/edit/pause/resume/restart/remove. See /hub separately to actually USE a proxy\'s tools once it\'s added here.';
+</script>
+
+<!--
+  Two independent consumers of the window.__mcpTools this page just set
+  (same decoupled shape as /hub and htmlpaint.com) — placed AFTER the module
+  block above so window.__mcpTools is already assigned by the time each
+  evaluates: main.js reads it once at import time (no re-sync for a later
+  plain reassignment — see main.ts's own header comment), and since this
+  page's __mcpTools is a static array (not built from an async fetch like
+  /hub's), a plain static <script> tag is safe here — no readiness race.
+-->
+<script type="module" src="http://localhost:8766/main.js?server=http%3A%2F%2Flocalhost%3A8766&tenant=admin"></script>
+
+<!-- Human MCP Relay popup, opened with Cmd/Ctrl+Shift+A — reads window.__mcpTools/__mcpSummary at POPUP-OPEN time, so ordering relative to it doesn't matter. -->
+<script type="module" src="https://cdn.jsdelivr.net/npm/human-mcp-relay@0/src/relay.js"></script>
+</body>
+</html>

@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>js-bridge-mcp — Hub</title>
+<style>
+  /* Same token set as the dashboard (src/dashboard/index.html) — kept in
+     sync manually since these are hand-written static pages with no shared
+     build step (see the copy-proxy-ui vite plugin's own comment). */
+  :root {
+    color-scheme: light dark;
+    --border: light-dark(#0000001f, #ffffff2e);
+    --border-strong: light-dark(#00000038, #ffffff4a);
+    --hover: light-dark(#00000010, #ffffff14);
+    --bg: light-dark(#ffffff, #1a1a1a);
+    --bg-subtle: light-dark(#00000008, #ffffff0d);
+    --fg: light-dark(#111111, #f0f0f0);
+    --accent: light-dark(#2563eb, #3b82f6);
+    --accent-tint: light-dark(#2563eb11, #3b82f622);
+    --danger: light-dark(#dc2626, #fca5a5);
+    --success: light-dark(#16a34a, #4ade80);
+    --warning: light-dark(#ca8a04, #facc15);
+    --shadow: light-dark(#00000026, #00000080);
+  }
+  :root[data-theme='light'] { color-scheme: light; }
+  :root[data-theme='dark']  { color-scheme: dark; }
+
+  body { font: 14px/1.4 system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; color: var(--fg); background: var(--bg); }
+  .header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .theme-toggle {
+    flex: 0 0 auto; font-size: 14px; width: 28px; height: 28px; padding: 0; border-radius: 6px;
+    border: 1px solid var(--border-strong); background: var(--bg); color: inherit; cursor: pointer;
+  }
+  .theme-toggle:hover { background: var(--hover); border-color: var(--accent); }
+  ul { padding-left: 1.2rem; }
+  .status { opacity: 0.7; font-size: 12px; }
+  .tool-name { font-family: ui-monospace, monospace; font-weight: 600; }
+  .tool-desc { opacity: 0.7; }
+  details { margin: 1rem 0; }
+  summary { cursor: pointer; font-size: 12px; opacity: 0.7; }
+  pre { font-size: 12px; background: var(--bg-subtle); padding: 0.6rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+</style>
+<script>
+  // Applied synchronously, before first paint — see admin/index.html's
+  // identical block for why this can't wait for the deferred module script.
+  (function () {
+    var stored = localStorage.getItem('js-bridge-mcp-theme');
+    if (stored === 'light' || stored === 'dark') document.documentElement.setAttribute('data-theme', stored);
+  })();
+</script>
+
+<!--
+  Same shape as any other app bridged into js-bridge-mcp (e.g. htmlpaint.com):
+  this page defines window.__mcpTools/__mcpSummary itself (below), then two
+  independent consumers attach to that same contract — js-bridge-mcp's own
+  client (main.js, a real MCP transport for an MCP client to join_channel
+  ("hub") into) and human-mcp-relay (a copy/paste popup, Cmd/Ctrl+Shift+A,
+  for a chat with no MCP connection). Neither knows about the other or about
+  proxy-manager.ts. Unlike htmlpaint.com, main.js can't be a static <script>
+  tag here — see the comment right before its import below for why.
+-->
+</head>
+<body>
+<div class="header-row">
+  <h1>js-bridge-mcp hub</h1>
+  <button class="theme-toggle" id="theme-toggle" title="Theme: Auto (click to change)" aria-label="Toggle color theme">◐</button>
+</div>
+<p>Merges every active <a href="/admin">proxy</a>'s tools into this one tab's <code>window.__mcpTools</code>. Bridge this tab into an MCP client via the dashboard's "Copy embed snippet…", or press <strong>Cmd/Ctrl+Shift+A</strong> for the Human MCP Relay popup.</p>
+<p class="status" id="status">loading proxies…</p>
+<ul id="tools"></ul>
+
+<details id="raw-details">
+  <summary>window.__mcpTools (raw, live)</summary>
+  <pre id="raw-tools"></pre>
+</details>
+
+<script type="module">
+// Theme toggle — same 3-way (system/light/dark) pattern as the dashboard
+// and /admin, via CSS light-dark() tokens + a data-theme override.
+const THEME_STORAGE_KEY = 'js-bridge-mcp-theme';
+const THEME_CYCLE = ['system', 'light', 'dark'];
+const THEME_ICON = { system: '◐', light: '☀', dark: '☾' };
+const THEME_LABEL = { system: 'Auto', light: 'Light', dark: 'Dark' };
+function loadTheme() {
+  const raw = localStorage.getItem(THEME_STORAGE_KEY);
+  return raw === 'light' || raw === 'dark' ? raw : 'system';
+}
+function applyTheme(mode) {
+  if (mode === 'system') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', mode);
+}
+const themeToggleBtn = document.querySelector('#theme-toggle');
+function renderThemeButton(mode) {
+  themeToggleBtn.textContent = THEME_ICON[mode];
+  themeToggleBtn.title = `Theme: ${THEME_LABEL[mode]} (click to change)`;
+}
+let currentTheme = loadTheme();
+renderThemeButton(currentTheme);
+themeToggleBtn.addEventListener('click', () => {
+  currentTheme = THEME_CYCLE[(THEME_CYCLE.indexOf(currentTheme) + 1) % THEME_CYCLE.length];
+  localStorage.setItem(THEME_STORAGE_KEY, currentTheme);
+  applyTheme(currentTheme);
+  renderThemeButton(currentTheme);
+});
+
+// This page's OWN tool definition — same role as htmlpaint's mcpbridge.js:
+// a plain window.__mcpTools array, each entry's fn forwarding through
+// proxy-manager.ts's HTTP call endpoint (this page has no direct in-process
+// access to a proxy's directCall — see tenant.ts).
+async function loadProxies() {
+  const proxies = await fetch('/api/proxies').then((r) => r.json());
+  const active = proxies.filter((p) => !p.paused && p.connected);
+  const perProxyTools = await Promise.all(active.map(async (p) => {
+    const { tools } = await fetch(`/api/proxies/channel/${encodeURIComponent(p.slug)}/manifest`).then((r) => r.json());
+    return tools.map((t) => ({
+      ...t,
+      fn: (args) => fetch(`/api/proxies/channel/${encodeURIComponent(p.slug)}/call/${encodeURIComponent(t.name)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args ?? {}),
+      }).then((r) => r.json()),
+    }));
+  }));
+  window.__mcpTools = perProxyTools.flat();
+  window.__mcpSummary = `js-bridge-mcp hub — every tool here is proxied from a real upstream MCP server (see /admin): ${active.map((p) => p.slug).join(', ') || '(none active)'}. Tool names are prefixed <slug>__ to identify which server a tool belongs to.`;
+  // Overrides human-mcp-relay's default primer closing line ("start by
+  // calling a read-only tool") — that default assumes one coherent app/
+  // document worth exploring on its own, which doesn't hold here: this
+  // page's tools come from N unrelated upstream servers (e.g. a database
+  // proxy AND an unrelated hello-world proxy), so "just start calling
+  // something" would have the LLM invoke a proxy's tool the human never
+  // asked about. See primer.js's closingNote doc comment.
+  window.__mcpClosingNote =
+    `This list spans ${active.length} separate MCP server(s) (${active.map((p) => p.slug).join(', ') || 'none'}), not one app — do NOT call any tool yet. ` +
+    'First ask the human which proxy/tool they actually want to use for this task, or wait for them to say what they need before proposing a call.';
+
+  document.querySelector('#status').textContent = `${active.length} active proxy(ies): ${active.map((p) => p.slug).join(', ') || '(none)'}`;
+  document.querySelector('#tools').innerHTML = window.__mcpTools.length
+    ? window.__mcpTools.map((t) => `<li><span class="tool-name">${t.name}</span> — <span class="tool-desc">${t.description ?? ''}</span></li>`).join('')
+    : '<li><em>no tools yet</em></li>';
+  document.querySelector('#raw-tools').textContent = JSON.stringify(window.__mcpTools, null, 2);
+}
+
+await loadProxies();
+setInterval(loadProxies, 5000);
+
+// main.js reads window.__mcpTools ONCE at import time (see its own header
+// comment) and has no re-sync path for a later plain reassignment of that
+// global — only window.__mcpToolBus changes trigger a resend, which this
+// page never uses. So unlike htmlpaint.com (whose window.__mcpTools is
+// fixed at page load), main.js has to be imported dynamically, AFTER the
+// first loadProxies() completes, rather than as a static <script> tag that
+// could race it and register zero tools. A later proxy pause/resume still
+// needs a fresh main.js import (or a page reload) to be picked up — a
+// fixed `tenant=hub` query param keeps that re-import idempotent from the
+// server's point of view (same channel, not a new one each time).
+await import(`http://localhost:8766/main.js?server=${encodeURIComponent('http://localhost:8766')}&tenant=hub`);
+</script>
+
+<!-- Independent, decoupled attachment (same as htmlpaint.com's index.html): Human MCP Relay popup, opened with Cmd/Ctrl+Shift+A. Reads window.__mcpTools/__mcpSummary at POPUP-OPEN time (not import time), so — unlike main.js above — it has no race to worry about and always sees whatever loadProxies() most recently set. -->
+<script type="module" src="https://cdn.jsdelivr.net/npm/human-mcp-relay@0/src/relay.js"></script>
+</body>
+</html>

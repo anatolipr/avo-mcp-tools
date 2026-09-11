@@ -4,6 +4,8 @@ import { execSync } from 'node:child_process';
 import { getOrCreateTenant as getOrCreateTenantFor, tenants, startIdleSweep, startEmptySweep, createHttpServer, attachWebSocketServer } from 'mcp-tenant-lib';
 import { initialHelloState } from './types.js';
 import { registerHelloTools } from './tools/register.js';
+import { initProxyManager } from './proxy/proxy-manager.js';
+import { installProxyAdminRoutes } from './proxy/admin-routes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // __dirname is <pkg>/src when run via tsx (dev/test) and <pkg>/dist/src once
@@ -58,6 +60,14 @@ startEmptySweep((id) => console.error(`[mcp] sweeping empty channel: ${id}`));
 // "Not found".
 const CLIENT_DIR = path.join(packageRoot, 'dist', 'client');
 const DASHBOARD_DIR = path.join(packageRoot, 'dist', 'dashboard');
+// proxy-ui/{admin,hub} are hand-written static HTML+JS, not compiled by tsc
+// - copied into dist/proxy-ui by vite's copyClientExtras (vite.config.ts),
+// same convention as tool-bus.js/connect.js, so they exist at this path
+// whether run via tsx from src/ (dev) or from a published dist/ build.
+const PROXY_UI_ROOT = path.join(packageRoot, __dirname.endsWith(`${path.sep}dist${path.sep}src`) ? 'dist/proxy-ui' : 'src/proxy-ui');
+const ADMIN_UI_DIR = path.join(PROXY_UI_ROOT, 'admin');
+const HUB_UI_DIR = path.join(PROXY_UI_ROOT, 'hub');
+const PROXY_CONFIG_PATH = process.env.PROXY_CONFIG_PATH ?? path.join(packageRoot, '.js-bridge-mcp-proxies.json');
 
 const httpServer = createHttpServer({
   port: PORT,
@@ -76,6 +86,8 @@ const httpServer = createHttpServer({
     '/main.js': CLIENT_DIR,
     '/tool-bus.js': CLIENT_DIR,
     '/connect.js': CLIENT_DIR,
+    '/admin': ADMIN_UI_DIR,
+    '/hub': HUB_UI_DIR,
   },
   // js-bridge-mcp typically bridges a single browser page per server; MCP
   // clients aren't expected to pin ?tenant= themselves (some, like VS Code
@@ -87,10 +99,14 @@ const httpServer = createHttpServer({
 });
 
 attachWebSocketServer(httpServer, PORT, undefined, initialHelloState);
+installProxyAdminRoutes(httpServer, PORT);
+initProxyManager(PROXY_CONFIG_PATH);
 
 httpServer.listen(PORT, () => {
   console.error(`[js-bridge-mcp] MCP + bridge server listening on http://localhost:${PORT}`);
   console.error(`[js-bridge-mcp] dashboard: http://localhost:${PORT}`);
+  console.error(`[js-bridge-mcp] proxy admin: http://localhost:${PORT}/admin`);
+  console.error(`[js-bridge-mcp] proxy hub: http://localhost:${PORT}/hub`);
   console.error(`[js-bridge-mcp] serve legacy-page/hello-world.html separately: npm run start:static`);
 });
 

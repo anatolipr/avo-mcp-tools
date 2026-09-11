@@ -1,5 +1,5 @@
 import { defineConfig, type Plugin } from 'vite';
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 // tool-bus.js and connect.js are hand-written vanilla ES modules (see
@@ -28,6 +28,22 @@ function copyClientExtras(): Plugin {
   };
 }
 
+// admin/index.html and hub/index.html (src/proxy-ui/) are hand-written
+// static pages, same "not run through vite/tsc" reasoning as
+// copyClientExtras above - server.ts resolves them under dist/proxy-ui at
+// runtime once built, so this is required (not just nice-to-have) for a
+// published build to serve /admin and /hub at all.
+function copyProxyUi(): Plugin {
+  return {
+    name: 'copy-proxy-ui',
+    closeBundle() {
+      const dest = resolve(__dirname, 'dist/proxy-ui');
+      mkdirSync(dest, { recursive: true });
+      cpSync(resolve(__dirname, 'src/proxy-ui'), dest, { recursive: true });
+    },
+  };
+}
+
 // Library mode, not HTML-entry mode: main.js is loaded cross-origin by an
 // unrelated static page via a fixed URL (<script src=".../main.js">), and
 // sdk.js is resolved as a normal npm dependency (js-bridge-mcp/client) by a
@@ -36,7 +52,7 @@ function copyClientExtras(): Plugin {
 // per entry key under the shared outDir, so both land in dist/client/
 // alongside tool-bus.js/connect.js from copyClientExtras above.
 export default defineConfig({
-  plugins: [copyClientExtras()],
+  plugins: [copyClientExtras(), copyProxyUi()],
   build: {
     outDir: 'dist/client',
     emptyOutDir: true,

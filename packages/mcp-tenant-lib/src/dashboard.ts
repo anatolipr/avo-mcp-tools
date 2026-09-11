@@ -7,6 +7,8 @@ export interface DashboardConnection {
   label: string | null;
   toolCount: number;
   summary: string | null;
+  /** 'proxy' for a server-owned directCall connection (see TenantConnection), 'browser' for a real WS tab. */
+  kind: 'browser' | 'proxy';
 }
 
 export interface DashboardChannel {
@@ -41,6 +43,7 @@ export function buildDashboardSnapshot(): DashboardChannel[] {
         label: c.label ?? null,
         toolCount: c.manifest.length,
         summary: c.summary ?? null,
+        kind: c.directCall ? 'proxy' as const : 'browser' as const,
       })),
       // Recent register_page_tool_by_path/_by_code registrations for this
       // channel — a passive log the dashboard renders as sticky toasts, near-

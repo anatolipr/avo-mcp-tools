@@ -37,10 +37,19 @@ const RECENT_REGISTRATIONS_LIMIT = 50;
  * independently of other connections sharing the same tenant (e.g. two
  * browser tabs pasted the same embed snippet). See manifest-tools.ts for
  * how multiple connections' tools get name-disambiguated.
+ *
+ * `socket` and `directCall` are mutually exclusive backing mechanisms for
+ * the same abstraction. `socket` is the original browser-tab case: a real
+ * WS connection Tenant.call sends a `call` message over and awaits a
+ * `call_result` reply on (see ws.ts). `directCall` backs a server-owned
+ * proxy connection (e.g. an outbound MCP client talking to an upstream
+ * server) that has no socket at all — there's no network round trip to
+ * simulate, just an async function to invoke — see registerDirectConnection.
  */
 export interface TenantConnection {
   id: string;
-  socket: WebSocket;
+  socket?: WebSocket;
+  directCall?: (name: string, args: unknown) => Promise<unknown>;
   label?: string;
   manifest: ToolManifestEntry[];
   summary?: string;
@@ -237,6 +246,19 @@ export class Tenant<TSchema, TValues> {
     notifyDashboard();
   }
 
+  /**
+   * Registers a connection with no socket at all — backed instead by an
+   * async function that answers a call directly (see the `directCall` doc
+   * on TenantConnection). Used for server-owned proxy connections (an
+   * outbound MCP client), which have no browser tab and nothing to
+   * broadcast-select via wsClients. Otherwise mirrors registerConnection.
+   */
+  registerDirectConnection(id: string, directCall: (name: string, args: unknown) => Promise<unknown>) {
+    this.connections.set(id, { id, directCall, manifest: [], summary: undefined, label: undefined });
+    this.emptyAt = undefined;
+    notifyDashboard();
+  }
+
   updateConnectionManifest(id: string, manifest: ToolManifestEntry[], summary?: string, label?: string) {
     const conn = this.connections.get(id);
     if (!conn) return; // connection closed/unknown — ignore a late message
@@ -270,7 +292,7 @@ export class Tenant<TSchema, TValues> {
   removeConnection(id: string) {
     const conn = this.connections.get(id);
     if (conn) {
-      this.wsClients.delete(conn.socket);
+      if (conn.socket) this.wsClients.delete(conn.socket);
       this.#stashDynamicTools(conn);
     }
     this.connections.delete(id);
@@ -374,13 +396,21 @@ export class Tenant<TSchema, TValues> {
     });
 
     const send = (targetConnectionId: string | undefined) => {
-      const payload: CallMessage = { type: 'call', id, name, args };
-      const raw = JSON.stringify(payload);
-
       if (targetConnectionId) {
         const conn = this.connections.get(targetConnectionId);
-        if (conn && conn.socket.readyState === conn.socket.OPEN) conn.socket.send(raw);
+        if (conn?.directCall) {
+          conn.directCall(name, args).then(
+            (result) => this.resolveCall(id, result),
+            (err: unknown) => this.rejectCall(id, err instanceof Error ? err.message : String(err)),
+          );
+          return;
+        }
+        const payload: CallMessage = { type: 'call', id, name, args };
+        const raw = JSON.stringify(payload);
+        if (conn?.socket && conn.socket.readyState === conn.socket.OPEN) conn.socket.send(raw);
       } else {
+        const payload: CallMessage = { type: 'call', id, name, args };
+        const raw = JSON.stringify(payload);
         for (const client of this.wsClients) {
           if (client.readyState === client.OPEN) client.send(raw);
         }
@@ -434,7 +464,7 @@ export class Tenant<TSchema, TValues> {
    */
   identifyConnection(connectionId: string): boolean {
     const conn = this.connections.get(connectionId);
-    if (!conn || conn.socket.readyState !== conn.socket.OPEN) return false;
+    if (!conn || !conn.socket || conn.socket.readyState !== conn.socket.OPEN) return false;
     conn.socket.send(JSON.stringify({ type: 'identify', label: conn.label }));
     return true;
   }
@@ -452,7 +482,7 @@ export class Tenant<TSchema, TValues> {
    */
   moveConnection(connectionId: string, targetChannel: string): boolean {
     const conn = this.connections.get(connectionId);
-    if (!conn || conn.socket.readyState !== conn.socket.OPEN) return false;
+    if (!conn || !conn.socket || conn.socket.readyState !== conn.socket.OPEN) return false;
     conn.socket.send(JSON.stringify({ type: 'move_channel', channel: targetChannel }));
     return true;
   }

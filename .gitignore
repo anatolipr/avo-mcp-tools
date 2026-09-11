@@ -18,3 +18,4 @@ build/
 packages/mcp-memory-bucket/memory-bucket.config.json
 *.memory-bucket-credentials.json
 .memory-bucket-remote-cache/
+packages/js-bridge-mcp/.js-bridge-mcp-proxies.json

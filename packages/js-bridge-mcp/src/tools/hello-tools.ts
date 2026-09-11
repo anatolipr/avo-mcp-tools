@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Tenant } from 'mcp-tenant-lib';
 import type { HelloState } from '../types.js';
+import { listProxies as listProxiesState } from '../proxy/proxy-manager.js';
 
 export interface ToolDef {
   name: string;
@@ -42,4 +43,19 @@ const getEmbedSnippet: ToolDef = {
   },
 };
 
-export const helloTools: ToolDef[] = [getEmbedSnippet];
+const listProxies: ToolDef = {
+  name: 'list_proxies',
+  description:
+    'Lists every configured MCP-server proxy (see the admin UI at /admin) — each proxy is a real upstream MCP ' +
+    'server exposed as its own dedicated channel, with every one of its tools prefixed `<slug>__<tool>` (e.g. ' +
+    '"atlassian__get_tickets"). Use this BEFORE guessing a tool name to confirm what\'s currently active, ' +
+    'whether it\'s paused, and how many tools it exposes. `connected: false` with a `lastError` usually means ' +
+    'the upstream server needs its own auth (handled in the admin UI), not a bug here. Call describe_channel on ' +
+    'a proxy\'s `slug` to see its actual tool list.',
+  schema: {},
+  handler: async () => {
+    return { content: [{ type: 'text', text: JSON.stringify(listProxiesState(), null, 2) }] };
+  },
+};
+
+export const helloTools: ToolDef[] = [getEmbedSnippet, listProxies];

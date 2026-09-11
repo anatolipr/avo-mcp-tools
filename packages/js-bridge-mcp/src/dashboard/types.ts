@@ -6,6 +6,10 @@ export interface DashboardConnection {
   label: string | null;
   toolCount: number;
   summary: string | null;
+  // 'proxy' for a server-owned MCP-proxy connection (see the /admin page),
+  // 'browser' for a real bridged tab. Absent on an older/not-yet-rebuilt
+  // server response — treat as 'browser' (see #renderChannel below).
+  kind?: 'browser' | 'proxy';
 }
 
 export interface DashboardChannel {
