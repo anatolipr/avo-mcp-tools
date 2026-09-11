@@ -17,18 +17,24 @@ function paramSpecToZod(spec: ToolParamSpec): z.ZodTypeAny {
     case 'string': schema = z.string(); break;
     case 'number': schema = z.number(); break;
     case 'boolean': schema = z.boolean(); break;
-    default: throw new UnsupportedParamTypeError(`unsupported param type "${(spec as any).type}" (supported: string, number, boolean)`);
+    case 'array': schema = z.array(paramSpecToZod(spec.items)); break;
+    case 'object': schema = z.object(paramsToZodShape(spec.properties)); break;
+    default: throw new UnsupportedParamTypeError(`unsupported param type "${(spec as any).type}" (supported: string, number, boolean, array, object)`);
   }
   if (spec.description) schema = schema.describe(spec.description);
   return spec.optional ? schema.optional() : schema;
 }
 
-function manifestEntryToZodShape(entry: ToolManifestEntry): Record<string, z.ZodTypeAny> {
+function paramsToZodShape(params: Record<string, ToolParamSpec>): Record<string, z.ZodTypeAny> {
   const shape: Record<string, z.ZodTypeAny> = {};
-  for (const [key, spec] of Object.entries(entry.params)) {
+  for (const [key, spec] of Object.entries(params)) {
     shape[key] = paramSpecToZod(spec);
   }
   return shape;
+}
+
+function manifestEntryToZodShape(entry: ToolManifestEntry): Record<string, z.ZodTypeAny> {
+  return paramsToZodShape(entry.params);
 }
 
 /**
@@ -41,25 +47,49 @@ function manifestEntryToZodShape(entry: ToolManifestEntry): Record<string, z.Zod
  * / the session report that led to this field ("register one generic
  * wrapper and call it with different payloads" was unusable without it).
  */
-const REGISTER_TOOL_PARAMS_SHAPE = z
-  .record(
-    z.string(),
+/**
+ * Mirrors ToolParamSpec (types.ts) so a tool registered here can declare
+ * arbitrarily nested params — an array of objects, an object with an array
+ * field, ... — instead of forcing the caller to flatten everything to
+ * scalars and JSON.stringify the rest into a single string param.
+ */
+const TOOL_PARAM_SPEC_SCHEMA: z.ZodType<ToolParamSpec> = z.lazy(() =>
+  z.discriminatedUnion('type', [
     z.object({
-      type: z.enum(['string', 'number', 'boolean']).describe('JSON type of this argument.'),
-      description: z.string().optional().describe('Shown to agents calling the new tool.'),
-      optional: z.boolean().optional().describe('Defaults to false (required).'),
-    })
-  )
+      type: z.enum(['string', 'number', 'boolean']),
+      description: z.string().optional(),
+      optional: z.boolean().optional(),
+    }),
+    z.object({
+      type: z.literal('array'),
+      items: TOOL_PARAM_SPEC_SCHEMA,
+      description: z.string().optional(),
+      optional: z.boolean().optional(),
+    }),
+    z.object({
+      type: z.literal('object'),
+      properties: z.record(z.string(), TOOL_PARAM_SPEC_SCHEMA),
+      description: z.string().optional(),
+      optional: z.boolean().optional(),
+    }),
+  ])
+);
+
+const REGISTER_TOOL_PARAMS_SHAPE = z
+  .record(z.string(), TOOL_PARAM_SPEC_SCHEMA)
   .optional()
   .describe(
     'Parameters the NEW tool itself should accept, e.g. {"action":{"type":"string"},"count":{"type":"number",' +
       '"optional":true}} — read as `args.action`/`args.count` inside `code` (or as the single object argument ' +
-      'passed to the function at `path`). Omit for a zero-argument tool. Always set this instead of hardcoding ' +
-      'values into `code` when the tool should be reusable across calls with different inputs — an omitted/empty ' +
-      'params means MCP clients will strip any arguments passed at call time.'
+      'passed to the function at `path`). `array` nests an `items` spec of this same shape and `object` nests a ' +
+      '`properties` map of this same shape (e.g. {"edits":{"type":"array","items":{"type":"object","properties":' +
+      '{"field":{"type":"string"},"value":{"type":"string"}}}}}), so a tool can take structured input directly ' +
+      'instead of the caller JSON.stringify-ing it into a string param. Omit for a zero-argument tool. Always set ' +
+      'this instead of hardcoding values into `code` when the tool should be reusable across calls with different ' +
+      'inputs — an omitted/empty params means MCP clients will strip any arguments passed at call time.'
   );
 
-function paramsArgToRecord(params: Record<string, { type: 'string' | 'number' | 'boolean'; description?: string; optional?: boolean }> | undefined): Record<string, ToolParamSpec> {
+function paramsArgToRecord(params: Record<string, ToolParamSpec> | undefined): Record<string, ToolParamSpec> {
   return params ?? {};
 }
 

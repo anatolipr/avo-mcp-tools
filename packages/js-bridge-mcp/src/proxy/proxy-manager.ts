@@ -91,31 +91,49 @@ function buildTransport(config: ProxyConfig): { transport: StdioClientTransport 
 }
 
 /**
- * Best-effort JSON-Schema -> ToolParamSpec translation. ToolParamSpec only
- * supports flat string/number/boolean params (see manifest-tools.ts's
- * paramSpecToZod) — any property whose schema isn't one of those primitives
- * (object, array, enum, oneOf, ...) is dropped rather than mistranslated;
- * manifest-tools.ts's own sync() already skips a tool entirely if ANY of its
- * params end up unsupported, so silently dropping here would let such a
- * tool register with a subtly wrong signature instead. To avoid that, a
- * dropped property makes the whole tool ineligible up front (see
- * translateTool below) instead of being silently omitted from params.
+ * Best-effort JSON-Schema -> ToolParamSpec translation, recursing into
+ * `array`/`object` (ToolParamSpec nests these — see types.ts) so e.g.
+ * @modelcontextprotocol/server-filesystem's `paths: string[]` (read_multiple_files)
+ * or `edits: {oldText,newText}[]` (edit_file) translate instead of being
+ * dropped. Anything ToolParamSpec still can't express (enum, oneOf/anyOf/
+ * allOf, tuple-style array `items`, an object with no `properties`, ...)
+ * makes the WHOLE tool ineligible rather than being silently omitted or
+ * mistranslated — manifest-tools.ts's own sync() already skips a tool
+ * entirely if ANY of its params end up unsupported, so a partial params
+ * object here would just register that same tool with a subtly wrong
+ * signature instead.
  */
+function translateSchemaNode(prop: any): ToolParamSpec | undefined {
+  // JSON Schema's "integer" is a distinct valid primitive type from
+  // "number" (a whole-number-only number) — ToolParamSpec only has
+  // 'number', so both map to it. Missing this dropped every dbhub
+  // search_objects-style tool with an integer `limit`/`offset` param.
+  const mappedType = prop?.type === 'integer' ? 'number' : prop?.type;
+  if (mappedType === 'string' || mappedType === 'number' || mappedType === 'boolean') {
+    return { type: mappedType, description: prop.description };
+  }
+  if (mappedType === 'array') {
+    const items = translateSchemaNode(prop.items);
+    if (!items) return undefined;
+    return { type: 'array', items, description: prop.description };
+  }
+  if (mappedType === 'object') {
+    const { params, unsupported } = translateSchemaProperties(prop);
+    if (unsupported) return undefined;
+    return { type: 'object', properties: params, description: prop.description };
+  }
+  return undefined;
+}
+
 function translateSchemaProperties(schema: unknown): { params: Record<string, ToolParamSpec>; unsupported: boolean } {
   const params: Record<string, ToolParamSpec> = {};
   const obj = schema as { type?: string; properties?: Record<string, any>; required?: string[] } | undefined;
   if (!obj || obj.type !== 'object' || !obj.properties) return { params, unsupported: Object.keys(obj?.properties ?? {}).length > 0 };
   const required = new Set(obj.required ?? []);
   for (const [key, prop] of Object.entries(obj.properties)) {
-    // JSON Schema's "integer" is a distinct valid primitive type from
-    // "number" (a whole-number-only number) — ToolParamSpec only has
-    // 'number', so both map to it. Missing this dropped every dbhub
-    // search_objects-style tool with an integer `limit`/`offset` param.
-    const mappedType = prop?.type === 'integer' ? 'number' : prop?.type;
-    if (mappedType !== 'string' && mappedType !== 'number' && mappedType !== 'boolean') {
-      return { params: {}, unsupported: true };
-    }
-    params[key] = { type: mappedType, description: prop.description, optional: !required.has(key) };
+    const node = translateSchemaNode(prop);
+    if (!node) return { params: {}, unsupported: true };
+    params[key] = { ...node, optional: !required.has(key) } as ToolParamSpec;
   }
   return { params, unsupported: false };
 }
@@ -126,8 +144,9 @@ function translateSchemaProperties(schema: unknown): { params: Record<string, To
  * requirement without any mcp-tenant-lib change: a proxy's dedicated
  * single-connection channel never hits computeSlugs' collision-only
  * prefixing (manifest-tools.ts), so the name has to already be correct going
- * in. A tool whose schema doesn't fit ToolParamSpec's primitive-only shape is
- * skipped with a warning rather than registered with a wrong/empty schema.
+ * in. A tool whose schema doesn't fit what ToolParamSpec can express (see
+ * translateSchemaNode) is skipped with a warning rather than registered
+ * with a wrong/empty schema.
  */
 function translateTools(slug: string, upstreamTools: { name: string; description?: string; inputSchema?: unknown }[]): { entries: ToolManifestEntry[]; skipped: string[] } {
   const entries: ToolManifestEntry[] = [];
@@ -135,7 +154,7 @@ function translateTools(slug: string, upstreamTools: { name: string; description
   for (const tool of upstreamTools) {
     const { params, unsupported } = translateSchemaProperties(tool.inputSchema);
     if (unsupported) {
-      console.error(`[proxy-manager] skipping "${slug}__${tool.name}": param schema has a non-primitive field, unsupported by ToolParamSpec`);
+      console.error(`[proxy-manager] skipping "${slug}__${tool.name}": param schema has a field unsupported by ToolParamSpec (e.g. enum, oneOf/anyOf/allOf, or a tuple-style array)`);
       skipped.push(tool.name);
       continue;
     }

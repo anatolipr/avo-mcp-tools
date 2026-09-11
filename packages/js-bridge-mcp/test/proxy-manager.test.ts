@@ -16,6 +16,7 @@ const PORT = 8908;
 const MOCK_HTTP_UPSTREAM_PORT = 8909;
 const BASE_URL = `http://localhost:${PORT}`;
 const STDIO_FIXTURE = fileURLToPath(new URL('./fixtures/mock-stdio-upstream.ts', import.meta.url));
+const STDIO_FIXTURE_NESTED_PARAMS = fileURLToPath(new URL('./fixtures/mock-stdio-upstream-nested-params.ts', import.meta.url));
 
 let serverProcess: ChildProcess;
 let mockHttpUpstream: { close: () => Promise<void> };
@@ -102,6 +103,33 @@ test('a stdio proxy connects, discovers its tool with the slug prefix baked in, 
 
     const result: any = await client.callTool({ name: 'stdiofake__get_tickets', arguments: { day: 'monday' } });
     assert.match(result.content[0].text, /tickets for monday/);
+  } finally {
+    await client.close();
+    await fetch(`${BASE_URL}/api/proxies/${config.id}`, { method: 'DELETE' });
+  }
+});
+
+test('a tool with array-of-string and array-of-object params (e.g. server-filesystem\'s read_multiple_files/edit_file shape) registers and is callable end-to-end', async () => {
+  const config = await addProxy({ slug: 'batchfake', transport: 'stdio', command: 'npx', args: ['tsx', STDIO_FIXTURE_NESTED_PARAMS] });
+  const status = await waitForConnected(config.id);
+  assert.equal(status.toolCount, 1);
+  assert.deepEqual(status.skippedTools ?? [], []);
+
+  const client = await connectMcpClient();
+  try {
+    await client.callTool({ name: 'join_channel', arguments: { channel: 'batchfake' } });
+    const { tools } = await client.listTools();
+    const tool = tools.find((t) => t.name === 'batchfake__batch_tickets');
+    assert.ok(tool, `expected batchfake__batch_tickets in ${JSON.stringify(tools.map((t) => t.name))}`);
+    assert.equal((tool!.inputSchema as any).properties.ids.type, 'array');
+    assert.equal((tool!.inputSchema as any).properties.edits.type, 'array');
+    assert.equal((tool!.inputSchema as any).properties.edits.items.type, 'object');
+
+    const result: any = await client.callTool({
+      name: 'batchfake__batch_tickets',
+      arguments: { ids: ['T-1', 'T-2'], edits: [{ field: 'status', value: 'closed' }] },
+    });
+    assert.match(result.content[0].text, /applied 1 edit\(s\) to \[T-1, T-2\]/);
   } finally {
     await client.close();
     await fetch(`${BASE_URL}/api/proxies/${config.id}`, { method: 'DELETE' });

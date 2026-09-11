@@ -68,11 +68,19 @@ export interface LeaveChannelMessage {
   type: 'leave_channel';
 }
 
-export interface ToolParamSpec {
-  type: 'string' | 'number' | 'boolean';
-  description?: string;
-  optional?: boolean;
-}
+/**
+ * `array`/`object` nest recursively (an array of objects, an object with an
+ * array field, ...) so a proxied upstream MCP tool's real JSON Schema can be
+ * represented losslessly instead of being dropped — see proxy-manager.ts's
+ * translateSchemaNode, the reason this exists beyond flat scalars. Stays
+ * plain-JSON (no `$ref`/`oneOf`/tuple-`items`) since ToolManifestEntry
+ * crosses the WS wire as-is (RegisterToolsMessage) and is echoed back
+ * verbatim by describe_tools/describe_channel.
+ */
+export type ToolParamSpec =
+  | { type: 'string' | 'number' | 'boolean'; description?: string; optional?: boolean }
+  | { type: 'array'; items: ToolParamSpec; description?: string; optional?: boolean }
+  | { type: 'object'; properties: Record<string, ToolParamSpec>; description?: string; optional?: boolean };
 
 /**
  * The wire form of a manifest entry, as sent to the server in a

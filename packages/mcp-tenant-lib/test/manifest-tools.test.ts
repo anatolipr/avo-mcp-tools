@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import { WebSocket } from 'ws';
+import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Tenant, tenants } from '../src/tenant.js';
 import { createManifestToolRegistry } from '../src/manifest-tools.js';
@@ -99,7 +100,7 @@ test('call(undefined, ...) broadcasts to every socket on the tenant (legacy path
 test('unsupported param type skips just that tool, others still register', () => {
   const t = new Tenant('t1', undefined, {});
   t.setToolManifest([
-    { name: 'bad', description: 'x', params: { thing: { type: 'object' as any } } },
+    { name: 'bad', description: 'x', params: { thing: { type: 'enum' as any } } },
     { name: 'insert_title', description: 'd', params: {} },
   ]);
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
@@ -107,6 +108,30 @@ test('unsupported param type skips just that tool, others still register', () =>
   assert.doesNotThrow(() => registry.sync());
   assert.ok(!registry.handles.has('bad'));
   assert.ok(registry.handles.has('insert_title'));
+});
+
+test('array and object param types register and validate call args', async () => {
+  const t = new Tenant('t1', undefined, {});
+  t.setToolManifest([
+    {
+      name: 'edit_file',
+      description: 'd',
+      params: {
+        paths: { type: 'array', items: { type: 'string' } },
+        edits: { type: 'array', items: { type: 'object', properties: { oldText: { type: 'string' }, newText: { type: 'string' } } } },
+      },
+    },
+  ]);
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+  const handle = registry.handles.get('edit_file')!;
+  assert.ok(handle);
+  const inputSchema = handle.inputSchema as unknown as z.ZodTypeAny;
+  const parsed = inputSchema.safeParse({ paths: ['a.txt'], edits: [{ oldText: 'x', newText: 'y' }] });
+  assert.ok(parsed.success, JSON.stringify((parsed as any).error?.issues));
+  const rejected = inputSchema.safeParse({ paths: ['a.txt'], edits: [{ oldText: 'x' }] });
+  assert.ok(!rejected.success);
 });
 
 test('re-registering a manifest removes stale tools and adds new ones', () => {
