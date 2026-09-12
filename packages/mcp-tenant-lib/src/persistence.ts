@@ -26,13 +26,24 @@ interface PersistedTenant<TSchema, TValues> {
 const WRITE_DEBOUNCE_MS = 500;
 
 /**
+ * A tenant that was already idle for a full day before the last shutdown
+ * isn't worth resurrecting on the next boot — nobody's coming back to a form
+ * they abandoned yesterday. Dropping it here (rather than letting it seed
+ * and wait out TENANT_IDLE_TIMEOUT_MS again) also keeps the persisted file
+ * from growing unbounded across restarts on a long-lived host.
+ */
+const MAX_PERSISTED_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Loads persisted tenant state from `filePath` (if present) and pre-seeds
  * the shared `tenants` map with it before any browser/MCP traffic creates
  * tenants fresh at boot — so a server restart comes back up with the last
  * known form schema/values already in place instead of blank defaults,
  * without requiring any browser tab to still be open to push a resync (see
  * Tenant.restoreState in tenant.ts, which only helps if a tab survived the
- * restart). Returns the set of tenant ids it seeded, purely for logging.
+ * restart). Entries whose lastActivityAt is more than a day old are dropped
+ * rather than seeded (see MAX_PERSISTED_AGE_MS). Returns the set of tenant
+ * ids it seeded, purely for logging.
  *
  * Then wires a debounced save-on-change: any tenant currently in memory
  * (present or created afterward) that mutates its store gets its next
@@ -54,8 +65,10 @@ export function enablePersistence<TSchema, TValues>(filePath: string): { seededI
     }
   }
 
+  const now = Date.now();
   for (const [id, state] of Object.entries(persisted)) {
     if (tenants.has(id)) continue;
+    if (now - state.lastActivityAt > MAX_PERSISTED_AGE_MS) continue;
     const tenant = new Tenant<TSchema, TValues>(id, state.schema, state.values);
     tenant.submitted = state.submitted;
     tenant.lastStateChangeAt = state.lastStateChangeAt;
