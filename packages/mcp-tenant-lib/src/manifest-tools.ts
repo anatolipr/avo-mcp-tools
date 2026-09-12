@@ -23,6 +23,7 @@ function paramSpecToZod(spec: ToolParamSpec): z.ZodTypeAny {
     default: throw new UnsupportedParamTypeError(`unsupported param type "${(spec as any).type}" (supported: string, number, boolean, array, object)`);
   }
   if (spec.description) schema = schema.describe(spec.description);
+  if (spec.nullable) schema = schema.nullable();
   return spec.optional ? schema.optional() : schema;
 }
 
@@ -60,18 +61,21 @@ const TOOL_PARAM_SPEC_SCHEMA: z.ZodType<ToolParamSpec> = z.lazy(() =>
       type: z.enum(['string', 'number', 'boolean']),
       description: z.string().optional(),
       optional: z.boolean().optional(),
+      nullable: z.boolean().optional(),
     }),
     z.object({
       type: z.literal('array'),
       items: TOOL_PARAM_SPEC_SCHEMA,
       description: z.string().optional(),
       optional: z.boolean().optional(),
+      nullable: z.boolean().optional(),
     }),
     z.object({
       type: z.literal('object'),
       properties: z.record(z.string(), TOOL_PARAM_SPEC_SCHEMA),
       description: z.string().optional(),
       optional: z.boolean().optional(),
+      nullable: z.boolean().optional(),
     }),
   ])
 );

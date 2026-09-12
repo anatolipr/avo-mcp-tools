@@ -78,9 +78,9 @@ export interface LeaveChannelMessage {
  * verbatim by describe_tools/describe_channel.
  */
 export type ToolParamSpec =
-  | { type: 'string' | 'number' | 'boolean'; description?: string; optional?: boolean }
-  | { type: 'array'; items: ToolParamSpec; description?: string; optional?: boolean }
-  | { type: 'object'; properties: Record<string, ToolParamSpec>; description?: string; optional?: boolean };
+  | { type: 'string' | 'number' | 'boolean'; description?: string; optional?: boolean; nullable?: boolean }
+  | { type: 'array'; items: ToolParamSpec; description?: string; optional?: boolean; nullable?: boolean }
+  | { type: 'object'; properties: Record<string, ToolParamSpec>; description?: string; optional?: boolean; nullable?: boolean };
 
 /**
  * The wire form of a manifest entry, as sent to the server in a

@@ -28,6 +28,7 @@ export class AppToolbar extends LitElement {
     onToggleFolderView: { attribute: false },
     onToggleShared: { attribute: false },
     onCycleTheme: { attribute: false },
+    onCopyBridgeConfig: { attribute: false },
   };
 
   declare showReindex: boolean;
@@ -42,6 +43,7 @@ export class AppToolbar extends LitElement {
   declare onToggleFolderView: () => void;
   declare onToggleShared: () => void;
   declare onCycleTheme: () => void;
+  declare onCopyBridgeConfig: () => void;
 
   static styles = css`
     :host {
@@ -95,6 +97,23 @@ export class AppToolbar extends LitElement {
     .channels-toggle.active, .folder-view-toggle.active, .shared-toggle.active {
       background: var(--accent); border-color: var(--accent); color: var(--accent-fg); opacity: 1;
     }
+    .bridge-toggle {
+      height: 28px;
+      padding: 0 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: 14px;
+      background: var(--bg);
+      color: inherit;
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      opacity: 0.75;
+      font-family: inherit;
+    }
+    .bridge-toggle:hover { opacity: 1; background: var(--hover); }
   `;
 
   #renderReindexToggle() {
@@ -139,6 +158,13 @@ export class AppToolbar extends LitElement {
             </button>
           `
         : ''}
+      <button
+        class="bridge-toggle"
+        title="Copy js-bridge-mcp proxy config for this server"
+        @click=${() => this.onCopyBridgeConfig()}
+      >
+        🔌 Copy MCP config
+      </button>
       <button
         class="theme-toggle"
         title=${`Theme: ${THEME_LABEL[this.theme]} (click to change)`}

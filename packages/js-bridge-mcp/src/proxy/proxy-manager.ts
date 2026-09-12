@@ -122,24 +122,53 @@ function buildTransport(config: ProxyConfig): { transport: StdioClientTransport 
  * object here would just register that same tool with a subtly wrong
  * signature instead.
  */
+/**
+ * Strips a Zod `.nullable()` field's `null` branch before type-mapping, so a
+ * nullable string/number/boolean/array/object still translates instead of
+ * being dropped as "unsupported" — see ToolParamSpec's own `nullable` flag
+ * (mcp-tenant-lib/types.ts) and paramSpecToZod's `.nullable()` call
+ * (manifest-tools.ts), which this feeds. Two encodings seen in practice:
+ * zod-to-json-schema (v3, draft-7 — what this repo's Zod v3 tools produce)
+ * emits `type: ["string", "null"]`; other converters (Zod v4, draft-2020-12)
+ * emit `anyOf`/`oneOf: [{type: "string"}, {type: "null"}]`. Returns
+ * `undefined` (not nullable) when neither shape matches, so callers fall
+ * through to normal type mapping unchanged.
+ */
+function stripNullableBranch(prop: any): { rest: any; nullable: boolean } {
+  if (Array.isArray(prop?.type) && prop.type.includes('null')) {
+    const remaining = prop.type.filter((t: string) => t !== 'null');
+    if (remaining.length === 1) return { rest: { ...prop, type: remaining[0] }, nullable: true };
+  }
+  const branches = prop?.anyOf ?? prop?.oneOf;
+  if (Array.isArray(branches) && branches.length === 2) {
+    const nullBranch = branches.find((b: any) => b?.type === 'null');
+    const otherBranch = branches.find((b: any) => b?.type !== 'null');
+    if (nullBranch && otherBranch) {
+      return { rest: { ...otherBranch, description: prop.description ?? otherBranch.description }, nullable: true };
+    }
+  }
+  return { rest: prop, nullable: false };
+}
+
 function translateSchemaNode(prop: any): ToolParamSpec | undefined {
+  const { rest, nullable } = stripNullableBranch(prop);
   // JSON Schema's "integer" is a distinct valid primitive type from
   // "number" (a whole-number-only number) — ToolParamSpec only has
   // 'number', so both map to it. Missing this dropped every dbhub
   // search_objects-style tool with an integer `limit`/`offset` param.
-  const mappedType = prop?.type === 'integer' ? 'number' : prop?.type;
+  const mappedType = rest?.type === 'integer' ? 'number' : rest?.type;
   if (mappedType === 'string' || mappedType === 'number' || mappedType === 'boolean') {
-    return { type: mappedType, description: prop.description };
+    return { type: mappedType, description: rest.description, ...(nullable ? { nullable: true } : {}) };
   }
   if (mappedType === 'array') {
-    const items = translateSchemaNode(prop.items);
+    const items = translateSchemaNode(rest.items);
     if (!items) return undefined;
-    return { type: 'array', items, description: prop.description };
+    return { type: 'array', items, description: rest.description, ...(nullable ? { nullable: true } : {}) };
   }
   if (mappedType === 'object') {
-    const { params, unsupported } = translateSchemaProperties(prop);
+    const { params, unsupported } = translateSchemaProperties(rest);
     if (unsupported) return undefined;
-    return { type: 'object', properties: params, description: prop.description };
+    return { type: 'object', properties: params, description: rest.description, ...(nullable ? { nullable: true } : {}) };
   }
   return undefined;
 }

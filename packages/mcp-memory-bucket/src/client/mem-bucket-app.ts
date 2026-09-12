@@ -1149,8 +1149,26 @@ export class MemBucketApp extends LitElement {
         .onToggleFolderView=${() => this.#setView(this.#view.value === 'folder-view' ? 'entries' : 'folder-view')}
         .onToggleShared=${() => this.#setView(this.#view.value === 'shared' ? 'entries' : 'shared')}
         .onCycleTheme=${() => this.#cycleTheme()}
+        .onCopyBridgeConfig=${() => this.#copyBridgeConfig()}
       ></app-toolbar>
     `;
+  }
+
+  // Shape matches js-bridge-mcp's ProxyConfig JSON-paste mode in its admin UI
+  // (packages/js-bridge-mcp/src/proxy-ui/admin/index.html) — pasting this registers this server
+  // as a root connection there, tools prefixed `memory-bucket__`.
+  async #copyBridgeConfig() {
+    const config = {
+      slug: 'memory-bucket',
+      transport: 'streamableHttp',
+      url: `${window.location.origin}/mcp`,
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(config, null, 2));
+      toast.success('MCP config copied — paste into js-bridge-mcp admin UI');
+    } catch {
+      toast.danger('Could not copy to clipboard');
+    }
   }
 
   updated() {
