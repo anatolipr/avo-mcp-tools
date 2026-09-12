@@ -43,9 +43,6 @@ killWhateverIsOnPort(PORT);
 
 const getOrCreateTenant = (id: string) => getOrCreateTenantFor(id, undefined, { ...initialHelloState });
 
-// The 'default' tenant backs direct access with no explicit ?tenant= param.
-getOrCreateTenant('default');
-
 startIdleSweep((id) => console.error(`[mcp] sweeping idle tenant: ${id}`));
 // Separate, much shorter sweep for channels with zero live connections
 // (tab closed, or the page deliberately left via leave_channel when
@@ -100,9 +97,10 @@ const httpServer = createHttpServer({
   // js-bridge-mcp typically bridges a single browser page per server; MCP
   // clients aren't expected to pin ?tenant= themselves (some, like VS Code
   // Copilot, open a fresh MCP session with no ?tenant= on every
-  // reconnect/idle DELETE cycle). Sharing the one 'default' tenant keeps
-  // every such session pointed at the same already-bridged browser tab
-  // instead of each reconnect minting a new, empty tenant.
+  // reconnect/idle DELETE cycle). Sharing one root connection (named after
+  // this server's identity, "js-bridge-mcp") keeps every such session
+  // pointed at the same already-bridged browser tab instead of each
+  // reconnect minting a new, empty tenant.
   defaultTenantMode: 'shared',
 });
 

@@ -27,6 +27,8 @@
 
   body { font: 14px/1.4 system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; color: var(--fg); background: var(--bg); }
   .header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .back-link { color: inherit; text-decoration: none; opacity: 0.6; margin-right: 4px; }
+  .back-link:hover { opacity: 1; color: var(--accent); }
   .theme-toggle {
     flex: 0 0 auto; font-size: 14px; width: 28px; height: 28px; padding: 0; border-radius: 6px;
     border: 1px solid var(--border-strong); background: var(--bg); color: inherit; cursor: pointer;
@@ -73,7 +75,7 @@
 </head>
 <body>
 <div class="header-row">
-  <h1>js-bridge-mcp hub</h1>
+  <h1><a href="/" class="back-link" title="Back to dashboard">←</a> js-bridge-mcp hub</h1>
   <button class="theme-toggle" id="theme-toggle" title="Theme: Auto (click to change)" aria-label="Toggle color theme">◐</button>
 </div>
 <p>Groups every active <a href="/admin">proxy</a>'s tools for <strong>Cmd/Ctrl+Shift+A</strong> (Human MCP Relay). Click a group's title to scope this page (and the relay) down to just that proxy — e.g. <code>/hub/atlassian</code> — or come back here for everything at once. An MCP client doesn't need any of this: each proxy already has its own channel, joinable directly by slug (<code>join_channel</code>/<code>list_channels</code>).</p>

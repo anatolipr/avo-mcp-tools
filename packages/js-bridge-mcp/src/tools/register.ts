@@ -9,7 +9,8 @@ export function registerHelloTools(
   mcp: McpServer,
   tenant: () => Tenant<undefined, HelloState>,
   port: number,
-  setChannel: (id: string) => void
+  setChannel: (id: string) => void,
+  resetChannel: () => void
 ) {
   for (const tool of helloTools) {
     mcp.tool(tool.name, tool.description, tool.schema, (args: any) => tool.handler(args, tenant, port));
@@ -35,14 +36,24 @@ export function registerHelloTools(
   // get registered for it.
   let subscribedTenant = tenant();
   subscribedTenant.addManifestToolRegistry(registry);
-  mcp.server.onclose = () => subscribedTenant.removeManifestToolRegistry(registry);
+  mcp.server.onclose = () => {
+    subscribedTenant.removeManifestToolRegistry(registry);
+    registry.dispose();
+  };
 
-  const setChannelAndMigrateRegistry = (id: string) => {
-    setChannel(id);
+  const migrateRegistry = () => {
     subscribedTenant.removeManifestToolRegistry(registry);
     subscribedTenant = tenant();
     subscribedTenant.addManifestToolRegistry(registry);
   };
+  const setChannelAndMigrateRegistry = (id: string) => {
+    setChannel(id);
+    migrateRegistry();
+  };
+  const resetChannelAndMigrateRegistry = () => {
+    resetChannel();
+    migrateRegistry();
+  };
 
-  registerChannelTools(mcp, tenant, port, setChannelAndMigrateRegistry, undefined, { ...initialHelloState });
+  registerChannelTools(mcp, tenant, port, setChannelAndMigrateRegistry, resetChannelAndMigrateRegistry, undefined, { ...initialHelloState });
 }

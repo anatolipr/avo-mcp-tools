@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Tenant, TenantConnection } from './tenant.js';
+import { listRootTenants, dashboardEvents } from './tenant.js';
 import type { ToolManifestEntry, ToolParamSpec } from './types.js';
 import {
   REMOTE_REGISTER_BY_PATH_CALL,
@@ -96,6 +97,8 @@ function paramsArgToRecord(params: Record<string, ToolParamSpec> | undefined): R
 export interface ManifestToolRegistry {
   handles: Map<string, RegisteredTool>;
   sync(): void;
+  /** Unsubscribes this registry from dashboardEvents (see createManifestToolRegistry). Call once, from the same place the caller already tears the registry down (e.g. mcp.server.onclose). */
+  dispose(): void;
 }
 
 /**
@@ -106,14 +109,6 @@ export interface ManifestToolRegistry {
  */
 export function buildDescribePayload<TSchema, TValues>(t: Tenant<TSchema, TValues>) {
   const conns = [...t.connections.values()];
-
-  if (conns.length <= 1) {
-    return {
-      summary: t.toolManifestSummary ?? null,
-      tools: t.toolManifest.map((e) => ({ name: e.name, description: e.description, origin: e.origin })),
-    };
-  }
-
   const slugFor = computeSlugs(conns);
   return {
     connections: conns.map((c) => ({
@@ -145,15 +140,16 @@ const IDENTIFY_CONNECTION_DESCRIPTION =
   'not confirm the human saw it.';
 
 const DESCRIBE_TOOLS_DESCRIPTION =
-  'Returns manifest-level context for the tools connected to THIS SESSION\'S CURRENT CHANNEL: a ' +
-  'page-authored summary (what kind of page/app this is, cross-tool sequencing rules, ' +
-  'domain concepts) plus the current list of tool names and one-line descriptions. Call ' +
-  'this once after connecting, before calling any other tool from this page, so you have ' +
-  'the shared context that individual tool descriptions don\'t repeat. When multiple ' +
-  'pages/tabs are connected to this session at once, tool names are prefixed per ' +
-  'connection (e.g. "formalin__submit_form", "htmlpaint__clear_canvas") and this tool\'s ' +
-  'response includes a `connections` array listing each connection\'s id, label, and ' +
-  'prefix — call it whenever you\'re unsure which prefix routes to which tab. ' +
+  'Returns manifest-level context for every tool visible to THIS SESSION right now — both this ' +
+  'session\'s current channel and any root connections (unnamed/directly-addressed ones, e.g. a ' +
+  'browser extension or an MCP proxy), which are always merged in: a page-authored summary (what kind ' +
+  'of page/app this is, cross-tool sequencing rules, domain concepts) plus the current list of tool ' +
+  'names and one-line descriptions. Call this once after connecting, before calling any other tool, so ' +
+  'you have the shared context that individual tool descriptions don\'t repeat. Every connection\'s ' +
+  'tools are always prefixed by its own name (e.g. "formalin__submit_form", "dbhub_local__query") so ' +
+  'a specific connection can be addressed directly by name in a prompt — this tool\'s response includes ' +
+  'a `connections` array listing each connection\'s id, label, and prefix — call it whenever you\'re ' +
+  'unsure which prefix routes to which connection. ' +
   'A dynamic tool (one previously registered via register_page_tool_by_path/_by_code) includes an ' +
   '`origin` field showing what it actually does — `{kind:"code",code}` with its full JS source, or ' +
   '`{kind:"path",path}` with the window.* function it wraps — so you can inspect what a prior session ' +
@@ -170,19 +166,23 @@ const DESCRIBE_TOOLS_DESCRIPTION =
 
 /**
  * Derives a stable, unique tool-name prefix per connection: sanitized from
- * `label` (falling back to "tab" when absent or empty after sanitizing),
- * with a 1-based ordinal appended on collision (first connection to open
- * keeps the bare slug; later ones sharing that slug get "2", "3", ...).
- * Recomputed fresh on every call from `connections`' current iteration
- * order (== connection-open order, since Map preserves insertion order and
- * entries are only ever added/removed, never reordered) — no state to
- * keep in sync separately.
+ * `name` (the collision-resolved, stable identifier set at registration —
+ * see TenantConnection — falling back to "tab" when absent or empty after
+ * sanitizing), with a 1-based ordinal appended on collision (first
+ * connection to open keeps the bare slug; later ones sharing that slug get
+ * "2", "3", ...). Always applied — every connection gets a prefix, whether
+ * it's the only one present or one of several, so a tool's fully-qualified
+ * name never changes shape as other connections come and go. Recomputed
+ * fresh on every call from the given connection list's order — for a single
+ * Tenant this is connection-open order (Map preserves insertion order);
+ * callers merging in root connections (see sync() below) control that
+ * ordering themselves.
  */
 function computeSlugs(connections: TenantConnection[]): Map<string, string> {
   const slugFor = new Map<string, string>();
   const countSoFar = new Map<string, number>();
   for (const conn of connections) {
-    const base = slugify(conn.label);
+    const base = slugify(conn.name);
     const n = (countSoFar.get(base) ?? 0) + 1;
     countSoFar.set(base, n);
     slugFor.set(conn.id, n === 1 ? base : `${base}${n}`);
@@ -190,8 +190,8 @@ function computeSlugs(connections: TenantConnection[]): Map<string, string> {
   return slugFor;
 }
 
-function slugify(label: string | undefined): string {
-  const cleaned = (label ?? '')
+function slugify(name: string | undefined): string {
+  const cleaned = (name ?? '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
@@ -213,6 +213,27 @@ function slugify(label: string | undefined): string {
  * register_tools push) to remove stale tools and register new ones - each
  * mutation trips the SDK's own tools/list_changed notification automatically.
  */
+/**
+ * The session's own current tenant's connections, plus every OTHER live
+ * root connection's (single) connection folded in — the combined view that
+ * both sync() and describe_tools present, so root tools are always visible
+ * without an explicit join_channel, and describe_tools' response matches
+ * what tools/list actually contains. Excludes the session's own tenant from
+ * the root fold-in when it's itself a root connection, to avoid listing that
+ * one connection twice. Each entry carries the Tenant it actually came from,
+ * since dispatch must call back against THAT tenant, not the session's
+ * ambient current one (see sync()'s registeredNow below).
+ */
+function mergedConnections<TSchema, TValues>(
+  t: Tenant<TSchema, TValues>
+): { conn: TenantConnection; owner: Tenant<any, any> }[] {
+  const own = [...t.connections.values()].map((conn) => ({ conn, owner: t as Tenant<any, any> }));
+  const root = listRootTenants()
+    .filter((rt) => rt.id !== t.id)
+    .flatMap((rt) => [...rt.connections.values()].map((conn) => ({ conn, owner: rt })));
+  return [...own, ...root];
+}
+
 export function createManifestToolRegistry<TSchema, TValues>(
   mcp: McpServer,
   tenant: () => Tenant<TSchema, TValues>
@@ -224,7 +245,21 @@ export function createManifestToolRegistry<TSchema, TValues>(
       DESCRIBE_TOOLS_NAME,
       { description: DESCRIBE_TOOLS_DESCRIPTION, inputSchema: {} },
       async () => {
-        const payload = buildDescribePayload(tenant());
+        const merged = mergedConnections(tenant());
+        const slugFor = computeSlugs(merged.map((m) => m.conn));
+        const payload = {
+          connections: merged.map(({ conn: c }) => ({
+            id: c.id,
+            label: c.label ?? null,
+            toolPrefix: slugFor.get(c.id),
+            summary: c.summary ?? null,
+            tools: c.manifest.map((e) => ({
+              name: `${slugFor.get(c.id)}__${e.name}`,
+              description: e.description,
+              origin: e.origin,
+            })),
+          })),
+        };
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
       }
     );
@@ -431,14 +466,18 @@ export function createManifestToolRegistry<TSchema, TValues>(
   }
 
   function sync() {
-    const conns = [...tenant().connections.values()];
-    const multi = conns.length >= 2;
-    const slugFor = multi ? computeSlugs(conns) : undefined;
+    const merged = mergedConnections(tenant());
+    const slugFor = computeSlugs(merged.map((m) => m.conn));
 
-    // registeredName -> which connection/entry it dispatches to. With a
-    // single (or no) connection, registeredName === entry.name, exactly
-    // like before multi-connection support existed.
-    const registeredNow = new Map<string, { connectionId: string | undefined; entry: ToolManifestEntry }>();
+    // registeredName -> which connection/entry it dispatches to, and which
+    // Tenant owns that connection (its own current tenant for a channel
+    // connection, or the specific root Tenant it was folded in from — see
+    // mergedConnections). Always prefixed, for any connection count: a
+    // tool's fully-qualified name never changes shape as other connections
+    // come and go, which is what lets "use dbhub-local" resolve directly to
+    // a name already visible in tools/list with zero join_channel/
+    // describe_channel round-trip.
+    const registeredNow = new Map<string, { owner: Tenant<any, any>; connectionId: string; entry: ToolManifestEntry }>();
     const RESERVED_NAMES = new Set([
       DESCRIBE_TOOLS_NAME,
       IDENTIFY_CONNECTION_NAME,
@@ -448,18 +487,10 @@ export function createManifestToolRegistry<TSchema, TValues>(
       REQUEST_RECONNECT_NAME,
     ]);
 
-    if (multi) {
-      for (const conn of conns) {
-        for (const entry of conn.manifest) {
-          if (RESERVED_NAMES.has(entry.name)) continue;
-          registeredNow.set(`${slugFor!.get(conn.id)}__${entry.name}`, { connectionId: conn.id, entry });
-        }
-      }
-    } else {
-      const conn = conns[0];
-      for (const entry of tenant().toolManifest) {
+    for (const { conn, owner } of merged) {
+      for (const entry of conn.manifest) {
         if (RESERVED_NAMES.has(entry.name)) continue;
-        registeredNow.set(entry.name, { connectionId: conn?.id, entry });
+        registeredNow.set(`${slugFor.get(conn.id)}__${entry.name}`, { owner, connectionId: conn.id, entry });
       }
     }
 
@@ -482,7 +513,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
     if (!handles.has(UNREGISTER_TOOL_NAME)) registerUnregisterTool();
     if (!handles.has(REQUEST_RECONNECT_NAME)) registerRequestReconnect();
 
-    for (const [registeredName, { connectionId, entry }] of registeredNow) {
+    for (const [registeredName, { owner, connectionId, entry }] of registeredNow) {
       if (handles.has(registeredName)) continue;
       let inputSchema: Record<string, z.ZodTypeAny>;
       try {
@@ -503,7 +534,10 @@ export function createManifestToolRegistry<TSchema, TValues>(
         { description: entry.description, inputSchema },
         async (args: any) => {
           try {
-            const result = await tenant().call(connectionId, entry.name, args);
+            // Dispatches against the connection's OWNING tenant, not the
+            // session's ambient tenant() — for a merged-in root tool, owner
+            // is a different Tenant instance than tenant() resolves to.
+            const result = await owner.call(connectionId, entry.name, args);
             return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
           } catch (err) {
             return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };
@@ -514,5 +548,24 @@ export function createManifestToolRegistry<TSchema, TValues>(
     }
   }
 
-  return { handles, sync };
+  // Root tools are merged into every session's tools/list (see
+  // mergedConnections) independently of which tenant this registry's own
+  // Tenant.syncManifestToolRegistries() call happens to be wired to — a NEW
+  // root connection appearing, or an existing one's manifest changing, must
+  // refresh every live session, not just ones currently pinned to that root
+  // Tenant. dashboardEvents already fires on exactly the shape-changes that
+  // matter here (connection open/close, manifest change — see tenant.ts's
+  // notifyDashboard), so every registry subscribes to it directly rather
+  // than needing a second, root-specific event bus. This means a registry
+  // re-syncs on any dashboard-relevant event server-wide, not just ones
+  // touching root — accepted: the event rate is low (human-driven actions)
+  // and sync() itself is a cheap in-memory diff.
+  const onDashboardChange = () => sync();
+  dashboardEvents.on('change', onDashboardChange);
+
+  return {
+    handles,
+    sync,
+    dispose: () => dashboardEvents.off('change', onDashboardChange),
+  };
 }

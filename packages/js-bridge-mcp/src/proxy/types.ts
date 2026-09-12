@@ -2,10 +2,12 @@ export type ProxyTransport = 'stdio' | 'sse' | 'streamableHttp';
 
 /**
  * Persisted, user-authored configuration for one proxied upstream MCP
- * server. `slug` doubles as its dedicated channel name (see proxy-manager.ts)
- * and as the mandatory tool-name prefix (`${slug}__${upstreamToolName}`) —
- * one identifier for all three roles keeps "which proxy is this" answerable
- * the same way everywhere (admin UI, describe_channel, window.__mcpTools).
+ * server. `slug` doubles as its root connection's name (see proxy-manager.ts
+ * — every proxy is a root connection, not a dedicated channel) and as the
+ * tool-name prefix (`${slug}__${upstreamToolName}`) applied by the universal
+ * always-prefix mechanism (manifest-tools.ts) — one identifier for both
+ * roles keeps "which proxy is this" answerable the same way everywhere
+ * (admin UI, describe_connection, window.__mcpTools).
  */
 export interface ProxyConfig {
   id: string;

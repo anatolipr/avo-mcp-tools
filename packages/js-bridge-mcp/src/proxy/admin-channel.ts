@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { getOrCreateTenant, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
+import { getOrCreateRootTenant, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
 import { addProxy, listProxies, pauseProxy, removeProxy, restartProxy, resumeProxy, updateProxy } from './proxy-manager.js';
 import type { ProxyConfig, ProxyTransport } from './types.js';
 
-const ADMIN_CHANNEL = 'admin';
+const ADMIN_ROOT_NAME = 'admin';
 
 /**
  * Args/env are plain strings here (not arrays/objects) so this tool's
@@ -82,9 +82,9 @@ const manifest: ToolManifestEntry[] = [
   {
     name: 'add_mcp_proxy',
     description:
-      'Adds and starts a new MCP-server proxy. For transport "stdio", pass command (and optionally args as a space-separated string — wrap any single arg containing spaces in double quotes, e.g. --dsn "mysql://user:pass@host/db", NOT needed for a value with no spaces even if it contains other punctuation like : or @; and optionally env as newline-separated KEY=VALUE pairs, one per line, for multiple vars). For "sse" or "streamableHttp", pass url instead. The proxy\'s tools then appear on its own channel named after slug, prefixed "<slug>__", and are merged into the hub channel.',
+      'Adds and starts a new MCP-server proxy. For transport "stdio", pass command (and optionally args as a space-separated string — wrap any single arg containing spaces in double quotes, e.g. --dsn "mysql://user:pass@host/db", NOT needed for a value with no spaces even if it contains other punctuation like : or @; and optionally env as newline-separated KEY=VALUE pairs, one per line, for multiple vars). For "sse" or "streamableHttp", pass url instead. The proxy\'s tools then appear as a root connection named after slug, prefixed "<slug>__", directly addressable with no channel needed.',
     params: {
-      slug: { type: 'string', description: 'URL-safe name for this proxy, e.g. "atlassian" — also its channel name and tool-name prefix.' },
+      slug: { type: 'string', description: 'URL-safe name for this proxy, e.g. "atlassian" — also its root connection name and tool-name prefix.' },
       transport: transportParam,
       command: commandParam,
       args: stdioArgsParam,
@@ -112,7 +112,7 @@ const manifest: ToolManifestEntry[] = [
   },
   {
     name: 'pause_mcp_proxy',
-    description: 'Pauses a proxy — its tools disappear from its channel and the hub channel immediately, but its config is kept for resume_mcp_proxy.',
+    description: 'Pauses a proxy — its tools disappear from its root connection and the hub page immediately, but its config is kept for resume_mcp_proxy.',
     params: { slug: slugParam },
     source: 'host',
   },
@@ -164,14 +164,14 @@ async function dispatchAdminCall(name: string, args: unknown): Promise<unknown> 
   }
 }
 
-/** Registers the admin channel's server-owned direct connection so join_channel("admin") always works, independent of any browser tab. Tool set is static (always these 8 ops), so unlike the hub channel there's no manifest resync hook. */
+/** Registers the "admin" root connection's server-owned direct connection so its tools (admin__add_mcp_proxy etc.) are always visible in tools/list, independent of any browser tab and with no join_channel needed. Tool set is static (always these 8 ops), so unlike a proxy's own manifest there's no resync hook needed here. */
 export function initAdminChannel(): void {
   const connectionId = randomUUID();
-  const tenant = getOrCreateTenant(ADMIN_CHANNEL, undefined, {});
-  tenant.registerDirectConnection(connectionId, dispatchAdminCall);
+  const { tenant } = getOrCreateRootTenant(ADMIN_ROOT_NAME, undefined, {});
+  tenant.registerDirectConnection(connectionId, dispatchAdminCall, ADMIN_ROOT_NAME, 'admin');
   tenant.updateConnectionManifest(
     connectionId,
     manifest,
-    'Manage MCP-server proxies for js-bridge-mcp: add/view/edit/pause/resume/restart/remove. See the hub channel separately to actually USE a proxy\'s tools once it\'s added here.',
+    'Manage MCP-server proxies for js-bridge-mcp: add/view/edit/pause/resume/restart/remove. See the hub page separately to actually USE a proxy\'s tools once it\'s added here.',
   );
 }

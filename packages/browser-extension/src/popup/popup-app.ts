@@ -182,7 +182,11 @@ export class PopupApp extends LitElement {
     try {
       const res = await fetch(`${JSBRIDGE_HOST}/api/dashboard`);
       if (!res.ok) throw new Error(`server responded ${res.status}`);
-      this.#channels.set(await res.json());
+      // GET /api/dashboard now returns { channels, root } (see
+      // mcp-tenant-lib's dashboard.ts) — this picker only ever offers real,
+      // agent-joinable channels, so root connections are irrelevant here.
+      const { channels }: { channels: DashboardChannel[] } = await res.json();
+      this.#channels.set(channels);
       this.#channelsError.set(undefined);
     } catch (err) {
       this.#channelsError.set((err as Error).message);
@@ -190,12 +194,12 @@ export class PopupApp extends LitElement {
   }
 
   async #connect(): Promise<void> {
+    // Empty is valid and intentional: it means "no channel" - the tab
+    // becomes its own root connection (named after its hostname by default -
+    // see handleConnectActiveTab), addressed directly with no join_channel
+    // needed. Only validate the charset when something was actually typed.
     const chosen = this.#newChannel.value.trim() || this.#selectedChannel.value;
-    if (!chosen) {
-      this.#result.set('Pick an existing channel or type a new one.');
-      return;
-    }
-    if (!VALID_CHANNEL_NAME.test(chosen)) {
+    if (chosen && !VALID_CHANNEL_NAME.test(chosen)) {
       this.#result.set('Channel names may only contain letters, digits, underscore, and hyphen.');
       return;
     }
@@ -206,7 +210,7 @@ export class PopupApp extends LitElement {
       channel: chosen,
       appLabel,
     });
-    this.#result.set(response.ok ? `Connected to "${chosen}".` : `Failed: ${response.error}`);
+    this.#result.set(response.ok ? (chosen ? `Connected to "${chosen}".` : 'Connected (root, no channel).') : `Failed: ${response.error}`);
     if (response.ok) await this.#loadTabStatus();
   }
 

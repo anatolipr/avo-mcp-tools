@@ -10,11 +10,12 @@ export function makeRegisterFormTools(initialFormDef: FormDef) {
     mcp: McpServer,
     tenant: () => Tenant<FormDef, FieldValues>,
     port: number,
-    setChannel: (id: string) => void
+    setChannel: (id: string) => void,
+    resetChannel: () => void
   ) {
     for (const tool of [...formTools, ...fieldTools]) {
       mcp.tool(tool.name, tool.description, tool.schema, (args: any) => tool.handler(args, tenant, port));
     }
-    registerChannelTools(mcp, tenant, port, setChannel, initialFormDef, initialValuesFor(initialFormDef));
+    registerChannelTools(mcp, tenant, port, setChannel, resetChannel, initialFormDef, initialValuesFor(initialFormDef));
   };
 }

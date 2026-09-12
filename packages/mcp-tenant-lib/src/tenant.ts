@@ -50,9 +50,38 @@ export interface TenantConnection {
   id: string;
   socket?: WebSocket;
   directCall?: (name: string, args: unknown) => Promise<unknown>;
+  /**
+   * Stable, collision-resolved identifier used as this connection's
+   * tool-name prefix (see computeSlugs in manifest-tools.ts) — set once at
+   * registration time via Tenant.reserveConnectionName/reserveRootName, and
+   * never silently renamed by a manifest update. Distinct from `label`,
+   * which is purely cosmetic display text a page can freely change (e.g. via
+   * rename_connection) without touching how its tools are addressed.
+   */
+  name: string;
   label?: string;
   manifest: ToolManifestEntry[];
   summary?: string;
+  /**
+   * True for a connection with no user-facing surface to identify itself
+   * against or to usefully move into a channel — see
+   * RegisterToolsMessage.internal (types.ts) for the full rationale. A
+   * directCall connection (registerDirectConnection) is always internal,
+   * set directly at registration since it has no socket and never sends a
+   * register_tools message; a real WS connection sets it itself via that
+   * message's `internal` field (see updateConnectionManifest).
+   */
+  internal?: boolean;
+  /**
+   * Dashboard display kind, set explicitly at registration (never inferred
+   * from `directCall`/name) so distinct server-owned connection types (an
+   * MCP proxy vs. the fixed "admin" ops connection) can get their own icon
+   * even though both are directCall-backed under the hood. 'browser' for
+   * any real WS connection (registerConnection always sets this); a
+   * directCall connection (registerDirectConnection) defaults to 'proxy'
+   * unless the caller passes a more specific kind.
+   */
+  kind: 'browser' | 'proxy' | 'admin';
 }
 
 export class Store<TValues> {
@@ -87,8 +116,22 @@ export class Store<TValues> {
  * backing `store`, broadcast field-by-field over the WS `update` message.
  * Consumers with no separate schema concept can pass `undefined` for TSchema.
  */
+/** Tenant-id namespace for root connections — see Tenant.isRoot's doc comment. */
+const ROOT_PREFIX = 'root:';
+
 export class Tenant<TSchema, TValues> {
   id: string;
+  /**
+   * Whether this Tenant represents a root connection (addressed directly by
+   * name, hidden from list_channels/channel_find) rather than a real,
+   * agent-joinable channel. Derived once from `id`'s `root:` namespace
+   * prefix at construction — root and channel tenants share the same
+   * `tenants` Map, but under disjoint key spaces, so a root connection name
+   * can never collide with a channel name. See getRootTenant/
+   * getOrCreateRootTenant/listRootTenants below for the only places that
+   * should construct/look up a `root:`-prefixed id.
+   */
+  readonly isRoot: boolean;
   schema: TSchema;
   store: Store<TValues>;
   submitBus: EventEmitter;
@@ -207,8 +250,14 @@ export class Tenant<TSchema, TValues> {
     return this.#legacySummary;
   }
 
+  /** `id` with the `root:` namespace prefix stripped, for anything user/agent-facing (dashboard tiles, describe_connection's lookup key). Returns `id` unchanged for a real channel. */
+  get displayName(): string {
+    return this.isRoot ? this.id.slice(ROOT_PREFIX.length) : this.id;
+  }
+
   constructor(id: string, initialSchema: TSchema, initialValues: TValues) {
     this.id = id;
+    this.isRoot = id.startsWith(ROOT_PREFIX);
     this.schema = initialSchema;
     this.store = new Store(initialValues); // placeholder; #attachStore below wires the real onChange listener
     this.submitBus = new EventEmitter();
@@ -239,32 +288,70 @@ export class Tenant<TSchema, TValues> {
     this.syncManifestToolRegistries();
   }
 
-  registerConnection(id: string, socket: WebSocket) {
-    this.connections.set(id, { id, socket, manifest: [], summary: undefined, label: undefined });
+  /**
+   * Resolves `desired` to a name guaranteed unique among this Tenant's
+   * currently-live connections, auto-appending a numeric suffix (2, 3, ...)
+   * on collision — e.g. two browser tabs joining the same channel with the
+   * same label. An empty `desired` falls back to "tab" FIRST (matching
+   * slugify's own last-resort default in manifest-tools.ts) so the
+   * suffixing happens on the same base string slugify will use — otherwise
+   * a second unlabeled connection would reserve the literal name "2" instead
+   * of "tab2". "Currently live" (not "ever used") means a freed name becomes
+   * available again the instant the colliding connection disconnects, with
+   * no separate free-list to maintain. See reserveRootName below for the
+   * equivalent check across root connections (a distinct Tenant per name, so
+   * it can't reuse this method directly).
+   */
+  reserveConnectionName(desired: string): string {
+    const live = new Set([...this.connections.values()].map((c) => c.name));
+    return nextAvailableName(desired || 'tab', (candidate) => live.has(candidate));
+  }
+
+  registerConnection(id: string, socket: WebSocket, desiredName: string): string {
+    const name = this.reserveConnectionName(desiredName);
+    this.connections.set(id, { id, socket, name, manifest: [], summary: undefined, label: undefined, kind: 'browser' });
     this.wsClients.add(socket);
     this.emptyAt = undefined;
     notifyDashboard();
+    return name;
   }
 
   /**
    * Registers a connection with no socket at all — backed instead by an
    * async function that answers a call directly (see the `directCall` doc
-   * on TenantConnection). Used for server-owned proxy connections (an
-   * outbound MCP client), which have no browser tab and nothing to
-   * broadcast-select via wsClients. Otherwise mirrors registerConnection.
+   * on TenantConnection). Used for server-owned connections (an outbound
+   * MCP proxy client, or a fixed ops connection like "admin"), which have
+   * no browser tab and nothing to broadcast-select via wsClients. `kind`
+   * defaults to 'proxy' (the common case) — pass 'admin' explicitly for a
+   * connection that isn't really a proxy, so it gets its own dashboard icon
+   * instead of being lumped in with real MCP proxies. Otherwise mirrors
+   * registerConnection.
    */
-  registerDirectConnection(id: string, directCall: (name: string, args: unknown) => Promise<unknown>) {
-    this.connections.set(id, { id, directCall, manifest: [], summary: undefined, label: undefined });
+  registerDirectConnection(id: string, directCall: (name: string, args: unknown) => Promise<unknown>, desiredName: string, kind: 'proxy' | 'admin' = 'proxy'): string {
+    const name = this.reserveConnectionName(desiredName);
+    // Always internal: a directCall connection has no socket and no page,
+    // so identify/move (which push a WS message at a real browser tab)
+    // would either silently no-op or be meaningless — see TenantConnection.internal.
+    this.connections.set(id, { id, directCall, name, manifest: [], summary: undefined, label: undefined, internal: true, kind });
     this.emptyAt = undefined;
     notifyDashboard();
+    return name;
   }
 
-  updateConnectionManifest(id: string, manifest: ToolManifestEntry[], summary?: string, label?: string) {
+  updateConnectionManifest(id: string, manifest: ToolManifestEntry[], summary?: string, label?: string, internal?: boolean) {
     const conn = this.connections.get(id);
     if (!conn) return; // connection closed/unknown — ignore a late message
     conn.manifest = manifest;
     conn.summary = summary;
     conn.label = label;
+    // `internal` is OR'd in, never cleared: a directCall connection is
+    // marked internal once at registerDirectConnection time (it has no
+    // register_tools message to carry this at all) and must stay internal
+    // through every later manifest update; a real WS connection sets it
+    // true via its own register_tools message when it wants to (e.g. the
+    // browser extension), and simply omitting the field on a later update
+    // must not silently un-mark it.
+    if (internal) conn.internal = true;
     this.syncManifestToolRegistries();
     // A page's FIRST register_tools after connecting is exactly the moment
     // to check for a same-labeled predecessor's stashed dynamic tools (see
@@ -634,6 +721,26 @@ function sanitizeChannelName(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
+/** Same charset rule as isValidChannelName — a connection name becomes part of a tool-name prefix, so it needs the same tool-name-safe charset a channel name does. Kept as a distinct exported alias so call sites read clearly regardless of which kind of name they're validating. */
+const isValidConnectionName = isValidChannelName;
+
+/**
+ * Shared numeric-suffix collision loop: returns `desired` unchanged if
+ * `isTaken(desired)` is false, otherwise the first `${desired}2`,
+ * `${desired}3`, ... that isn't taken. Used both by
+ * Tenant.reserveConnectionName (checks one Tenant's own connections) and
+ * reserveRootName below (checks the root-tenant-id namespace) — one
+ * implementation of "is currently live," parameterized over what "taken"
+ * means in each case, so a freed name/id becomes available again purely by
+ * virtue of the check re-running fresh each call (no free-list to maintain).
+ */
+function nextAvailableName(desired: string, isTaken: (candidate: string) => boolean): string {
+  if (!isTaken(desired)) return desired;
+  let n = 2;
+  while (isTaken(`${desired}${n}`)) n++;
+  return `${desired}${n}`;
+}
+
 const tenants = new Map<string, Tenant<any, any>>();
 
 function getOrCreateTenant<TSchema, TValues>(id: string, initialSchema: TSchema, initialValues: TValues): Tenant<TSchema, TValues> {
@@ -644,6 +751,44 @@ function getOrCreateTenant<TSchema, TValues>(id: string, initialSchema: TSchema,
     notifyDashboard();
   }
   return tenant;
+}
+
+/**
+ * Resolves `desired` to a root-connection name guaranteed unique among
+ * currently-live root tenants — the root-tenant-id-namespace equivalent of
+ * Tenant.reserveConnectionName (which resolves collisions among connections
+ * *within* one Tenant instead). Each root connection is its own single-
+ * connection Tenant (see ROOT_PREFIX), so "two root connections want the
+ * same name" is a collision on the `root:<name>` tenant id itself, checked
+ * here rather than inside any one Tenant's `connections` map.
+ */
+function reserveRootName(desired: string): string {
+  return nextAvailableName(desired, (candidate) => tenants.has(`${ROOT_PREFIX}${candidate}`));
+}
+
+/** Read-only lookup of one root connection's Tenant by its (unprefixed) name — the only place besides getOrCreateRootTenant that should construct a `root:`-prefixed key. */
+function getRootTenant(name: string): Tenant<any, any> | undefined {
+  return tenants.get(`${ROOT_PREFIX}${name}`);
+}
+
+/**
+ * Gets-or-creates the root tenant for `desiredName`, resolving a collision
+ * with an already-live root connection via reserveRootName first — i.e. the
+ * root-connection equivalent of getOrCreateTenant, folding in name
+ * reservation since (unlike a channel, which is deliberately reused when an
+ * agent rejoins the same name) two independent root connections asking for
+ * the same name are never meant to become the same Tenant. Returns both the
+ * created/existing Tenant and the name it actually landed on (which may
+ * differ from `desiredName` on collision).
+ */
+function getOrCreateRootTenant<TSchema, TValues>(desiredName: string, initialSchema: TSchema, initialValues: TValues): { tenant: Tenant<TSchema, TValues>; name: string } {
+  const name = reserveRootName(desiredName);
+  return { tenant: getOrCreateTenant(`${ROOT_PREFIX}${name}`, initialSchema, initialValues), name };
+}
+
+/** Every currently-live root connection's Tenant — used to merge root tools into every MCP session's manifest (see manifest-tools.ts) and to render the dashboard's flat root-connection tiles (see dashboard.ts). */
+function listRootTenants(): Tenant<any, any>[] {
+  return [...tenants.values()].filter((t) => t.isRoot);
 }
 
 function disposeTenant(id: string) {
@@ -666,7 +811,12 @@ function startIdleSweep(onSweep: (id: string) => void) {
   const sweepInterval = setInterval(() => {
     const now = Date.now();
     for (const [id, tenant] of tenants) {
-      if (id === 'default') continue;
+      // Root connections never auto-expire — same "never expires" contract
+      // the old special-cased 'default' tenant had, since a root connection
+      // (a page/proxy/extension addressed directly by name) can legitimately
+      // sit quiet in a background tab for a long time without meaning to
+      // have been abandoned.
+      if (tenant.isRoot) continue;
       if (now - tenant.lastActivityAt > TENANT_IDLE_TIMEOUT_MS) {
         onSweep(id);
         disposeTenant(id);
@@ -697,7 +847,14 @@ function startEmptySweep(onSweep: (id: string) => void) {
   const sweepInterval = setInterval(() => {
     const now = Date.now();
     for (const [id, tenant] of tenants) {
-      if (id === 'default') continue;
+      // NOT exempting root here (unlike startIdleSweep above): the idle
+      // exemption is about a root connection sitting quiet-but-still-open
+      // for a long time (e.g. a backgrounded tab) never being mistaken for
+      // abandoned. This sweep is the opposite case — zero live connections
+      // at all, e.g. the tab was actually closed — and applies to root
+      // connections exactly like channels, so a closed app's root tenant
+      // (and its stale 0-tool dashboard row) gets cleaned up within
+      // TENANT_EMPTY_TIMEOUT_MS instead of lingering forever.
       if (tenant.emptyAt !== undefined && now - tenant.emptyAt > TENANT_EMPTY_TIMEOUT_MS) {
         onSweep(id);
         disposeTenant(id);
@@ -708,4 +865,8 @@ function startEmptySweep(onSweep: (id: string) => void) {
   return sweepInterval;
 }
 
-export { tenants, getOrCreateTenant, disposeTenant, startIdleSweep, startEmptySweep, isValidChannelName, sanitizeChannelName };
+export {
+  tenants, getOrCreateTenant, disposeTenant, startIdleSweep, startEmptySweep,
+  isValidChannelName, isValidConnectionName, sanitizeChannelName,
+  reserveRootName, getRootTenant, getOrCreateRootTenant, listRootTenants,
+};

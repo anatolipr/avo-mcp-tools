@@ -143,6 +143,19 @@ export interface RegisterToolsMessage {
    * server-side into a slug; the raw value is only used as a display label.
    */
   appLabel?: string;
+  /**
+   * True for a connection with no user-facing surface to identify itself
+   * against (e.g. the browser extension's background service worker — no
+   * page to alert()) or to usefully move into a channel. Set by the
+   * connection itself (it's the only side that knows it isn't a regular
+   * page), NOT inferred from its name/label — see dashboard-app.ts, which
+   * hides the identify/move actions for a connection with this set. A
+   * server-owned directCall connection (admin, MCP proxies) has no socket
+   * at all and is marked internal directly at registration time instead
+   * (see registerDirectConnection's callers) since it never sends this
+   * message.
+   */
+  internal?: boolean;
 }
 
 export interface CallMessage {

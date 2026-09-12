@@ -36,17 +36,19 @@ export async function getOrCreateExtensionAppLabel(): Promise<string> {
   return label;
 }
 
-// Defaults to a dedicated "extension" channel, NOT the shared "default"
-// channel every unnamed page connection also lands on - the extension is
-// meant to be trivially discoverable as its own thing (join_channel("extension"),
-// or its own row in the dashboard) rather than blended in among whatever
-// pages happen to be on "default". Still overridable via setExtensionChannel
-// below if a user wants it to share a channel with something specific.
-export async function getExtensionChannel(): Promise<string> {
+// Defaults to a root connection named "extension" - addressed directly, no
+// channel needed - rather than the old shared "default" channel every
+// unnamed page connection used to land on. The extension is meant to be
+// trivially discoverable as its own thing (describe_connection("extension"),
+// or its own flat row in the dashboard) rather than blended in among other
+// connections. Still overridable via setExtensionConnectionName below if a
+// user wants it to join a real channel instead (e.g. "somechannel:ext") or
+// pick a different root name.
+export async function getExtensionConnectionName(): Promise<string> {
   const result = await chrome.storage.local.get(EXTENSION_CHANNEL_STORAGE_KEY);
   return (result[EXTENSION_CHANNEL_STORAGE_KEY] as string | undefined) ?? 'extension';
 }
 
-export async function setExtensionChannel(channel: string): Promise<void> {
-  await chrome.storage.local.set({ [EXTENSION_CHANNEL_STORAGE_KEY]: channel });
+export async function setExtensionConnectionName(name: string): Promise<void> {
+  await chrome.storage.local.set({ [EXTENSION_CHANNEL_STORAGE_KEY]: name });
 }

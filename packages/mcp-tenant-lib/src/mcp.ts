@@ -5,7 +5,8 @@ export type RegisterToolsFn<TSchema = any, TValues = any> = (
   mcp: McpServer,
   tenant: () => Tenant<TSchema, TValues>,
   port: number,
-  setChannel: (id: string) => void
+  setChannel: (id: string) => void,
+  resetChannel: () => void
 ) => void;
 
 export interface McpServerIdentity {
@@ -30,9 +31,11 @@ export function buildMcpServer<TSchema, TValues>(
   registerFn: RegisterToolsFn<TSchema, TValues>
 ) {
   const mcp = new McpServer(identity);
+  const homeTenantId = tenantId;
   let currentTenantId = tenantId;
   const tenant = () => getTenant(currentTenantId);
   const setChannel = (id: string) => { currentTenantId = id; };
-  registerFn(mcp, tenant, port, setChannel);
+  const resetChannel = () => { currentTenantId = homeTenantId; };
+  registerFn(mcp, tenant, port, setChannel, resetChannel);
   return mcp;
 }

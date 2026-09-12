@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { getOrCreateTenant } from './tenant.js';
+import { getOrCreateTenant, getOrCreateRootTenant } from './tenant.js';
 import { buildMcpServer, type RegisterToolsFn, type McpServerIdentity } from './mcp.js';
 import { handleDashboardRoutes } from './dashboard.js';
 
@@ -39,16 +39,17 @@ export interface CreateHttpServerOptions<TSchema, TValues> {
    *   mcp-form relies on so concurrent agents don't share form state
    *   (see tenant-isolation.test.ts).
    *
-   * - 'shared': every unpinned session lands on the single 'default'
-   *   tenant (same one the WS side and both packages' boot-time
-   *   getOrCreateTenant('default') call already use for plain browser
-   *   access). Appropriate when there's exactly one browser page bridged
-   *   per server and MCP clients aren't expected to pin a tenant
-   *   explicitly — some clients (observed with VS Code Copilot) open a
-   *   brand-new MCP session on every reconnect/idle DELETE cycle with no
-   *   ?tenant=, and under 'per-session' each such reconnect mints a new,
-   *   empty tenant that orphans whatever browser tab was already bridged
-   *   to the previous one.
+   * - 'shared': every unpinned session lands on one root connection named
+   *   after this server's own identity (`identity.name`, e.g.
+   *   "js-bridge-mcp") — a root connection, not a real channel, so it's
+   *   hidden from list_channels but still directly addressable via
+   *   describe_connection. Appropriate when there's exactly one browser
+   *   page bridged per server and MCP clients aren't expected to pin a
+   *   tenant explicitly — some clients (observed with VS Code Copilot)
+   *   open a brand-new MCP session on every reconnect/idle DELETE cycle
+   *   with no ?tenant=, and under 'per-session' each such reconnect mints
+   *   a new, empty tenant that orphans whatever browser tab was already
+   *   bridged to the previous one.
    */
   defaultTenantMode?: 'per-session' | 'shared';
   /**
@@ -100,7 +101,8 @@ export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSch
         // map is keyed on it) so concurrent clients don't collide; only
         // which *tenant* the session operates on varies by mode.
         const requestedTenantId = url.searchParams.get('tenant');
-        const tenantId = requestedTenantId || (defaultTenantMode === 'shared' ? 'default' : randomUUID());
+        const tenantId = requestedTenantId
+          || (defaultTenantMode === 'shared' ? getOrCreateRootTenant(identity.name, initialSchema, initialValues).tenant.id : randomUUID());
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {

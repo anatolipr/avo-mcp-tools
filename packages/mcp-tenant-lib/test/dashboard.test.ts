@@ -23,7 +23,7 @@ test('getConnectionToolList maps a connection\'s manifest, defaulting an absent 
   const t = new Tenant('t1', undefined, {});
   tenants.set('known-channel', t);
   const fakeSocket = { readyState: 1, OPEN: 1, send() {} } as any;
-  t.registerConnection('conn1', fakeSocket);
+  t.registerConnection('conn1', fakeSocket, 'conn1');
   t.updateConnectionManifest('conn1', [
     { name: 'insert_title', description: 'sets title', params: {} },
     { name: 'save_current_note', description: 'saves', params: {}, source: 'dynamic' },
@@ -55,7 +55,10 @@ test('dashboard REST routes: GET tools list, POST register-by-path/register-by-c
   getOrCreateTenant('dash-test', undefined, {});
 
   try {
-    const ws = new WebSocket(`ws://localhost:${port}/ws?tenant=dash-test`);
+    // "dash-test:conn" (a colon) targets the real named channel "dash-test"
+    // — a bare name would instead mean a root connection (see ws.ts), which
+    // wouldn't match the REST routes below (they address it by channel name).
+    const ws = new WebSocket(`ws://localhost:${port}/ws?tenant=dash-test:conn`);
     await new Promise((resolve, reject) => {
       ws.on('open', resolve);
       ws.on('error', reject);
@@ -143,7 +146,7 @@ test('dashboard REST routes surface a browser-side rejection as 422', async () =
   getOrCreateTenant('dash-test-422', undefined, {});
 
   try {
-    const ws = new WebSocket(`ws://localhost:${port}/ws?tenant=dash-test-422`);
+    const ws = new WebSocket(`ws://localhost:${port}/ws?tenant=dash-test-422:conn`);
     await new Promise((resolve, reject) => {
       ws.on('open', resolve);
       ws.on('error', reject);

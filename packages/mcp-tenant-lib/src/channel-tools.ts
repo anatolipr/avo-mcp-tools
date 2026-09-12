@@ -1,24 +1,26 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Tenant } from './tenant.js';
-import { tenants, getOrCreateTenant, isValidChannelName } from './tenant.js';
+import { tenants, getOrCreateTenant, isValidChannelName, getRootTenant } from './tenant.js';
 import { findChannelMatches } from './channel-search.js';
 import { buildDescribePayload } from './manifest-tools.js';
 
 /**
- * Registers `join_channel` and `list_channels` on an MCP server built via
+ * Registers `join_channel`, `list_channels`, `channel_find`,
+ * `describe_channel`, and `describe_connection` on an MCP server built via
  * buildMcpServer. Shared across every mcp-tenant-lib consumer (mcp-form,
  * js-bridge-mcp, ...) so the tool behavior/wording stays identical rather
  * than reimplemented per package.
  *
- * `tenant`/`setChannel`/`port` are exactly what registerFn (see mcp.ts)
- * receives — pass them straight through from there.
+ * `tenant`/`setChannel`/`resetChannel`/`port` are exactly what registerFn
+ * (see mcp.ts) receives — pass them straight through from there.
  */
 export function registerChannelTools<TSchema, TValues>(
   mcp: McpServer,
   tenant: () => Tenant<TSchema, TValues>,
   port: number,
   setChannel: (id: string) => void,
+  resetChannel: () => void,
   initialSchema: TSchema,
   initialValues: TValues
 ): void {
@@ -27,14 +29,20 @@ export function registerChannelTools<TSchema, TValues>(
     'Names (or rejoins) a channel: a persistent, agent-chosen identity for this session\'s live state, shared ' +
     'with any other session that joins the same name. DEFAULT TO CALLING THIS as one of your first actions, ' +
     'with a name derived from the topic at hand (e.g. a request about "pets" → join_channel("pets")) — not ' +
-    'something reserved for when you happen to think of it. Until called, a session sits on the shared, ' +
-    'anonymous "default" channel, visible to every other unnamed session on this server — skip only when the ' +
-    'user says it\'s a one-off/throwaway, or nothing suggests a distinct topic worth naming. Reusing an ' +
-    'existing name is expected, not an error: it retargets this session onto that channel\'s live state (e.g. ' +
-    'to resume, or redefine/refresh it). Names are URL-safe slugs: letters, digits, underscore, hyphen only. ' +
-    'To only inspect a channel\'s tools without retargeting this session onto it, use describe_channel instead.',
-    { channel: z.string().describe('Agent-chosen channel name, e.g. "pets" or "pet_questions_1_of_2". Letters/digits/underscore/hyphen only.') },
+    'something reserved for when you happen to think of it. Skip only when the user says it\'s a ' +
+    'one-off/throwaway, or nothing suggests a distinct topic worth naming — root connections (e.g. a specific ' +
+    'bridged app or MCP proxy) are already visible with no channel needed, see describe_connection. Reusing ' +
+    'an existing name is expected, not an error: it retargets this session onto that channel\'s live state ' +
+    '(e.g. to resume, or redefine/refresh it). Names are URL-safe slugs: letters, digits, underscore, hyphen ' +
+    'only. Pass "" to return this session to where it started (its root connection, if any) instead of a ' +
+    'named channel. To only inspect a channel\'s tools without retargeting this session onto it, use ' +
+    'describe_channel instead.',
+    { channel: z.string().describe('Agent-chosen channel name, e.g. "pets" — or "" to return to this session\'s original (root) state.') },
     async ({ channel }: { channel: string }) => {
+      if (channel === '') {
+        resetChannel();
+        return { content: [{ type: 'text', text: 'Returned to this session\'s original (root) state.' }] };
+      }
       if (!isValidChannelName(channel)) {
         return {
           content: [{ type: 'text', text: `Error: "${channel}" is not a valid channel name — use only letters, digits, underscore, and hyphen.` }],
@@ -51,21 +59,24 @@ export function registerChannelTools<TSchema, TValues>(
 
   mcp.tool(
     'list_channels',
-    'Lists every channel currently live on this server, including "default" (the shared, anonymous channel ' +
-    'sessions land on before calling join_channel). Use this to discover an existing named channel, e.g. when ' +
-    'a human refers to "the pets form" without giving the exact channel name. Each entry includes a ' +
-    '`connections` array — one item per live browser tab/page bridged into that channel, with its display ' +
-    '`label` and `toolCount` — so you can tell which channels actually have something connected. To see the ' +
-    'actual tools on one, call describe_channel rather than joining just to look.',
+    'Lists every real, named channel currently live on this server — NOT root connections (unnamed/' +
+    'directly-addressed ones like a specific bridged app or MCP proxy; see describe_connection for those). ' +
+    'Use this to discover an existing named channel, e.g. when a human refers to "the pets form" without ' +
+    'giving the exact channel name. Each entry includes a `connections` array — one item per live browser ' +
+    'tab/page joined into that channel, with its display `label` and `toolCount` — so you can tell which ' +
+    'channels actually have something connected. To see the actual tools on one, call describe_channel ' +
+    'rather than joining just to look.',
     {},
     async () => {
-      const channels = [...tenants.entries()].map(([channel, t]) => ({
-        channel,
-        connections: [...t.connections.values()].map((c) => ({
-          label: c.label ?? null,
-          toolCount: c.manifest.length,
-        })),
-      }));
+      const channels = [...tenants.entries()]
+        .filter(([, t]) => !t.isRoot)
+        .map(([channel, t]) => ({
+          channel,
+          connections: [...t.connections.values()].map((c) => ({
+            label: c.label ?? null,
+            toolCount: c.manifest.length,
+          })),
+        }));
       return { content: [{ type: 'text', text: JSON.stringify(channels, null, 2) }] };
     }
   );
@@ -104,6 +115,28 @@ export function registerChannelTools<TSchema, TValues>(
       if (!t) {
         return {
           content: [{ type: 'text', text: `Error: no channel named "${channel}" — use list_channels or channel_find to find the right name.` }],
+          isError: true,
+        };
+      }
+      const payload = buildDescribePayload(t);
+      return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+    }
+  );
+
+  mcp.tool(
+    'describe_connection',
+    'Returns the tool manifest for one ROOT connection by name (a specific bridged app, browser extension, ' +
+    'or MCP proxy addressed directly rather than through a channel) — root connections do not appear in ' +
+    'list_channels/channel_find, so this is the direct way to inspect one. Its tools are already visible ' +
+    '(prefixed by this same name) in your own tools/list without calling this first; use it when you want ' +
+    'the connection\'s summary or full tool list before calling one. Read-only: does not join or retarget ' +
+    'this session. Errors if no root connection has that name.',
+    { name: z.string().describe('Root connection name, e.g. "extension" or an MCP proxy\'s slug.') },
+    async ({ name }: { name: string }) => {
+      const t = getRootTenant(name);
+      if (!t) {
+        return {
+          content: [{ type: 'text', text: `Error: no root connection named "${name}".` }],
           isError: true,
         };
       }

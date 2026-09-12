@@ -77,11 +77,12 @@ The manual paste above is the right default for a one-off static page, but a
 real app with its own build (Vite/webpack/etc) that wants to stay connected
 across every reload doesn't need a human to paste anything, ever. Instead of
 a session-minted tenant UUID, the app connects itself on boot using a fixed,
-human-readable **channel** name — `js-bridge-mcp`'s channel support
-(`mcp-tenant-lib` 0.3.3+) treats a channel name as the same string-keyed
-tenant id `main.js` already accepts via its `tenant` query param, so any MCP
-client can attach to the exact same live connection later via
-`join_channel("<channel-name>")`, with zero interaction on the page side.
+human-readable name. By default this becomes a **root connection** —
+addressed directly, its tools merged into every MCP session automatically,
+no `join_channel` needed. Pass `"channel:app-name"` instead to join a real,
+agent-joinable **channel**, reachable later via `join_channel("<channel-name>")`.
+Either way, zero interaction is needed on the page side after the first
+connect.
 
 There's also a packaged skill for this exact recipe:
 `.agents/skills/js-bridge-mcp-auto-connect-button/SKILL.md` — load it before
@@ -98,16 +99,17 @@ switch) is shared infrastructure, served by this package the same way
 ```js
 import { createMcpConnect } from 'http://localhost:8766/connect.js';
 
-const connect = createMcpConnect({ appName: 'myapp' }); // localStorage key + tool-name label; lands on the shared "default" channel
+const connect = createMcpConnect({ appName: 'myapp' }); // localStorage key + tool-name label; becomes its own ROOT connection named "myapp"
 connect.init();                                          // connects on page load
 connect.handleConnectClick();                             // wire to a toolbar button
 connect.onConnectionStateChange((state, channel, appLabel) => { /* render a status indicator */ });
 connect.getConnectionState();                              // { state, channel, appLabel } - synchronous
 ```
 
-`createMcpConnect` also accepts `defaultChannel` (defaults to `'default'` —
-the shared channel every unnamed connection lands on; pass `appName` for the
-old per-app-isolated-by-default behavior) and
+`createMcpConnect` also accepts `defaultChannel` (the raw connect string used
+before any human retargets it — defaults to `appName`, i.e. this app becomes
+its own root connection with no channel needed; pass a `"channel:app-name"`
+string instead to join a real, agent-joinable channel by default) and
 `beforeConnect` (an optional async hook run once, before the first
 `main.js` import — for a host page that layers extra tool providers onto
 `window.__mcpTools` first, e.g. via `tool-bus.js`; see bulletino-1's
@@ -123,19 +125,25 @@ works. See htmlpaint.com's or mindfoo's `mcp-connect.js`/`.ts` for the
 pattern (native ESM pages with no bundler, like bulletino-1's
 `mcp-connect.mjs`, can just top-level-`await` it directly).
 
-### Channel:app-name — joining a shared channel
+### Root connections vs. "channel:app-name" — joining a shared channel
 
-The prompt `handleConnectClick()` shows (and the one in this recipe's own
-UI wiring below) accepts either a bare channel name (`"bug123"`) or
-`"channel:app-name"` (`"bug123:htmlpaint"`) — the part after the colon sets
-`window.__mcpAppName` explicitly, independent of the channel itself. This is
-how several different apps deliberately join the **same** channel (like
-inviting several people into one Slack channel) while each keeps its own
-readable tool-name prefix instead of colliding on the channel name as its
-label: type `bug123:htmlpaint` in one tab and `bug123:bulletino` in another,
-and both land on tenant `bug123` with tools prefixed `htmlpaint__...` /
-`bulletino__...` — see "Multiple tabs on one tenant" below for how that
-prefixing works. Omitting `:app-name` keeps the app's own default label.
+By default, typing a bare name (`"htmlpaint2"`) in the connect prompt makes
+that page its own **root connection** — addressed directly by name, with its
+tools always prefixed `htmlpaint2__...` and merged into every MCP session
+automatically. No `join_channel` needed; any agent can call
+`describe_connection("htmlpaint2")` to inspect it directly.
+
+Typing `"channel:app-name"` instead (`"bug123:htmlpaint"`) joins a real,
+agent-joinable **channel** — the part before the colon is the channel name,
+the part after sets `window.__mcpAppName` for this connection specifically.
+This is how several different apps deliberately join the **same** channel
+(like inviting several people into one Slack channel) while each keeps its
+own readable tool-name prefix instead of colliding on the channel name as
+its label: type `bug123:htmlpaint` in one tab and `bug123:bulletino` in
+another, and both land on channel `bug123` with tools prefixed
+`htmlpaint__...` / `bulletino__...` — see "Multiple tabs on one tenant"
+below for how that prefixing works. An agent then reaches them via
+`join_channel("bug123")`.
 
 ### Orphaned channels get cleaned up automatically
 
@@ -186,13 +194,14 @@ And a status button somewhere in the toolbar, bound to
 ```
 ⚪ myapp        -- disconnected, click to connect
 🟡 connecting…  -- probing/importing
-🟢 myapp        -- connected on channel "myapp", click to rename (or "channel:app-name" to join a shared channel)
+🟢 myapp        -- connected as root connection "myapp", click to rename (or "channel:app-name" to join a shared channel)
 ```
 
 Any MCP client can now reach this page's tools without ever touching
-DevTools: `join_channel("myapp")`, then call tools by name (or their
-prefixed form if more than one connection shares the channel — see
-"Multiple tabs on one tenant" below).
+DevTools or calling `join_channel` first — its tools already appear in
+`tools/list`, prefixed `myapp__...` (see "Multiple tabs on one tenant"
+below for how that prefixing works when more than one connection is
+involved).
 
 ## Multiple entrypoints (`js-bridge-mcp` vs `js-bridge-mcp/client` vs `/bus` vs `/connect`)
 
@@ -285,11 +294,11 @@ Schema per entry:
   `name` against its local copy of `window.__mcpTools`.
 
 Optionally also set `window.__mcpAppName` (a short string, e.g. `"formalin"`
-or `"htmlpaint"`) before the embed snippet runs. It identifies this page/app
-when the *same* `get_embed_snippet` output gets pasted into more than one
-browser tab — see "Multiple tabs on one tenant" below. Falls back to
-`document.title` if omitted, and has no effect at all with a single
-connection.
+or `"htmlpaint"`) before the embed snippet runs. It becomes this
+connection's tool-name prefix, always — matters most when the *same*
+`get_embed_snippet` output gets pasted into more than one browser tab, see
+"Multiple tabs on one tenant" below. Falls back to `document.title` if
+omitted.
 
 If the page is an ES module build rather than plain script tags, define
 `window.__mcpTools` in whichever module already has the real functions in
@@ -556,25 +565,29 @@ of them to the same tenant. This is supported, not just an edge case to
 avoid: it's how one MCP session can drive multiple pages at once (e.g.
 "read form data from tab A, use it to drive tab B").
 
-- Each WS connection is tracked separately server-side. As soon as a
-  **second** connection registers tools, every registered MCP tool name
-  gets an automatic prefix: `${slug}__${name}` — e.g. `formalin__submit_form`,
-  `htmlpaint__clear_canvas`. With only one connection, tool names stay
-  exactly as they'd be alone (`submit_form`), no prefix.
-- The slug comes from `window.__mcpAppName` (or `document.title` if unset),
-  sanitized to `[a-z0-9_]`. Two connections that land on the same slug (same
-  app, or both unlabeled) get ordinal-suffixed: the first to connect keeps
-  the bare slug, the next becomes `slug2`, then `slug3`, etc. — so "use the
-  first htmlpaint tab" maps to the plain `htmlpaint__...` tools, and "use
-  the second" maps to `htmlpaint2__...`.
-- Calling `describe_tools` with 2+ connections returns a `connections[]`
-  array (`id`, `label`, `toolPrefix`, `summary`, `tools[]`) instead of the
-  single-connection flat shape — call it whenever you're not sure which
-  prefix routes to which tab.
+- Each WS connection is tracked separately server-side. Every registered MCP
+  tool name always gets an automatic prefix — `${name}__${tool}` — e.g.
+  `formalin__submit_form`, `htmlpaint__clear_canvas`, even when it's the
+  only connection present. This is deliberate, not just a collision-avoidance
+  fallback: it's what lets a prompt like "use dbhub-local" resolve directly
+  to `dbhub_local__query` in a flat `tools/list`, with no `join_channel`/
+  `describe_channel` round-trip needed first.
+- The name comes from `window.__mcpAppName` (or `document.title` if unset),
+  sanitized to `[a-z0-9_]`. Two connections that land on the same name (same
+  app, or both unlabeled) get ordinal-suffixed at registration time: the
+  first to connect keeps the bare name, the next becomes `name2`, then
+  `name3`, etc. — so "use the first htmlpaint tab" maps to `htmlpaint__...`
+  tools, and "use the second" maps to `htmlpaint2__...`.
+- Calling `describe_tools` always returns a `connections[]` array (`id`,
+  `label`, `toolPrefix`, `summary`, `tools[]`), for 0, 1, or many
+  connections alike — call it whenever you're not sure which prefix routes
+  to which tab.
 - Calls are routed to exactly one connection's socket — the other
   tab(s) never see or respond to a call meant for a different one.
-- Closing a tab drops its connection; if that leaves exactly one connection
-  behind, that one's tools become unprefixed again on the next call.
+- Closing a tab drops its connection and its prefixed tools disappear from
+  `tools/list` — any remaining connection keeps its own prefix unchanged
+  (names are stable once assigned, never renumbered by another connection
+  leaving).
 
 ### Validation checklist before calling it done
 
@@ -588,11 +601,10 @@ avoid: it's how one MCP session can drive multiple pages at once (e.g.
 5. Paste the *same* `get_embed_snippet` snippet into a second browser tab
    (same tenant, deliberately). Call `describe_tools` — confirm it lists
    two connections with distinct labels/prefixes (`tab`/`tab2` if neither
-   page set `window.__mcpAppName`/title). Call one of the newly prefixed
-   tools (e.g. `tab__insert_title`) and confirm only that tab updates, not
-   the other. Close one tab, call `describe_tools` again, confirm it now
-   reports a single connection and that connection's tools are reachable
-   unprefixed again.
+   page set `window.__mcpAppName`/title). Call one of the prefixed tools
+   (e.g. `tab__insert_title`) and confirm only that tab updates, not the
+   other. Close one tab, call `describe_tools` again, confirm it now
+   reports a single connection, still prefixed by its own name.
 
 For the fuller version of this recipe (including how to scaffold a brand-new
 MCP server package, "Pattern A" vs "Pattern B") see

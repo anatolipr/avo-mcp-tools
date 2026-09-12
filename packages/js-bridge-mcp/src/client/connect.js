@@ -1,7 +1,6 @@
 // Shared connect-lifecycle module for any page auto-connecting to a locally
-// running js-bridge-mcp server via a named CHANNEL (not a session-minted
-// tenant UUID) - see packages/js-bridge-mcp/README.md's "Auto-connect on
-// page load" section for the full design rationale.
+// running js-bridge-mcp server - see packages/js-bridge-mcp/README.md's
+// "Auto-connect on page load" section for the full design rationale.
 //
 // This used to be copy-pasted per host app (mindfoo/src/mcp-connect.ts,
 // bulletino-1/mcp-connect.mjs, htmlpaint.com/src/mcp-connect.js - all three
@@ -19,30 +18,18 @@
 //   export const mcpConnect = createMcpConnect({ appName: 'htmlpaint' });
 //   mcpConnect.init();
 //
-// Channel identity: js-bridge-mcp's channel support (mcp-tenant-lib 0.3.3+)
-// makes a channel name the same string-keyed tenant id main.js accepts via
-// the `tenant` query param - so a host app can connect with a fixed,
-// human-readable name with zero interaction, and any MCP client can attach
-// to the exact same live connection via join_channel("<name>").
-//
-// Default channel: unless a caller passes opts.defaultChannel (or a human
-// retargets via handleConnectClick's prompt), a fresh connection lands on
-// the shared "default" channel - same one a raw WS connection with no
-// `tenant` param lands on - rather than each app getting its own isolated
-// channel automatically. This lets several apps that never bother naming a
-// channel show up together on one shared channel a human/agent can find by
-// just looking, and lets a human later group specific connections onto a
-// shared channel from the dashboard's "move" action (mcp-tenant-lib's
-// Tenant.moveConnection) without every app needing to coordinate names.
-//
-// Channel:app-name syntax: a chosen channel may be typed as "channel:app" -
-// e.g. "bug123:htmlpaint" - to explicitly set BOTH the shared channel
-// (join_channel target) and this connection's own app label/tool-name
-// prefix in one prompt, letting several different apps deliberately join
-// the same channel (like inviting several people into one Slack channel)
-// while each still gets a distinct, readable tool prefix instead of
-// colliding on "channel" as its own label. Omitting the ":app" part keeps
-// the app's own default label.
+// ROOT vs CHANNEL (breaking change from the old "always a channel" model):
+// a bare name (no colon), e.g. "htmlpaint", is now a ROOT connection -
+// addressed directly by name, with its tools always prefixed
+// "htmlpaint__..." and merged into every MCP session automatically, no
+// join_channel needed (mcp-tenant-lib's describe_connection can inspect one
+// by name). Typing "channel:app-name" - e.g. "bug123:htmlpaint" - instead
+// joins the REAL, agent-joinable channel "bug123" under connection name
+// "htmlpaint", letting several different apps deliberately share one
+// channel (like inviting several people into one Slack channel) while each
+// keeps its own readable tool prefix. There is no longer an implicit shared
+// "default" channel: omitting opts.defaultChannel just makes this app its
+// own root connection named after opts.appName.
 
 // js-bridge-mcp has no production deployment - it only ever runs locally,
 // launched via `npx` (see packages/js-bridge-mcp), so this always targets
@@ -66,12 +53,17 @@ export function sanitizeToValidChannelName(raw) {
 }
 
 /**
- * Splits a user-typed "channel" or "channel:app" string into its parts.
- * A bare name (no colon) is just the channel, with no app-label override.
+ * Splits a user-typed connection string into root-vs-channel parts. A bare
+ * name (no colon) means a ROOT connection named `input` - `channel` comes
+ * back undefined. "channel:app" means real channel `channel` with connection
+ * name `app` inside it. Split on the FIRST colon only, so an app name may
+ * itself contain colons. An empty channel before the colon (":foo") is left
+ * for the caller to reject via VALID_CHANNEL_NAME, same as any other invalid
+ * channel string - this function does no validation itself.
  */
 export function parseChannelInput(input) {
   const idx = input.indexOf(':');
-  if (idx === -1) return { channel: input, appLabel: undefined };
+  if (idx === -1) return { channel: undefined, appLabel: input.trim() || undefined };
   const channel = input.slice(0, idx).trim();
   const appLabel = input.slice(idx + 1).trim();
   return { channel, appLabel: appLabel || undefined };
@@ -81,14 +73,15 @@ export function parseChannelInput(input) {
  * @param {object} opts
  * @param {string} opts.appName - Short app-specific identifier, e.g.
  *   "htmlpaint", "bulletino", "mindfoo". Used as: the localStorage key
- *   namespace, and (unless a "channel:app" prompt input overrides it) the
- *   connection's window.__mcpAppName label.
- * @param {string} [opts.defaultChannel] - Defaults to 'default' - the same
- *   shared channel every unnamed connection (WS or MCP) lands on - so
- *   several apps that never bother naming a channel land on one shared
- *   channel by default rather than each getting its own. Pass opts.appName
- *   (or any other fixed name) explicitly for the old per-app-isolated-by-
- *   default behavior.
+ *   namespace, this app's default ROOT connection name (unless
+ *   opts.defaultChannel or a prompt input overrides it), and (unless a
+ *   "channel:app" prompt input overrides it) the connection's
+ *   window.__mcpAppName label.
+ * @param {string} [opts.defaultChannel] - The raw connect string used before
+ *   any human retargets via handleConnectClick's prompt. Defaults to
+ *   opts.appName - i.e. this app becomes its own root connection, addressed
+ *   directly by name with no channel needed. Pass a "channel:app-name"
+ *   string instead to have this app join a real channel by default.
  * @param {(state: 'disconnected'|'connecting'|'connected', channel: string, appLabel: string) => void} [opts.onStateChange]
  *   Optional convenience callback, called on every state transition - an
  *   alternative to onConnectionStateChange() below for a caller that just
@@ -103,7 +96,7 @@ export function parseChannelInput(input) {
  */
 export function createMcpConnect(opts) {
   const appName = opts.appName;
-  const defaultChannel = opts.defaultChannel ?? 'default';
+  const defaultChannel = opts.defaultChannel ?? appName;
   const CHANNEL_STORAGE_KEY = `${appName}_mcp_channel`;
   const APP_LABEL_STORAGE_KEY = `${appName}_mcp_app_label`;
 
@@ -177,7 +170,7 @@ export function createMcpConnect(opts) {
     }
   }
 
-  async function connectToChannel(channelName, appLabel) {
+  async function connectToChannel(connectString, appLabel) {
     // Tell whichever channel we were previously on that we're leaving it
     // BEFORE opening the new socket, so the server can drop that tenant the
     // moment it's empty rather than only after this tab's old socket times
@@ -188,7 +181,7 @@ export function createMcpConnect(opts) {
     leaveCurrentSocket = undefined;
 
     setState('connecting');
-    currentChannel = channelName;
+    currentChannel = connectString;
     currentAppLabel = appLabel ?? appName;
     window.__mcpAppName = currentAppLabel;
     setStored(CHANNEL_STORAGE_KEY, currentChannel);
@@ -205,14 +198,18 @@ export function createMcpConnect(opts) {
       await opts.beforeConnect?.();
     }
 
-    // A fresh import (unique URL per channel/tenant, since main.js reads
-    // `tenant` once at module-eval time and exposes no way to retarget an
-    // existing connection) - main.js has no export, so this is fire-and-
-    // forget; connect/disconnect status past this point is inferred from
-    // the probe above plus the module having loaded without throwing.
+    // `connectString` is passed through to `?tenant=` exactly as typed (bare
+    // name -> root connection, "channel:name" -> real channel) - the
+    // server (ws.ts) does the colon interpretation, so this module doesn't
+    // need to know the root-tenant-id namespacing convention at all. A fresh
+    // import (unique URL per tenant, since main.js reads `tenant` once at
+    // module-eval time and exposes no way to retarget an existing
+    // connection) - main.js has no export, so this is fire-and-forget;
+    // connect/disconnect status past this point is inferred from the probe
+    // above plus the module having loaded without throwing.
     try {
       const mod = await import(
-        /* @vite-ignore */ `${JSBRIDGE_HOST}/main.js?server=${encodeURIComponent(JSBRIDGE_HOST)}&tenant=${encodeURIComponent(channelName)}&_=${Date.now()}`
+        /* @vite-ignore */ `${JSBRIDGE_HOST}/main.js?server=${encodeURIComponent(JSBRIDGE_HOST)}&tenant=${encodeURIComponent(connectString)}&_=${Date.now()}`
       );
       // main.js exposes __mcpLeaveChannel (see main.ts) as a best-effort
       // hook for exactly this - a module-scoped function, not a return
@@ -229,20 +226,19 @@ export function createMcpConnect(opts) {
    * Click behavior: connect (or reconnect) if not connected; if already
    * connected, prompt to rename - so a user with multiple tabs open can
    * name each one on purpose instead of ending up with an unlabeled
-   * auto-suffixed channel they can't identify later. Accepts a bare channel
-   * name ("bug123") or "channel:app-name" ("bug123:htmlpaint") to join a
-   * shared channel under an explicit app label distinct from the channel
-   * name itself - lets several different apps deliberately land on the same
+   * auto-suffixed connection they can't identify later. A bare name
+   * ("htmlpaint2") means a root connection with that name; "channel:app-name"
+   * ("bug123:htmlpaint") joins the real channel "bug123" under connection
+   * name "htmlpaint" - lets several different apps deliberately share one
    * channel (like inviting several people into one Slack channel) while
    * keeping each one's tools under its own readable prefix.
    */
   async function handleConnectClick() {
-    const promptCurrent = currentAppLabel === appName ? currentChannel : `${currentChannel}:${currentAppLabel}`;
     if (state === 'connected') {
-      let next = prompt('Name this connection (channel, or channel:app-name to share a channel):', promptCurrent);
-      if (!next || next === promptCurrent) return;
+      let next = prompt('Name this connection (or "channel:name" to join a shared channel):', currentChannel);
+      if (!next || next === currentChannel) return;
       let parsed = parseChannelInput(next);
-      while (parsed.channel && !VALID_CHANNEL_NAME.test(parsed.channel)) {
+      while (parsed.channel !== undefined && !VALID_CHANNEL_NAME.test(parsed.channel)) {
         next = prompt(
           `"${parsed.channel}" isn't a valid channel name - only letters, digits, underscore, and hyphen are allowed (no spaces). Try again:`,
           `${sanitizeToValidChannelName(parsed.channel)}${parsed.appLabel ? `:${parsed.appLabel}` : ''}`
@@ -250,8 +246,7 @@ export function createMcpConnect(opts) {
         if (!next) return;
         parsed = parseChannelInput(next);
       }
-      if (!parsed.channel) return;
-      await connectToChannel(parsed.channel, parsed.appLabel);
+      await connectToChannel(next, parsed.appLabel);
       return;
     }
     await connectToChannel(currentChannel, currentAppLabel);

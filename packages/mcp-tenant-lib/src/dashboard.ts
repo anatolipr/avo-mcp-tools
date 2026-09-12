@@ -7,8 +7,10 @@ export interface DashboardConnection {
   label: string | null;
   toolCount: number;
   summary: string | null;
-  /** 'proxy' for a server-owned directCall connection (see TenantConnection), 'browser' for a real WS tab. */
-  kind: 'browser' | 'proxy';
+  /** See TenantConnection.kind — 'admin' gets its own icon, distinct from a real MCP proxy. */
+  kind: 'browser' | 'proxy' | 'admin';
+  /** See TenantConnection.internal — true hides identify/move for this connection in the dashboard (no page to alert, or nothing useful to move). */
+  internal: boolean;
 }
 
 export interface DashboardChannel {
@@ -16,6 +18,25 @@ export interface DashboardChannel {
   lastActivityAt: number;
   connections: DashboardConnection[];
   recentToolRegistrations: DashboardToolRegistration[];
+}
+
+/**
+ * One live root connection, flattened (no nested `connections` array —
+ * unlike a channel, a root Tenant always has exactly one connection, so
+ * there's nothing to enumerate). `name` is the id used to address it (e.g.
+ * via describe_connection or the "root:<name>" path segment the existing
+ * per-connection dashboard routes already accept transparently).
+ */
+export interface DashboardRootConnection {
+  name: string;
+  id: string;
+  label: string | null;
+  toolCount: number;
+  summary: string | null;
+  kind: 'browser' | 'proxy' | 'admin';
+  lastActivityAt: number;
+  /** See TenantConnection.internal — true hides identify/move for this connection in the dashboard (no page to alert, or nothing useful to move). */
+  internal: boolean;
 }
 
 export interface DashboardToolRegistration {
@@ -35,6 +56,7 @@ export interface DashboardToolRegistration {
  */
 export function buildDashboardSnapshot(): DashboardChannel[] {
   return [...tenants.entries()]
+    .filter(([, t]) => !t.isRoot)
     .map(([channel, t]) => ({
       channel,
       lastActivityAt: t.lastActivityAt,
@@ -43,7 +65,8 @@ export function buildDashboardSnapshot(): DashboardChannel[] {
         label: c.label ?? null,
         toolCount: c.manifest.length,
         summary: c.summary ?? null,
-        kind: c.directCall ? 'proxy' as const : 'browser' as const,
+        kind: c.kind,
+        internal: c.internal ?? false,
       })),
       // Recent register_page_tool_by_path/_by_code registrations for this
       // channel — a passive log the dashboard renders as sticky toasts, near-
@@ -51,6 +74,39 @@ export function buildDashboardSnapshot(): DashboardChannel[] {
       // (tenant.ts) — registration already happened by the time this exists.
       recentToolRegistrations: t.recentToolRegistrations.map((r) => ({ ...r })),
     }))
+    .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+}
+
+/**
+ * Flat snapshot of every live root connection — the human-facing view for
+ * the dashboard's "flat connections" tiles rendered above the channel list
+ * (see js-bridge-mcp's dashboard-app.ts). Each root Tenant always has
+ * exactly one connection, so this flattens straight to one row per tenant
+ * rather than nesting a `connections` array the way DashboardChannel does.
+ */
+export function buildRootConnectionsSnapshot(): DashboardRootConnection[] {
+  return [...tenants.values()]
+    // A root Tenant with zero connections (e.g. a paused proxy — see
+    // proxy-manager.ts's stopProxy, which deliberately leaves the Tenant
+    // alive so resume can reuse the same name) has nothing to show: a root
+    // row IS a live connection, unlike a channel tile, which can
+    // legitimately render empty ("no tabs currently bridged"). Filtering
+    // it out here (rather than rendering a ghost 0-tool row) means a
+    // paused proxy simply disappears from the dashboard until resumed.
+    .filter((t) => t.isRoot && t.connections.size > 0)
+    .map((t) => {
+      const conn = [...t.connections.values()][0]!;
+      return {
+        name: t.displayName,
+        id: conn.id,
+        label: conn.label ?? null,
+        toolCount: conn.manifest.length,
+        summary: conn.summary ?? null,
+        kind: conn.kind,
+        lastActivityAt: t.lastActivityAt,
+        internal: conn.internal ?? false,
+      };
+    })
     .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
 }
 
@@ -153,7 +209,7 @@ export async function handleDashboardRoutes(req: IncomingMessage, res: ServerRes
 
   if (url.pathname === '/api/dashboard' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(buildDashboardSnapshot()));
+    res.end(JSON.stringify({ channels: buildDashboardSnapshot(), root: buildRootConnectionsSnapshot() }));
     return true;
   }
 
@@ -162,14 +218,16 @@ export async function handleDashboardRoutes(req: IncomingMessage, res: ServerRes
   // opened/closed, a manifest changed, a channel was created/disposed) — see
   // tenant.ts's notifyDashboard call sites. No diffing: the snapshot is
   // small (one row per channel/connection) and a full replace is simpler
-  // and less bug-prone client-side than patching.
+  // and less bug-prone client-side than patching. `root` carries flat root
+  // connections alongside `channels` in one payload so the dashboard needs
+  // only one EventSource/onmessage handler for both.
   if (url.pathname === '/api/dashboard/stream' && req.method === 'GET') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     });
-    const send = () => res.write(`data: ${JSON.stringify(buildDashboardSnapshot())}\n\n`);
+    const send = () => res.write(`data: ${JSON.stringify({ channels: buildDashboardSnapshot(), root: buildRootConnectionsSnapshot() })}\n\n`);
     send();
     dashboardEvents.on('change', send);
     req.on('close', () => dashboardEvents.off('change', send));

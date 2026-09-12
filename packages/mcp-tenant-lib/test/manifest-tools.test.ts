@@ -33,16 +33,17 @@ test('Tenant call/rejectCall round-trip rejects', async () => {
   await assert.rejects(pending, /boom/);
 });
 
-test('createManifestToolRegistry registers a tool per manifest entry with correct zod param types, plus the built-in describe_tools', () => {
+test('createManifestToolRegistry registers a tool per manifest entry, always prefixed by connection name, plus the built-in describe_tools', () => {
   const t = new Tenant('t1', undefined, {});
-  t.setToolManifest([
+  t.registerConnection('a', fakeSocket(() => {}), 'a');
+  t.updateConnectionManifest('a', [
     { name: 'insert_title', description: 'sets title', params: { title: { type: 'string' } } },
   ]);
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
-  assert.equal(registry.handles.size, 6);
-  assert.ok(registry.handles.has('insert_title'));
+  assert.equal(registry.handles.size, 7);
+  assert.ok(registry.handles.has('a__insert_title'), 'even a solo connection gets prefixed now');
   assert.ok(registry.handles.has('describe_tools'));
   assert.ok(registry.handles.has('identify_connection'));
   assert.ok(registry.handles.has('register_page_tool_by_path'));
@@ -64,7 +65,7 @@ test('calling a manifest tool sends a "call" WS message (by tool name) and resol
       }
     },
   };
-  t.registerConnection('conn1', fakeSocket as any);
+  t.registerConnection('conn1', fakeSocket as any, 'conn1');
   t.updateConnectionManifest('conn1', [
     { name: 'insert_title', description: 'sets title', params: { title: { type: 'string' } } },
   ]);
@@ -99,20 +100,22 @@ test('call(undefined, ...) broadcasts to every socket on the tenant (legacy path
 
 test('unsupported param type skips just that tool, others still register', () => {
   const t = new Tenant('t1', undefined, {});
-  t.setToolManifest([
+  t.registerConnection('a', fakeSocket(() => {}), 'a');
+  t.updateConnectionManifest('a', [
     { name: 'bad', description: 'x', params: { thing: { type: 'enum' as any } } },
     { name: 'insert_title', description: 'd', params: {} },
   ]);
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
   assert.doesNotThrow(() => registry.sync());
-  assert.ok(!registry.handles.has('bad'));
-  assert.ok(registry.handles.has('insert_title'));
+  assert.ok(!registry.handles.has('a__bad'));
+  assert.ok(registry.handles.has('a__insert_title'));
 });
 
 test('array and object param types register and validate call args', async () => {
   const t = new Tenant('t1', undefined, {});
-  t.setToolManifest([
+  t.registerConnection('a', fakeSocket(() => {}), 'a');
+  t.updateConnectionManifest('a', [
     {
       name: 'edit_file',
       description: 'd',
@@ -125,7 +128,7 @@ test('array and object param types register and validate call args', async () =>
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
-  const handle = registry.handles.get('edit_file')!;
+  const handle = registry.handles.get('a__edit_file')!;
   assert.ok(handle);
   const inputSchema = handle.inputSchema as unknown as z.ZodTypeAny;
   const parsed = inputSchema.safeParse({ paths: ['a.txt'], edits: [{ oldText: 'x', newText: 'y' }] });
@@ -137,22 +140,25 @@ test('array and object param types register and validate call args', async () =>
 test('re-registering a manifest removes stale tools and adds new ones', () => {
   const t = new Tenant('t1', undefined, {});
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  t.registerConnection('a', fakeSocket(() => {}), 'a');
 
-  t.setToolManifest([{ name: 'insert_title', description: 'd', params: {} }]);
+  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }]);
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
-  assert.ok(registry.handles.has('insert_title'));
+  assert.ok(registry.handles.has('a__insert_title'));
 
-  t.setToolManifest([{ name: 'insert_main', description: 'd2', params: {} }]);
+  t.updateConnectionManifest('a', [{ name: 'insert_main', description: 'd2', params: {} }]);
   registry.sync();
-  assert.ok(!registry.handles.has('insert_title'), 'stale tool should be removed');
-  assert.ok(registry.handles.has('insert_main'));
+  assert.ok(!registry.handles.has('a__insert_title'), 'stale tool should be removed');
+  assert.ok(registry.handles.has('a__insert_main'));
   assert.ok(registry.handles.has('describe_tools'), 'describe_tools should never be treated as stale');
 });
 
-test('describe_tools returns the page summary and a compact tool index, and shadows a page tool of the same name', async () => {
+test('describe_tools returns a connections[] entry with the page summary and a compact tool index, and shadows a page tool of the same name', async () => {
   const t = new Tenant('t1', undefined, {});
-  t.setToolManifest(
+  t.registerConnection('a', fakeSocket(() => {}), 'a');
+  t.updateConnectionManifest(
+    'a',
     [
       { name: 'insert_title', description: 'sets title', params: {} },
       { name: 'describe_tools', description: 'a page tool that should be shadowed', params: {} },
@@ -163,13 +169,14 @@ test('describe_tools returns the page summary and a compact tool index, and shad
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
 
-  assert.equal(registry.handles.size, 6, 'the colliding page tool name should not add a second handle');
+  assert.equal(registry.handles.size, 7, 'the colliding page tool name should not add a second handle');
 
   const handle = registry.handles.get('describe_tools')!;
   const result: any = await (handle as any).handler({}, {});
   const payload = JSON.parse(result.content[0].text);
-  assert.equal(payload.summary, 'This page is a hello-world demo.');
-  assert.ok(payload.tools.some((e: any) => e.name === 'insert_title'));
+  assert.equal(payload.connections.length, 1);
+  assert.equal(payload.connections[0].summary, 'This page is a hello-world demo.');
+  assert.ok(payload.connections[0].tools.some((e: any) => e.name === 'a__insert_title'));
 });
 
 test('WS "register_tools" message updates the tenant manifest; "call_result" resolves a pending call', async () => {
@@ -187,7 +194,10 @@ test('WS "register_tools" message updates the tenant manifest; "call_result" res
   getOrCreateTenant('manifest-test', undefined, {});
 
   try {
-    const ws = new WebSocket(`ws://localhost:${port}/ws?tenant=manifest-test`);
+    // "manifest-test:conn" (a colon) targets the real named channel
+    // "manifest-test" — a bare name with no colon would instead mean a root
+    // connection (see ws.ts), which is not what this test is exercising.
+    const ws = new WebSocket(`ws://localhost:${port}/ws?tenant=manifest-test:conn`);
     await new Promise((resolve, reject) => {
       ws.on('open', resolve);
       ws.on('error', reject);
@@ -226,12 +236,12 @@ function fakeSocket(onCall: (msg: any) => void) {
   } as any;
 }
 
-test('two connections with non-overlapping tool names both get prefixed once a second connection registers', () => {
+test('two connections with non-overlapping tool names both get prefixed by their connection name', () => {
   const t = new Tenant('t1', undefined, {});
-  t.registerConnection('a', fakeSocket(() => {}));
-  t.updateConnectionManifest('a', [{ name: 'submit_form', description: 'd', params: {} }], undefined, 'formalin');
-  t.registerConnection('b', fakeSocket(() => {}));
-  t.updateConnectionManifest('b', [{ name: 'clear_canvas', description: 'd', params: {} }], undefined, 'htmlpaint');
+  t.registerConnection('a', fakeSocket(() => {}), 'formalin');
+  t.updateConnectionManifest('a', [{ name: 'submit_form', description: 'd', params: {} }]);
+  t.registerConnection('b', fakeSocket(() => {}), 'htmlpaint');
+  t.updateConnectionManifest('b', [{ name: 'clear_canvas', description: 'd', params: {} }]);
 
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -239,15 +249,15 @@ test('two connections with non-overlapping tool names both get prefixed once a s
 
   assert.ok(registry.handles.has('formalin__submit_form'));
   assert.ok(registry.handles.has('htmlpaint__clear_canvas'));
-  assert.ok(!registry.handles.has('submit_form'), 'unprefixed name should not remain once multi-connection');
+  assert.ok(!registry.handles.has('submit_form'), 'unprefixed name should never be registered');
 });
 
 test('two connections with a colliding tool name both register under distinct prefixes', () => {
   const t = new Tenant('t1', undefined, {});
-  t.registerConnection('a', fakeSocket(() => {}));
-  t.updateConnectionManifest('a', [{ name: 'get_state', description: 'd', params: {} }], undefined, 'formalin');
-  t.registerConnection('b', fakeSocket(() => {}));
-  t.updateConnectionManifest('b', [{ name: 'get_state', description: 'd', params: {} }], undefined, 'htmlpaint');
+  t.registerConnection('a', fakeSocket(() => {}), 'formalin');
+  t.updateConnectionManifest('a', [{ name: 'get_state', description: 'd', params: {} }]);
+  t.registerConnection('b', fakeSocket(() => {}), 'htmlpaint');
+  t.updateConnectionManifest('b', [{ name: 'get_state', description: 'd', params: {} }]);
 
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -257,12 +267,14 @@ test('two connections with a colliding tool name both register under distinct pr
   assert.ok(registry.handles.has('htmlpaint__get_state'));
 });
 
-test('connections with the same/no label get ordinal-suffixed slugs, first-connected keeps the bare slug', () => {
+test('connections asking for the same name get ordinal-suffixed on registration, first keeps the bare name', () => {
   const t = new Tenant('t1', undefined, {});
-  t.registerConnection('a', fakeSocket(() => {}));
-  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }], undefined, 'htmlpaint');
-  t.registerConnection('b', fakeSocket(() => {}));
-  t.updateConnectionManifest('b', [{ name: 'insert_title', description: 'd', params: {} }], undefined, 'htmlpaint');
+  t.registerConnection('a', fakeSocket(() => {}), 'htmlpaint');
+  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }]);
+  t.registerConnection('b', fakeSocket(() => {}), 'htmlpaint');
+  t.updateConnectionManifest('b', [{ name: 'insert_title', description: 'd', params: {} }]);
+
+  assert.equal(t.connections.get('b')!.name, 'htmlpaint2', 'reserveConnectionName should auto-suffix the collision at registration time');
 
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -272,12 +284,12 @@ test('connections with the same/no label get ordinal-suffixed slugs, first-conne
   assert.ok(registry.handles.has('htmlpaint2__insert_title'));
 });
 
-test('renameConnection re-slugs that connection\'s tool prefix without touching its manifest/summary', () => {
+test('renameConnection updates the cosmetic label without touching the stable name/tool prefix or manifest/summary', () => {
   const t = new Tenant('t1', undefined, {});
-  t.registerConnection('a', fakeSocket(() => {}));
-  t.updateConnectionManifest('a', [{ name: 'get_document', description: 'd', params: {} }], 'orig summary', 'mindfoo');
-  t.registerConnection('b', fakeSocket(() => {}));
-  t.updateConnectionManifest('b', [{ name: 'get_document', description: 'd', params: {} }], undefined, 'mindfoo');
+  t.registerConnection('a', fakeSocket(() => {}), 'mindfoo');
+  t.updateConnectionManifest('a', [{ name: 'get_document', description: 'd', params: {} }], 'orig summary');
+  t.registerConnection('b', fakeSocket(() => {}), 'mindfoo');
+  t.updateConnectionManifest('b', [{ name: 'get_document', description: 'd', params: {} }]);
 
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -286,22 +298,26 @@ test('renameConnection re-slugs that connection\'s tool prefix without touching 
   assert.ok(registry.handles.has('mindfoo__get_document'));
   assert.ok(registry.handles.has('mindfoo2__get_document'));
 
-  t.renameConnection('b', 'mindfoo dev');
+  t.renameConnection('b', 'mindfoo (dev tab)');
   registry.sync();
 
+  // name (and therefore the tool prefix) is set once at registration and is
+  // NOT affected by renameConnection, which only ever updates the cosmetic
+  // `label` — see TenantConnection's doc comment.
   assert.ok(registry.handles.has('mindfoo__get_document'));
-  assert.ok(!registry.handles.has('mindfoo2__get_document'));
-  assert.ok(registry.handles.has('mindfoo_dev__get_document'));
+  assert.ok(registry.handles.has('mindfoo2__get_document'));
+  assert.strictEqual(t.connections.get('b')!.label, 'mindfoo (dev tab)');
+  assert.strictEqual(t.connections.get('b')!.name, 'mindfoo2');
   // manifest/summary of the renamed connection are untouched by the rename
   assert.strictEqual(t.connections.get('b')!.manifest[0]!.name, 'get_document');
   assert.strictEqual(t.connections.get('a')!.summary, 'orig summary');
 });
 
-test('unlabeled connections fall back to tab/tab2 slugs', () => {
+test('connections registered with no explicit name fall back to tab/tab2 slugs', () => {
   const t = new Tenant('t1', undefined, {});
-  t.registerConnection('a', fakeSocket(() => {}));
+  t.registerConnection('a', fakeSocket(() => {}), '');
   t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }]);
-  t.registerConnection('b', fakeSocket(() => {}));
+  t.registerConnection('b', fakeSocket(() => {}), '');
   t.updateConnectionManifest('b', [{ name: 'insert_title', description: 'd', params: {} }]);
 
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
@@ -316,8 +332,8 @@ test('a targeted call(connectionId, ...) reaches only that connection\'s socket'
   const t = new Tenant('t1', undefined, {});
   let aCalls = 0;
   let bCalls = 0;
-  t.registerConnection('a', fakeSocket((msg) => { aCalls += 1; t.resolveCall(msg.id, 'from-a'); }));
-  t.registerConnection('b', fakeSocket(() => { bCalls += 1; }));
+  t.registerConnection('a', fakeSocket((msg) => { aCalls += 1; t.resolveCall(msg.id, 'from-a'); }), 'a');
+  t.registerConnection('b', fakeSocket(() => { bCalls += 1; }), 'b');
 
   const result = await t.call('a', 'insert_title', { title: 'hi' });
   assert.equal(result, 'from-a');
@@ -325,12 +341,12 @@ test('a targeted call(connectionId, ...) reaches only that connection\'s socket'
   assert.equal(bCalls, 0, 'the other connection should not have received the call');
 });
 
-test('removeConnection prunes that connection\'s tools and demotes a remaining solo connection back to unprefixed', () => {
+test('removeConnection prunes that connection\'s tools; the remaining solo connection stays prefixed by its own name', () => {
   const t = new Tenant('t1', undefined, {});
-  t.registerConnection('a', fakeSocket(() => {}));
-  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }], undefined, 'formalin');
-  t.registerConnection('b', fakeSocket(() => {}));
-  t.updateConnectionManifest('b', [{ name: 'clear_canvas', description: 'd', params: {} }], undefined, 'htmlpaint');
+  t.registerConnection('a', fakeSocket(() => {}), 'formalin');
+  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }]);
+  t.registerConnection('b', fakeSocket(() => {}), 'htmlpaint');
+  t.updateConnectionManifest('b', [{ name: 'clear_canvas', description: 'd', params: {} }]);
 
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -341,31 +357,29 @@ test('removeConnection prunes that connection\'s tools and demotes a remaining s
   t.removeConnection('b');
   registry.sync();
   assert.ok(!registry.handles.has('htmlpaint__clear_canvas'), 'removed connection\'s tool should be pruned');
-  assert.ok(!registry.handles.has('formalin__insert_title'), 'stale prefixed name should be removed');
-  assert.ok(registry.handles.has('insert_title'), 'remaining solo connection should be unprefixed again');
+  assert.ok(registry.handles.has('formalin__insert_title'), 'remaining solo connection keeps its own prefix, unchanged');
 });
 
-test('describe_tools reports a connections[] shape at 2+ connections, flat shape at 0-1', async () => {
+test('describe_tools always reports a connections[] shape, for 0, 1, or many connections', async () => {
   const t = new Tenant('t1', undefined, {});
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
   registry.sync();
 
-  const flatBefore: any = await (registry.handles.get('describe_tools') as any).handler({}, {});
-  const flatPayload = JSON.parse(flatBefore.content[0].text);
-  assert.ok('summary' in flatPayload && 'tools' in flatPayload, 'no connections: flat shape');
+  const before: any = await (registry.handles.get('describe_tools') as any).handler({}, {});
+  const beforePayload = JSON.parse(before.content[0].text);
+  assert.deepEqual(beforePayload.connections, [], 'no connections: empty connections array');
 
-  t.registerConnection('a', fakeSocket(() => {}));
-  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }], 'form summary', 'formalin');
-  t.registerConnection('b', fakeSocket(() => {}));
-  t.updateConnectionManifest('b', [{ name: 'clear_canvas', description: 'd', params: {} }], 'paint summary', 'htmlpaint');
+  t.registerConnection('a', fakeSocket(() => {}), 'formalin');
+  t.updateConnectionManifest('a', [{ name: 'insert_title', description: 'd', params: {} }], 'form summary');
+  t.registerConnection('b', fakeSocket(() => {}), 'htmlpaint');
+  t.updateConnectionManifest('b', [{ name: 'clear_canvas', description: 'd', params: {} }], 'paint summary');
   registry.sync();
 
   const multi: any = await (registry.handles.get('describe_tools') as any).handler({}, {});
   const payload = JSON.parse(multi.content[0].text);
   assert.equal(payload.connections.length, 2);
-  const formalin = payload.connections.find((c: any) => c.label === 'formalin');
-  assert.equal(formalin.toolPrefix, 'formalin');
+  const formalin = payload.connections.find((c: any) => c.toolPrefix === 'formalin');
   assert.equal(formalin.summary, 'form summary');
   assert.ok(formalin.tools.some((tool: any) => tool.name === 'formalin__insert_title'));
 });
@@ -383,7 +397,7 @@ test('call() to a connection id that no longer exists resolves against a connect
   } } as any;
 
   const callPromise = t.call('missing', 'insert_title', {}, 10_000, 200);
-  setTimeout(() => t.registerConnection('revived', socket), 50);
+  setTimeout(() => t.registerConnection('revived', socket, 'revived'), 50);
 
   assert.equal(await callPromise, 'ok');
 });
@@ -394,7 +408,7 @@ test('register_page_tool_by_path sends a "__register_tool_by_path__" call and re
     assert.equal(msg.name, '__register_tool_by_path__');
     assert.deepEqual(msg.args, { name: 'save', description: 'saves', path: 'myApp.save', params: {} });
     t.resolveCall(msg.id, 'registered "save" -> window.myApp.save');
-  }));
+  }), 'a');
 
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -413,7 +427,7 @@ test('register_page_tool_by_code reaches the browser immediately (no approval ga
     sawCall = true;
     assert.equal(msg.name, '__register_tool_by_code__');
     t.resolveCall(msg.id, 'registered "explore" from code');
-  }));
+  }), 'a');
 
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -434,7 +448,7 @@ test('register_page_tool_by_code surfaces a browser-side rejection (e.g. bad cod
   t.registerConnection('a', fakeSocket((msg) => {
     assert.equal(msg.name, '__register_tool_by_code__');
     t.rejectCall(msg.id, 'code failed to compile: Unexpected token');
-  }));
+  }), 'a');
 
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -454,7 +468,7 @@ test('unregister_page_tool sends a "__unregister_tool__" call and surfaces a non
     assert.equal(msg.name, '__unregister_tool__');
     assert.deepEqual(msg.args, { toolName: 'get_document' });
     t.rejectCall(msg.id, '"get_document" is not a currently-tracked dynamically-registered tool on this connection (already removed, never dynamic, or a host tool — host tools can never be unregistered remotely)');
-  }));
+  }), 'a');
 
   const mcp = new McpServer({ name: 'test', version: '0.0.1' });
   const registry = createManifestToolRegistry(mcp, () => t);
@@ -498,7 +512,7 @@ test('identify_connection reports a clear error with no live connection (same co
 
 test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed via register_page_tool_by_code', () => {
   const t = new Tenant('t1', undefined, {});
-  t.registerConnection('a', fakeSocket(() => {}));
+  t.registerConnection('a', fakeSocket(() => {}), 'a');
   t.updateConnectionManifest('a', [
     { name: 'insert_title', description: 'host tool', params: {} },
     { name: 'save_note', description: 'dynamic by code', params: {}, source: 'dynamic', origin: { kind: 'code', code: 'return 1;' } },
@@ -507,7 +521,7 @@ test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed 
   t.removeConnection('a');
 
   const calls: any[] = [];
-  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)));
+  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)), 'b');
   // Simulates the reloaded page's first register_tools: fresh JS runtime,
   // so only its host tool survives — no dynamic tools of its own yet.
   t.updateConnectionManifest('b', [{ name: 'insert_title', description: 'host tool', params: {} }], undefined, 'mypage');
@@ -519,7 +533,7 @@ test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed 
 
 test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed via register_page_tool_by_path', () => {
   const t = new Tenant('t1', undefined, {});
-  t.registerConnection('a', fakeSocket(() => {}));
+  t.registerConnection('a', fakeSocket(() => {}), 'a');
   t.updateConnectionManifest('a', [
     { name: 'save_note', description: 'dynamic by path', params: {}, source: 'dynamic', origin: { kind: 'path', path: 'myApp.save' } },
   ], undefined, 'mypage');
@@ -527,7 +541,7 @@ test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed 
   t.removeConnection('a');
 
   const calls: any[] = [];
-  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)));
+  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)), 'b');
   t.updateConnectionManifest('b', [], undefined, 'mypage');
 
   assert.equal(calls.length, 1);
@@ -537,7 +551,7 @@ test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed 
 
 test('replay is skipped for an unlabeled connection, and for a label still shared by another live connection', () => {
   const t = new Tenant('t1', undefined, {});
-  t.registerConnection('a', fakeSocket(() => {}));
+  t.registerConnection('a', fakeSocket(() => {}), 'a');
   t.updateConnectionManifest('a', [
     { name: 'save_note', description: 'dynamic', params: {}, source: 'dynamic', origin: { kind: 'path', path: 'myApp.save' } },
   ]); // no label
@@ -545,41 +559,41 @@ test('replay is skipped for an unlabeled connection, and for a label still share
   t.removeConnection('a');
 
   const calls: any[] = [];
-  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)));
+  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)), 'b');
   t.updateConnectionManifest('b', []); // no label either — nothing to stash under
   assert.equal(calls.length, 0, 'unlabeled connections must not stash/replay dynamic tools');
 
   // Two live connections sharing a label: closing one should not stash
   // (the label is still ambiguous while the other is live).
-  t.registerConnection('c', fakeSocket(() => {}));
+  t.registerConnection('c', fakeSocket(() => {}), 'c');
   t.updateConnectionManifest('c', [
     { name: 'save_note2', description: 'dynamic', params: {}, source: 'dynamic', origin: { kind: 'path', path: 'myApp.save2' } },
   ], undefined, 'shared');
-  t.registerConnection('d', fakeSocket(() => {}));
+  t.registerConnection('d', fakeSocket(() => {}), 'd');
   t.updateConnectionManifest('d', [], undefined, 'shared');
 
   t.removeConnection('c');
   const calls2: any[] = [];
-  t.registerConnection('e', fakeSocket((msg) => calls2.push(msg)));
+  t.registerConnection('e', fakeSocket((msg) => calls2.push(msg)), 'e');
   t.updateConnectionManifest('e', [], undefined, 'shared');
   assert.equal(calls2.length, 0, 'a label still in use by another live connection must not stash/replay');
 });
 
 test('replaying a dynamic tool consumes the stash so a later reconnect under the same label is not replayed twice', () => {
   const t = new Tenant('t1', undefined, {});
-  t.registerConnection('a', fakeSocket(() => {}));
+  t.registerConnection('a', fakeSocket(() => {}), 'a');
   t.updateConnectionManifest('a', [
     { name: 'save_note', description: 'dynamic', params: {}, source: 'dynamic', origin: { kind: 'path', path: 'myApp.save' } },
   ], undefined, 'mypage');
   t.removeConnection('a');
 
   const calls: any[] = [];
-  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)));
+  t.registerConnection('b', fakeSocket((msg) => calls.push(msg)), 'b');
   t.updateConnectionManifest('b', [], undefined, 'mypage');
   assert.equal(calls.length, 1);
 
   t.removeConnection('b');
-  t.registerConnection('c', fakeSocket((msg) => calls.push(msg)));
+  t.registerConnection('c', fakeSocket((msg) => calls.push(msg)), 'c');
   t.updateConnectionManifest('c', [], undefined, 'mypage');
   assert.equal(calls.length, 1, 'stash should have been consumed by the first replay, nothing left for a second reconnect');
 });

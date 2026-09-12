@@ -27,10 +27,10 @@ const WRITE_DEBOUNCE_MS = 500;
 
 /**
  * Loads persisted tenant state from `filePath` (if present) and pre-seeds
- * the shared `tenants` map with it *before* any getOrCreateTenant('default')
- * call runs at boot — so a server restart comes back up with the last known
- * form schema/values already in place instead of blank defaults, without
- * requiring any browser tab to still be open to push a resync (see
+ * the shared `tenants` map with it before any browser/MCP traffic creates
+ * tenants fresh at boot — so a server restart comes back up with the last
+ * known form schema/values already in place instead of blank defaults,
+ * without requiring any browser tab to still be open to push a resync (see
  * Tenant.restoreState in tenant.ts, which only helps if a tab survived the
  * restart). Returns the set of tenant ids it seeded, purely for logging.
  *

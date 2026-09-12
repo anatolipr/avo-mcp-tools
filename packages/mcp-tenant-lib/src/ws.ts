@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { ClientMessage } from './types.js';
-import { getOrCreateTenant, tenants, isValidChannelName, sanitizeChannelName } from './tenant.js';
+import { getOrCreateTenant, getOrCreateRootTenant, tenants, isValidChannelName, sanitizeChannelName } from './tenant.js';
 
 /**
  * Ping interval for the liveness check below. Half-open sockets (client
@@ -40,41 +40,92 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
 
   wss.on('connection', (ws, req) => {
     const wsUrl = new URL(req.url ?? '/', `http://localhost:${port}`);
-    let requestedTenantId = wsUrl.searchParams.get('tenant');
+    const rawTenantParam = wsUrl.searchParams.get('tenant');
 
-    if (requestedTenantId && !isValidChannelName(requestedTenantId)) {
+    // Split on the FIRST colon only: "channel1:foo" -> real channel
+    // "channel1" + connection name "foo" inside it; a bare "foo" (no colon)
+    // -> a ROOT connection named "foo" (addressed directly, no channel).
+    // This is the flipped meaning of the pre-existing "channel:app-name"
+    // convention (connect.js's parseChannelInput used to treat the part
+    // before the colon as always-a-channel and the part after as a purely
+    // cosmetic label) — an accepted breaking change, see connect.js.
+    let channelPart: string | undefined;
+    let namePart: string | undefined;
+    if (rawTenantParam !== null) {
+      const colonIdx = rawTenantParam.indexOf(':');
+      if (colonIdx === -1) {
+        namePart = rawTenantParam;
+      } else {
+        channelPart = rawTenantParam.slice(0, colonIdx);
+        namePart = rawTenantParam.slice(colonIdx + 1) || undefined;
+      }
+    }
+
+    if (channelPart !== undefined && !isValidChannelName(channelPart)) {
       // A browser-supplied name (e.g. a human renaming a bridged tab via a
       // plain prompt()) has no reason to know the slug rule — coerce it
       // into something valid rather than rejecting outright, same as
       // join_channel would reject a raw name but this WS path favors
       // recovering the connection. Only a genuinely empty result (every
-      // character was disallowed) still gets rejected below.
-      const sanitized = sanitizeChannelName(requestedTenantId);
+      // character was disallowed — including an empty channel before the
+      // colon, e.g. ":foo") still gets rejected below.
+      const sanitized = sanitizeChannelName(channelPart);
       if (!sanitized) {
-        console.error(`[ws] rejected connection: invalid tenant id "${requestedTenantId}" (nothing left after sanitizing)`);
+        console.error(`[ws] rejected connection: invalid channel "${channelPart}" (nothing left after sanitizing)`);
         ws.close(4404, 'Invalid tenant id');
         return;
       }
-      console.error(`[ws] sanitized invalid tenant id "${requestedTenantId}" -> "${sanitized}"`);
-      requestedTenantId = sanitized;
+      console.error(`[ws] sanitized invalid channel "${channelPart}" -> "${sanitized}"`);
+      channelPart = sanitized;
+    }
+    if (namePart !== undefined && !isValidChannelName(namePart)) {
+      const sanitized = sanitizeChannelName(namePart);
+      namePart = sanitized || undefined;
     }
 
-    const tenantId = requestedTenantId || 'default';
-    const recreated = !!requestedTenantId && !tenants.has(requestedTenantId);
-    const t = getOrCreateTenant(tenantId, initialSchema, initialValues);
-    if (recreated) {
-      // A page reconnecting (browser retry loop) to a named channel that no
-      // longer exists server-side — most commonly a server restart, which
-      // wipes the in-memory tenants map entirely. Recreate it on demand
-      // rather than rejecting, so the page keeps working and an agent can
-      // rejoin the same name later instead of the connection being stuck
-      // retrying forever against a channel the server will never revive.
-      console.error(`[ws] recreated previously unknown/expired tenant "${tenantId}" on reconnect`);
-    }
-
+    let t;
+    let tenantId: string;
+    let resolvedName: string;
+    let recreated: boolean;
     const connectionId = randomUUID();
-    t.registerConnection(connectionId, ws);
-    console.error(`[ws] connection opened: tenant=${tenantId} connection=${connectionId} (${t.connections.size} connection(s) on tenant)`);
+
+    if (channelPart !== undefined) {
+      // Real named channel — unchanged tenant id/reconnect semantics.
+      tenantId = channelPart;
+      recreated = !tenants.has(tenantId);
+      t = getOrCreateTenant(tenantId, initialSchema, initialValues);
+      if (recreated) {
+        // A page reconnecting (browser retry loop) to a named channel that
+        // no longer exists server-side — most commonly a server restart,
+        // which wipes the in-memory tenants map entirely. Recreate it on
+        // demand rather than rejecting, so the page keeps working and an
+        // agent can rejoin the same name later instead of the connection
+        // being stuck retrying forever against a channel the server will
+        // never revive.
+        console.error(`[ws] recreated previously unknown/expired tenant "${tenantId}" on reconnect`);
+      }
+      // Empty name after the colon (e.g. "channel1:") or no colon-part at
+      // all falls back to a placeholder — the connection's real name/label
+      // arrives moments later via its first register_tools message
+      // (appLabel), same deferral registerConnection already does for
+      // `label`. registerConnection itself resolves collisions against this
+      // channel's OTHER live connections.
+      resolvedName = t.registerConnection(connectionId, ws, namePart ?? 'conn');
+    } else {
+      // No colon at all — a root connection, addressed directly by name
+      // rather than through any channel. Each root connection is its own
+      // single-connection Tenant (see getOrCreateRootTenant), so a name
+      // collision is resolved against OTHER live root connections, not
+      // within one Tenant's own connections map.
+      const desired = namePart ?? 'conn';
+      const created = getOrCreateRootTenant(desired, initialSchema, initialValues);
+      t = created.tenant;
+      tenantId = t.id;
+      recreated = false; // a root tenant is always freshly minted per reserved name — never a stale reconnect target
+      resolvedName = t.registerConnection(connectionId, ws, created.name);
+    }
+
+    console.error(`[ws] connection opened: tenant=${tenantId} connection=${connectionId} name=${resolvedName} (${t.connections.size} connection(s) on tenant)`);
 
     heartbeatState.set(ws, { isAlive: true });
     ws.on('pong', () => {
@@ -103,7 +154,7 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
       }
 
       if (msg.type === 'register_tools') {
-        t.updateConnectionManifest(connectionId, msg.tools, msg.summary, msg.appLabel);
+        t.updateConnectionManifest(connectionId, msg.tools, msg.summary, msg.appLabel, msg.internal);
       }
 
       if (msg.type === 'rename_connection') {

@@ -47,9 +47,16 @@ async function lookupToolCount(channel: string, appLabel: string): Promise<numbe
   try {
     const res = await fetch(`${JSBRIDGE_HOST}/api/dashboard`);
     if (!res.ok) return undefined;
-    const channels: DashboardChannel[] = await res.json();
-    const match = channels.find((c) => c.channel === channel)?.connections.find((c) => c.label === appLabel);
-    return match?.toolCount;
+    // /api/dashboard now returns { channels, root } (see mcp-tenant-lib's
+    // dashboard.ts) — root connections (a bare, colon-less channel name
+    // this extension itself might use) live in `root`, flattened one row
+    // per connection, not nested under `.connections` the way a real
+    // channel is.
+    const { channels, root }: { channels: DashboardChannel[]; root: { name: string; label: string | null; toolCount: number }[] } = await res.json();
+    const channelMatch = channels.find((c) => c.channel === channel)?.connections.find((c) => c.label === appLabel);
+    if (channelMatch) return channelMatch.toolCount;
+    const rootMatch = root.find((r) => r.name === channel || r.label === appLabel);
+    return rootMatch?.toolCount;
   } catch {
     return undefined;
   }
@@ -484,17 +491,23 @@ async function handleConnectActiveTab(channel: string, appLabel?: string): Promi
   // hostname-derived one each time (keeps stash/replay's appLabel-equality
   // matching working across reconnects).
   const resolvedLabel = appLabel || new URL(tab.url).hostname;
+  // An empty `channel` (the popup's "no channel picked" case) means ROOT,
+  // not an error - default the connect string to the same hostname-derived
+  // name resolvedLabel already uses, so the tab becomes its own root
+  // connection with matching name/label, exactly like connect.js's own
+  // `defaultChannel ?? appName` default.
+  const connectString = channel || resolvedLabel;
   // If already connected, treat this as a channel switch (leaves the
   // current channel first) rather than opening a second, redundant socket -
   // see connect-tab.ts's changeChannel.
   if (await tabAlreadyConnected(tab.id)) {
-    await changeChannel(tab.id, channel, resolvedLabel);
+    await changeChannel(tab.id, connectString, resolvedLabel);
   } else {
-    await injectConnectSnippet(tab.id, channel, resolvedLabel);
+    await injectConnectSnippet(tab.id, connectString, resolvedLabel);
   }
-  await setKnownOrigin({ origin, channel, appLabel: resolvedLabel, lastConnectedAt: Date.now() });
+  await setKnownOrigin({ origin, channel: connectString, appLabel: resolvedLabel, lastConnectedAt: Date.now() });
   markTabConnected(tab.id);
-  recordConnectedTab(tab.id, channel, resolvedLabel);
+  recordConnectedTab(tab.id, connectString, resolvedLabel);
   await refreshBadgeForActiveTab();
 
   return { ok: true };

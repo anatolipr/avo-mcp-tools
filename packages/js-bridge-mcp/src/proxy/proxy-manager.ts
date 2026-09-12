@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { getOrCreateTenant, isValidChannelName, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
+import { getOrCreateRootTenant, getRootTenant, isValidConnectionName, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
 import type { ProxyConfig, ProxyStatus, ProxyTransport } from './types.js';
 
 /**
@@ -50,21 +50,21 @@ function loadConfigs(): ProxyConfig[] {
 }
 
 /**
- * Per-id error for a config entry whose slug fails isValidChannelName —
+ * Per-id error for a config entry whose slug fails isValidConnectionName —
  * populated at load time (see initProxyManager) for entries that predate
- * isValidChannelName being enforced on the write path (addProxy/updateProxy),
+ * isValidConnectionName being enforced on the write path (addProxy/updateProxy),
  * e.g. hand-edited JSON or a file written by an older build. Without this
- * check, such an entry starts normally and produces a channel that
- * list_channels/describe_channel can see but join_channel can never accept
- * (the tenant id IS the raw slug), leaving it permanently unusable with no
- * indication why. Kept separate from RunningProxy.lastError since an invalid
- * slug is never actually started — listProxies() merges the two so the admin
- * UI shows one error either way.
+ * check, such an entry starts normally and produces a root connection name
+ * describe_connection can see but that can never round-trip cleanly through
+ * a URL/tool-prefix, leaving it permanently unusable with no indication why.
+ * Kept separate from RunningProxy.lastError since an invalid slug is never
+ * actually started — listProxies() merges the two so the admin UI shows one
+ * error either way.
  */
 const invalidSlugErrors = new Map<string, string>(); // keyed by ProxyConfig.id
 
 function slugError(slug: string, configPath: string): string {
-  return `"${slug}" is not a valid channel slug (use only letters, digits, underscore, and hyphen) — ` +
+  return `"${slug}" is not a valid proxy slug (use only letters, digits, underscore, and hyphen) — ` +
     `fix it in ${configPath} and restart, or delete/re-add the proxy.`;
 }
 
@@ -158,14 +158,13 @@ function translateSchemaProperties(schema: unknown): { params: Record<string, To
 }
 
 /**
- * Builds this proxy's manifest with every tool name pre-baked as
- * `${slug}__${upstreamName}` — satisfies the "always prefixed, unconditionally"
- * requirement without any mcp-tenant-lib change: a proxy's dedicated
- * single-connection channel never hits computeSlugs' collision-only
- * prefixing (manifest-tools.ts), so the name has to already be correct going
- * in. A tool whose schema doesn't fit what ToolParamSpec can express (see
- * translateSchemaNode) is skipped with a warning rather than registered
- * with a wrong/empty schema.
+ * Builds this proxy's manifest under each tool's raw upstream name — the
+ * universal always-prefix mechanism in manifest-tools.ts (computeSlugs,
+ * keyed off the connection's `name`, which startProxy sets to config.slug)
+ * now applies the `${slug}__` prefix, so pre-baking it here would
+ * double-prefix (e.g. "db__db__query"). A tool whose schema doesn't fit what
+ * ToolParamSpec can express (see translateSchemaNode) is skipped with a
+ * warning rather than registered with a wrong/empty schema.
  */
 function translateTools(slug: string, upstreamTools: { name: string; description?: string; inputSchema?: unknown }[]): { entries: ToolManifestEntry[]; skipped: string[] } {
   const entries: ToolManifestEntry[] = [];
@@ -178,7 +177,7 @@ function translateTools(slug: string, upstreamTools: { name: string; description
       continue;
     }
     entries.push({
-      name: `${slug}__${tool.name}`,
+      name: tool.name,
       description: tool.description ?? '',
       params,
       source: 'dynamic',
@@ -189,7 +188,12 @@ function translateTools(slug: string, upstreamTools: { name: string; description
 }
 
 async function startProxy(config: ProxyConfig): Promise<void> {
-  const tenant = getOrCreateTenant(config.slug, undefined, {});
+  // Every proxy is a root connection now (no more dedicated per-proxy
+  // channel) — slug becomes the root connection's name directly, still
+  // doubling as the tool-name prefix, but via the universal
+  // computeSlugs-based mechanism (manifest-tools.ts) rather than proxy-
+  // specific pre-baked prefixing (see translateTools above).
+  const { tenant } = getOrCreateRootTenant(config.slug, undefined, {});
   const client = new Client({ name: `js-bridge-mcp-proxy-${config.slug}`, version: '0.1.0' });
   const connectionId = randomUUID();
   const entry: RunningProxy = { config, connectionId, client, toolCount: 0, skippedTools: [] };
@@ -200,8 +204,10 @@ async function startProxy(config: ProxyConfig): Promise<void> {
     await client.connect(transport);
     const { tools } = await client.listTools();
     const { entries: manifest, skipped } = translateTools(config.slug, tools);
-    tenant.registerDirectConnection(connectionId, (name, args) =>
-      client.callTool({ name: name.slice(config.slug.length + 2), arguments: args as Record<string, unknown> | undefined }),
+    tenant.registerDirectConnection(
+      connectionId,
+      (name, args) => client.callTool({ name, arguments: args as Record<string, unknown> | undefined }),
+      config.slug,
     );
     tenant.updateConnectionManifest(connectionId, manifest, config.description, config.slug);
     entry.toolCount = manifest.length;
@@ -216,25 +222,32 @@ async function startProxy(config: ProxyConfig): Promise<void> {
     const stderr = readStderr();
     entry.lastError = stderr ? `${err?.message ?? String(err)}\n${stderr}` : (err?.message ?? String(err));
     console.error(`[proxy-manager] failed to start proxy "${config.slug}": ${entry.lastError}`);
-    // Channel still exists (visible via list_channels) with zero connections
-    // — e.g. the upstream server needs an auth flow the admin UI has to
-    // surface separately (see plan). Not a hard failure of proxy-manager.
+    // Root tenant still exists (visible via describe_connection) with zero
+    // connections — e.g. the upstream server needs an auth flow the admin UI
+    // has to surface separately (see plan). Not a hard failure of
+    // proxy-manager.
   }
 }
 
 /**
  * Tears down a running proxy's connection + upstream client without
  * touching its persisted config. `tenant.removeConnection` makes its tools
- * vanish from the channel's manifest immediately (matches the settled
- * pause=disappear requirement) — the channel/Tenant itself is left in place
- * so list_channels/describe_channel still see it (with zero connections)
- * and a later resume/restart can reuse the same channel.
+ * vanish from the root connection's manifest immediately (matches the
+ * settled pause=disappear requirement) — the root Tenant itself is left in
+ * place so describe_connection still sees it (with zero connections) and a
+ * later resume/restart can reuse the same name.
  */
 async function stopProxy(configId: string): Promise<void> {
   const entry = running.get(configId);
   if (!entry) return;
   running.delete(configId);
-  getOrCreateTenant(entry.config.slug, undefined, {}).removeConnection(entry.connectionId);
+  // Must be a plain lookup, not getOrCreateRootTenant: that reserves a
+  // FRESH name on collision (reserveRootName sees the live "slug" tenant
+  // and hands back "slug2"), which would remove the connection from a
+  // brand-new, unrelated, empty tenant instead of the real one — leaving
+  // the actual running connection never torn down (the bug behind a
+  // rename/edit appearing to "duplicate" the proxy on the dashboard).
+  getRootTenant(entry.config.slug)?.removeConnection(entry.connectionId);
   try {
     await entry.client.close();
   } catch {
@@ -246,7 +259,7 @@ export function initProxyManager(filePath: string) {
   configPath = filePath;
   configs = loadConfigs();
   for (const config of configs) {
-    if (!isValidChannelName(config.slug)) {
+    if (!isValidConnectionName(config.slug)) {
       const message = slugError(config.slug, configPath);
       console.error(`[proxy-manager] not starting proxy "${config.id}": ${message}`);
       invalidSlugErrors.set(config.id, message);
@@ -278,7 +291,7 @@ export function listProxies(): ProxyStatus[] {
 }
 
 export async function addProxy(input: Omit<ProxyConfig, 'id' | 'paused'>): Promise<ProxyConfig> {
-  if (!isValidChannelName(input.slug)) {
+  if (!isValidConnectionName(input.slug)) {
     throw new Error(slugError(input.slug, configPath));
   }
   const config: ProxyConfig = { ...input, id: randomUUID(), paused: false };
@@ -301,7 +314,7 @@ export async function addProxy(input: Omit<ProxyConfig, 'id' | 'paused'>): Promi
 export async function updateProxy(id: string, input: Omit<ProxyConfig, 'id' | 'paused'>): Promise<ProxyConfig | undefined> {
   const index = configs.findIndex((c) => c.id === id);
   if (index === -1) return undefined;
-  if (!isValidChannelName(input.slug)) {
+  if (!isValidConnectionName(input.slug)) {
     throw new Error(slugError(input.slug, configPath));
   }
   const paused = configs[index]!.paused;
@@ -336,7 +349,7 @@ export async function pauseProxy(id: string): Promise<boolean> {
 export async function resumeProxy(id: string): Promise<boolean> {
   const config = configs.find((c) => c.id === id);
   if (!config) return false;
-  if (!isValidChannelName(config.slug)) {
+  if (!isValidConnectionName(config.slug)) {
     invalidSlugErrors.set(id, slugError(config.slug, configPath));
     return false;
   }
@@ -350,7 +363,7 @@ export async function resumeProxy(id: string): Promise<boolean> {
 export async function restartProxy(id: string): Promise<boolean> {
   const config = configs.find((c) => c.id === id);
   if (!config) return false;
-  if (!isValidChannelName(config.slug)) {
+  if (!isValidConnectionName(config.slug)) {
     invalidSlugErrors.set(id, slugError(config.slug, configPath));
     return false;
   }

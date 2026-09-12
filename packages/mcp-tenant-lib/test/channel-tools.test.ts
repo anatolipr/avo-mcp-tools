@@ -30,8 +30,8 @@ before(async () => {
     initialSchema: undefined,
     initialValues: {},
     identity: { name: 'test', version: '0.0.1' },
-    registerFn: (mcp, tenant, port, setChannel) => {
-      registerChannelTools(mcp, tenant, port, setChannel, undefined, {});
+    registerFn: (mcp, tenant, port, setChannel, resetChannel) => {
+      registerChannelTools(mcp, tenant, port, setChannel, resetChannel, undefined, {});
     },
   });
   await new Promise<void>((resolve) => httpServer.listen(PORT, resolve));

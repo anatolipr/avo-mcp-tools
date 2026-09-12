@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Server } from 'node:http';
-import { tenants } from 'mcp-tenant-lib';
+import { getRootTenant } from 'mcp-tenant-lib';
 import { addProxy, getProxyConfig, listProxies, pauseProxy, removeProxy, restartProxy, resumeProxy, updateProxy } from './proxy-manager.js';
 import type { ProxyConfig } from './types.js';
 
@@ -91,36 +91,47 @@ export async function handleProxyAdminRoutes(req: IncomingMessage, res: ServerRe
     return true;
   }
 
-  // Hub-page support: a plain-HTTP view of one channel's tool manifest, for
-  // a browser page (not an MCP client) to merge into window.__mcpTools. A
-  // proxy channel is always single-connection (see proxy-manager.ts), so
-  // this deliberately skips manifest-tools.ts's buildDescribePayload (which
-  // exists to handle N-connection prefixing/collision — irrelevant here,
-  // and not part of mcp-tenant-lib's public export surface) and reads the
-  // one connection's already-prefixed manifest directly.
+  // Hub-page support: a plain-HTTP view of one proxy's tool manifest, for a
+  // browser page (not an MCP client) to merge into window.__mcpTools. Every
+  // proxy is a root connection now (see proxy-manager.ts), always
+  // single-connection, but its manifest is stored under the RAW upstream
+  // tool names (translateTools stopped pre-baking "<slug>__" once the
+  // universal always-prefix mechanism in manifest-tools.ts took over) — so
+  // this route re-applies the same "<slug>__" prefix by hand to match what
+  // a real MCP client's tools/list actually sees, rather than reading
+  // manifest-tools.ts's buildDescribePayload/computeSlugs directly (not
+  // part of mcp-tenant-lib's public export surface, and overkill for a
+  // guaranteed-single-connection tenant).
   const manifestMatch = url.pathname.match(/^\/api\/proxies\/channel\/([^/]+)\/manifest$/);
   if (manifestMatch && req.method === 'GET') {
-    const tenant = tenants.get(decodeURIComponent(manifestMatch[1]!));
-    if (!tenant) { sendJson(res, 404, { error: 'channel not found' }); return true; }
-    sendJson(res, 200, { tools: tenant.toolManifest });
+    const slug = decodeURIComponent(manifestMatch[1]!);
+    const tenant = getRootTenant(slug);
+    if (!tenant) { sendJson(res, 404, { error: 'proxy not found' }); return true; }
+    const tools = tenant.toolManifest.map((t) => ({ ...t, name: `${slug}__${t.name}` }));
+    sendJson(res, 200, { tools });
     return true;
   }
 
   // Hub-page support: lets a plain browser page (no MCP session, no
-  // WebSocket) invoke one of a proxy channel's tools by name, forwarding
-  // through the exact same Tenant.call(...) a real MCP tool call already
-  // goes through server-side (see manifest-tools.ts's sync(), which closes
-  // over the specific connectionId per manifest entry the same way).
+  // WebSocket) invoke one of a proxy's tools by its prefixed name (as
+  // returned by the /manifest route above), forwarding through the exact
+  // same Tenant.call(...) a real MCP tool call already goes through
+  // server-side (see manifest-tools.ts's sync(), which closes over the
+  // specific connectionId per manifest entry the same way). The manifest
+  // stores tools under their RAW upstream name (see the /manifest route's
+  // comment), so the "<slug>__" prefix is stripped back off here before
+  // dispatching, mirroring proxy-manager.ts's own directCall handler.
   // connectionId must be resolved explicitly — Tenant.call's `undefined`
   // broadcast path only iterates wsClients, which a directCall-backed proxy
   // connection is never added to (see registerDirectConnection), so
   // `undefined` here would silently reach no one and time out.
   const callMatch = url.pathname.match(/^\/api\/proxies\/channel\/([^/]+)\/call\/([^/]+)$/);
   if (callMatch && req.method === 'POST') {
-    const tenant = tenants.get(decodeURIComponent(callMatch[1]!));
-    if (!tenant) { sendJson(res, 404, { error: 'channel not found' }); return true; }
+    const slug = decodeURIComponent(callMatch[1]!);
+    const tenant = getRootTenant(slug);
+    if (!tenant) { sendJson(res, 404, { error: 'proxy not found' }); return true; }
     const [connectionId] = tenant.connections.keys();
-    if (!connectionId) { sendJson(res, 404, { error: 'channel has no live connection' }); return true; }
+    if (!connectionId) { sendJson(res, 404, { error: 'proxy has no live connection' }); return true; }
     let args: unknown;
     try {
       args = JSON.parse(await readBody(req));
@@ -128,8 +139,10 @@ export async function handleProxyAdminRoutes(req: IncomingMessage, res: ServerRe
       sendJson(res, 400, { error: 'invalid JSON body' });
       return true;
     }
+    const prefixedName = decodeURIComponent(callMatch[2]!);
+    const toolName = prefixedName.startsWith(`${slug}__`) ? prefixedName.slice(slug.length + 2) : prefixedName;
     try {
-      const result = await tenant.call(connectionId, decodeURIComponent(callMatch[2]!), args);
+      const result = await tenant.call(connectionId, toolName, args);
       sendJson(res, 200, { ok: true, result });
     } catch (err) {
       sendJson(res, 422, { ok: false, error: (err as Error).message });

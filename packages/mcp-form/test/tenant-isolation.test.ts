@@ -146,9 +146,12 @@ test('two MCP sessions have isolated field values once each has joined its own c
   const a = await connectClient();
   const b = await connectClient();
 
-  // Under defaultTenantMode: 'shared' (see server.ts), unnamed sessions
-  // share the 'default' tenant — isolation is now something a session
-  // requests via join_channel, not the automatic default.
+  // Under defaultTenantMode: 'shared' (see server.ts), an unnamed session
+  // would land on its own root connection (isolated already, just unnamed)
+  // — joining a real channel here is what makes the two sessions share a
+  // single, explicitly-named Tenant so the isolation being tested is
+  // between the two *channels*, not an incidental side effect of each
+  // being a distinct root connection.
   await a.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-isolation-a' } });
   await b.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-isolation-b' } });
 
@@ -174,18 +177,28 @@ test('two MCP sessions have isolated field values once each has joined its own c
   await b.client.close();
 });
 
-test('get_form_url returns the shared "default" channel URL for a session that never joined one', async () => {
+test('get_form_url returns a root connection URL for a session that never joined a channel', async () => {
   const a = await connectClient();
   const result = await a.client.callTool({ name: 'get_form_url', arguments: {} });
   // mcp-form runs with defaultTenantMode: 'shared' (see server.ts) — an
-  // unnamed session lands on the real, shared 'default' channel, not a
-  // private per-session UUID. Naming a channel via join_channel is what
-  // gets a session its own URL (see the "Pets" scenario test below).
-  assert.equal(textOf(result), `${BASE_URL}/t/default`);
+  // unnamed session lands on a root connection named after the server's own
+  // identity (Tenant id `root:mcp-form`, see getOrCreateRootTenant in
+  // mcp-tenant-lib/src/http.ts), not a private per-session UUID and not the
+  // old shared 'default' tenant (retired). Naming a channel via join_channel
+  // is what gets a session its own distinct URL (see the "Pets" scenario
+  // test below).
+  //
+  // Each unnamed session reserves its OWN root connection rather than
+  // sharing one (see reserveRootName/getOrCreateRootTenant) — collisions on
+  // the exact name "mcp-form" bump to "mcp-form2", "mcp-form3", etc, so with
+  // other unnamed-session tests in this same file also claiming that name
+  // pool, only the pattern (not the literal "root:mcp-form") is guaranteed
+  // here.
+  assert.match(textOf(result), /^http:\/\/localhost:8901\/t\/root:mcp-form\d*$/);
   await a.client.close();
 });
 
-test('join_channel gives a session its own URL, distinct from the shared default', async () => {
+test('join_channel gives a session its own URL, distinct from the shared root connection', async () => {
   const a = await connectClient();
   await a.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-own-url' } });
   const result = await a.client.callTool({ name: 'get_form_url', arguments: {} });
@@ -242,10 +255,8 @@ test('WebSocket broadcasts are scoped to the connecting tenant', async () => {
   const a = await connectClient();
   const b = await connectClient();
 
-  // Each session must join its own channel first — under
-  // defaultTenantMode: 'shared' (see server.ts), unnamed sessions all land
-  // on the same 'default' tenant, so isolation now has to be requested
-  // explicitly rather than being the automatic per-session default.
+  // Each session must join its own channel first so there's a real, named
+  // Tenant for the WS connections below to attach to by id.
   await a.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-ws-scope-a' } });
   await b.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-ws-scope-b' } });
 
@@ -258,8 +269,12 @@ test('WebSocket broadcasts are scoped to the connecting tenant', async () => {
     arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
   });
 
-  const wsA = await connectWs('unit-test-ws-scope-a');
-  const wsB = await connectWs('unit-test-ws-scope-b');
+  // `channel:conn` syntax (a colon) connects to the real named channel —
+  // a bare `?tenant=unit-test-ws-scope-a` would instead mean a brand-new
+  // ROOT connection (its own separate Tenant, per ws.ts), which would NOT
+  // be the same Tenant that define_form above just wrote to.
+  const wsA = await connectWs('unit-test-ws-scope-a:conn');
+  const wsB = await connectWs('unit-test-ws-scope-b:conn');
 
   await a.client.callTool({ name: 'set_field', arguments: { field: 'note', value: 'hello from A' } });
   await new Promise((r) => setTimeout(r, 200));
@@ -285,16 +300,25 @@ test('GET /t/:tenantId serves the form page', async () => {
   await a.client.close();
 });
 
-test('WebSocket connection with an unknown but validly-named tenant id recreates that tenant, not silently joined to default', { timeout: 5000 }, async () => {
+test('WebSocket connection with a bare, unknown tenant name gets its own fresh root connection, not a shared default', { timeout: 5000 }, async () => {
+  // A bare `?tenant=<name>` (no colon) is a ROOT connection (see ws.ts): its
+  // own single-connection Tenant, keyed internally as `root:<name>`, always
+  // freshly minted rather than looked up/recreated — there is no shared
+  // 'default' tenant to silently fall back to anymore.
   const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=this-tenant-does-not-exist-yet`);
   const initMsg: any = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Timed out waiting for an "init" message on the recreated tenant')), 1000);
+    const timer = setTimeout(() => reject(new Error('Timed out waiting for an "init" message on the root connection')), 1000);
     ws.on('message', (raw) => { clearTimeout(timer); resolve(JSON.parse(raw.toString())); });
     ws.on('error', reject);
   });
-  // A real, freshly-created tenant (not a rejection, and not silently
-  // reusing 'default') responds with its own fresh init state.
+  // A real, freshly-minted root connection (not a rejection, and not
+  // silently joined to any shared tenant) responds with its own fresh init
+  // state. Root connections are always newly created, never a reconnect to
+  // an existing one, so `recreated` is always false here (contrast with the
+  // "resync ... after a recreated tenant" test below, which uses a real
+  // named channel where `recreated: true` is meaningful).
   assert.equal(initMsg.type, 'init');
+  assert.equal(initMsg.recreated, false);
   ws.close();
 });
 
@@ -305,8 +329,13 @@ test('a "resync" pushed from the browser after a recreated tenant restores schem
   // in this test process, not the one the WS connection below actually
   // talks to (see the `getOrCreateTenant returns independent tenants...`
   // test above for that in-process pattern used correctly, on its own port).
+  //
+  // Uses `channel:conn` syntax to connect to a real, addressable named
+  // channel — a bare `?tenant=<name>` would instead be a ROOT connection,
+  // which is always freshly minted (never a `recreated: true` reconnect, see
+  // the test above), so it couldn't exercise `recreated`/restoreState here.
   const channel = 'unit-test-resync-restores-state';
-  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${channel}`);
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${channel}:conn`);
   const messages: any[] = [];
   const initMsg: any = await new Promise((resolve, reject) => {
     ws.on('message', (raw) => {
@@ -350,8 +379,13 @@ test('an older resync (stale tab) is ignored once a newer resync (freshly-edited
   // A's resync happens to reach the server first. The stale one (A) must
   // not clobber the fresher one (B) — see Tenant.restoreState. Verified
   // over the wire (see note in the test above re: in-process imports).
+  // Uses `channel:conn` syntax for a real named channel — matches the
+  // "two tabs on the same channel" scenario this test is modeling (a bare
+  // tenant name would instead be a one-off root connection, unaffected by
+  // this test's single-connection resync mechanics either way, but the
+  // named-channel framing is the accurate one to model here).
   const channel = 'unit-test-resync-favors-freshest';
-  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${channel}`);
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${channel}:conn`);
   const reinits: any[] = [];
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw.toString());
@@ -383,7 +417,7 @@ test('an older resync (stale tab) is ignored once a newer resync (freshly-edited
   ws.close();
 });
 
-test('WebSocket connection with a tenant id containing invalid characters is sanitized and accepted, not rejected', { timeout: 5000 }, async () => {
+test('WebSocket connection with a channel name containing invalid characters is sanitized and accepted, not rejected', { timeout: 5000 }, async () => {
   // A browser-supplied name (e.g. a human renaming a bridged tab via a
   // plain prompt(), like bulletino's connect flow) has no reason to know
   // mcp-tenant-lib's slug rule — ws.ts now coerces disallowed characters
@@ -391,7 +425,12 @@ test('WebSocket connection with a tenant id containing invalid characters is san
   // 4404, so the connection still succeeds under a close-enough name. See
   // the next test for the one case that's still rejected: a name with
   // NOTHING left after sanitizing.
-  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${encodeURIComponent('not a valid id!')}`);
+  //
+  // Sanitization/rejection only happens on the CHANNEL part (before a
+  // colon) — a bare, colon-less tenant param is a root-connection name and
+  // has no reject path at all (an empty/invalid name there just falls back
+  // to a default), so `channel:conn` syntax is required to exercise it.
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${encodeURIComponent('not a valid id!')}:conn`);
   const initMsg: any = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Timed out waiting for an "init" message')), 1000);
     ws.on('message', (raw) => { clearTimeout(timer); resolve(JSON.parse(raw.toString())); });
@@ -402,8 +441,11 @@ test('WebSocket connection with a tenant id containing invalid characters is san
   ws.close();
 });
 
-test('WebSocket connection with a tenant id that sanitizes to nothing is rejected with 4404', { timeout: 5000 }, async () => {
-  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${encodeURIComponent('!!!')}`);
+test('WebSocket connection with a channel name that sanitizes to nothing is rejected with 4404', { timeout: 5000 }, async () => {
+  // Uses `channel:conn` syntax — see the note in the test above: only the
+  // channel part (before a colon) has a reject-on-empty-after-sanitizing
+  // path; a bare, colon-less name is a root connection and always succeeds.
+  const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=${encodeURIComponent('!!!')}:conn`);
   const closeCode = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       ws.close();
@@ -450,7 +492,10 @@ test('closing an MCP session leaves its tenant and bridged WebSocket clients alo
     name: 'define_form',
     arguments: { fields: [{ name: 'note', label: 'Note', type: 'text', default: '' }], wait: false },
   });
-  const wsA = await connectWs(channel);
+  // `channel:conn` syntax connects to the real named channel `a` joined
+  // above — a bare tenant param would instead open an unrelated root
+  // connection, which wouldn't prove anything about this channel's clients.
+  const wsA = await connectWs(`${channel}:conn`);
 
   await a.client.close();
   // No server-pushed close is expected — give any (incorrect) async close
@@ -520,7 +565,14 @@ test('idle tenants are automatically disposed after a TTL, even without explicit
     await client.connect(transport);
     const tenantId = transport.sessionId;
 
-    const ws = new WebSocket(`ws://localhost:${idlePort}/ws?tenant=${tenantId}`);
+    // `channel:conn` syntax attaches to the real per-session Tenant this MCP
+    // session landed on (the server here runs with the default
+    // defaultTenantMode: 'per-session', so its tenant id is a plain
+    // randomUUID(), not a `root:`-prefixed name) — a bare, colon-less
+    // tenant param would instead open an unrelated, brand-new root
+    // connection, which would defeat the point of testing idle-disposal of
+    // *this* session's own tenant.
+    const ws = new WebSocket(`ws://localhost:${idlePort}/ws?tenant=${tenantId}:conn`);
     await new Promise((resolve, reject) => {
       ws.on('open', resolve);
       ws.on('error', reject);

@@ -27,20 +27,15 @@ const getOrCreateTenant = (id: string) =>
 // still active when the server last exited, so an MCP restart doesn't wipe
 // out a form the user was in the middle of filling out — previously this
 // only survived if the browser tab itself stayed open across the restart
-// and pushed a resync (see Tenant.restoreState). Must run before the
-// 'default' tenant is created below so a persisted 'default' wins over a
-// fresh blank one. One file per PORT so concurrent mcp-form instances (e.g.
-// a dev server alongside a real one) don't clobber each other's state.
+// and pushed a resync (see Tenant.restoreState). One file per PORT so
+// concurrent mcp-form instances (e.g. a dev server alongside a real one)
+// don't clobber each other's state.
 const PERSIST_FILE = process.env.MCP_FORM_PERSIST_FILE
   || path.join(os.tmpdir(), 'mcp-form-state', `tenants-${PORT}.json`);
 const { seededIds } = enablePersistence(PERSIST_FILE);
 if (seededIds.length > 0) {
   console.error(`[mcp-form] restored ${seededIds.length} tenant(s) from ${PERSIST_FILE}: ${seededIds.join(', ')}`);
 }
-
-// The 'default' tenant backs plain browser access (no MCP session), so
-// `npm start` + opening http://localhost:PORT keeps working standalone.
-getOrCreateTenant('default');
 
 startIdleSweep((id) => console.error(`[mcp] sweeping idle tenant: ${id}`));
 
@@ -53,12 +48,13 @@ const httpServer = createHttpServer({
   initialValues: initialValuesFor(initialFormDef),
   identity: { name: 'mcp-form', version: '0.2.0' },
   registerFn: makeRegisterFormTools(initialFormDef),
-  // A session that never calls join_channel lands on the shared 'default'
-  // channel rather than a private per-session UUID — same tradeoff
-  // js-bridge-mcp already makes (see its server.ts). Named channels are the
-  // encouraged path (see join_channel/define_form's tool descriptions);
-  // 'default' is the deliberate, anonymous, unscoped fallback for a
-  // genuinely one-off form, not a private sandbox.
+  // A session that never calls join_channel lands on a root connection
+  // named after this server's own identity ("mcp-form") rather than a
+  // private per-session UUID — same tradeoff js-bridge-mcp already makes
+  // (see its server.ts). Named channels are the encouraged path (see
+  // join_channel/define_form's tool descriptions); the root connection is
+  // the deliberate, anonymous, unscoped fallback for a genuinely one-off
+  // form, not a private sandbox.
   defaultTenantMode: 'shared',
 });
 

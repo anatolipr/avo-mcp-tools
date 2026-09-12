@@ -1,6 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { Signal, SignalWatcher } from 'avosignals';
-import type { DashboardChannel } from './types.js';
+import type { DashboardChannel, DashboardRootConnection, DashboardSnapshot } from './types.js';
 import { parseChannelInput, VALID_CHANNEL_NAME, sanitizeToValidChannelName } from '../client/connect.js';
 import { toast } from './toast.js';
 import './docs-section.js';
@@ -25,6 +25,9 @@ function applyTheme(mode: ThemeMode) {
   if (mode === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', mode);
 }
+
+const KIND_ICON: Record<'browser' | 'proxy' | 'admin', string> = { browser: '🌐', proxy: '🔌', admin: '⚙️' };
+const KIND_TITLE: Record<'browser' | 'proxy' | 'admin', string> = { browser: 'Browser tab', proxy: 'MCP server proxy', admin: 'Admin (proxy management)' };
 
 function formatAge(ms: number): string {
   const diff = Date.now() - ms;
@@ -128,6 +131,7 @@ export class DashboardApp extends LitElement {
   `;
 
   #channels = new Signal<DashboardChannel[]>([]);
+  #rootConnections = new Signal<DashboardRootConnection[]>([]);
   #source?: EventSource;
   #justSent = new Signal<Set<string>>(new Set());
   #openModal = new Signal<{ channel: string; connectionId: string } | undefined>(undefined);
@@ -164,9 +168,10 @@ export class DashboardApp extends LitElement {
     this.#source = new EventSource('/api/dashboard/stream');
     this.#source.onmessage = (event) => {
       try {
-        const channels = JSON.parse(event.data) as DashboardChannel[];
-        this.#channels.set(channels);
-        this.#toastNewRegistrations(channels);
+        const snapshot = JSON.parse(event.data) as DashboardSnapshot;
+        this.#channels.set(snapshot.channels);
+        this.#rootConnections.set(snapshot.root);
+        this.#toastNewRegistrations(snapshot.channels);
       } catch {
         // malformed event — ignore, next push will self-correct
       }
@@ -197,23 +202,21 @@ export class DashboardApp extends LitElement {
 
   // Human-triggered counterpart to the get_embed_snippet MCP tool
   // (hello-tools.ts) — same bare `import("<server>/main.js?...")`
-  // one-liner shape, same "channel" / "channel:app-name" input convention
-  // and validation as connect.js's own handleConnectClick, just invoked
-  // from this dashboard button instead of by an agent. Unlike
-  // get_embed_snippet (which needs the `port` handler arg since it runs in
-  // an arbitrary MCP client process), this reads window.location.origin
-  // directly — the dashboard IS served by js-bridge-mcp's own server, so
-  // its own origin already IS the right server URL, no port-threading
-  // needed. `parsed.appLabel` is validated for input-convention
-  // consistency with connect.js but deliberately NOT encoded into the
-  // snippet URL — get_embed_snippet's own snippet has no appLabel query
-  // param either; the appLabel-setting mechanism for a pasted connection
-  // is main.ts's own connect-time labelForFirstRegister() prompt, unchanged.
+  // one-liner shape, same root-vs-"channel:app-name" input convention and
+  // validation as connect.js's own handleConnectClick, just invoked from
+  // this dashboard button instead of by an agent. Unlike get_embed_snippet
+  // (which needs the `port` handler arg since it runs in an arbitrary MCP
+  // client process), this reads window.location.origin directly — the
+  // dashboard IS served by js-bridge-mcp's own server, so its own origin
+  // already IS the right server URL, no port-threading needed. The raw
+  // input is passed straight through as `tenant=` — the server (ws.ts)
+  // does the root-vs-channel colon interpretation, so this button doesn't
+  // need to know that convention beyond validating a "channel:" prefix.
   async #copyEmbedSnippet() {
-    let input = prompt('Channel to connect (or "channel:app-name" to set an explicit app label):', '');
+    let input = prompt('Connection name (root), or "channel:name" to join a shared channel:', '');
     if (!input) return;
     let parsed = parseChannelInput(input);
-    while (parsed.channel && !VALID_CHANNEL_NAME.test(parsed.channel)) {
+    while (parsed.channel !== undefined && !VALID_CHANNEL_NAME.test(parsed.channel)) {
       input = prompt(
         `"${parsed.channel}" isn't a valid channel name — only letters, digits, underscore, and hyphen are allowed (no spaces). Try again:`,
         `${sanitizeToValidChannelName(parsed.channel)}${parsed.appLabel ? `:${parsed.appLabel}` : ''}`
@@ -221,9 +224,8 @@ export class DashboardApp extends LitElement {
       if (!input) return;
       parsed = parseChannelInput(input);
     }
-    if (!parsed.channel) return;
     const serverUrl = window.location.origin;
-    const moduleUrl = `${serverUrl}/main.js?server=${encodeURIComponent(serverUrl)}&tenant=${encodeURIComponent(parsed.channel)}`;
+    const moduleUrl = `${serverUrl}/main.js?server=${encodeURIComponent(serverUrl)}&tenant=${encodeURIComponent(input)}`;
     const snippet = `import(${JSON.stringify(moduleUrl)});`;
     try {
       await navigator.clipboard.writeText(snippet);
@@ -292,12 +294,13 @@ export class DashboardApp extends LitElement {
 
   render() {
     const channels = this.#channels.value;
+    const root = this.#rootConnections.value;
     const modal = this.#openModal.value;
     return html`
       <div class="header-row">
         <div>
           <h1>Connected apps</h1>
-          <p class="subtitle">Live channels and bridged browser tabs — updates automatically.</p>
+          <p class="subtitle">Live connections and channels — updates automatically.</p>
         </div>
         <div class="header-actions">
           <a class="nav-link" href="/admin">Proxies (admin)</a>
@@ -311,9 +314,12 @@ export class DashboardApp extends LitElement {
           >${THEME_ICON[this.#theme.value]}</button>
         </div>
       </div>
-      ${channels.length === 0
-        ? html`<div class="empty">No channels yet. A channel appears here once an agent calls join_channel, or a page connects and lands on the default channel.</div>`
-        : channels.map((c) => this.#renderChannel(c))}
+      ${channels.length === 0 && root.length === 0
+        ? html`<div class="empty">Nothing connected yet. A connection appears here the moment a page bridges in or a proxy starts — as a flat root connection unless it explicitly joins a channel via join_channel.</div>`
+        : html`
+            ${root.map((rc) => this.#renderRootConnection(rc))}
+            ${channels.map((c) => this.#renderChannel(c))}
+          `}
       <docs-section></docs-section>
       ${modal
         ? html`<tools-modal
@@ -324,6 +330,53 @@ export class DashboardApp extends LitElement {
         : ''}
       <toast-stack></toast-stack>
       ${this.#renderSummaryView()}
+    `;
+  }
+
+  // Flat root-connection tile — reuses the same .connection-row styling as
+  // a channel's own connection rows, just without the enclosing
+  // .channel/.channel-header wrapper (there's nothing to group: a root
+  // Tenant always has exactly one connection). Identify/move/view-tools
+  // reuse the existing channel-scoped handlers by passing "root:<name>" as
+  // the channel argument — the underlying REST routes already accept any
+  // tenant id string transparently (see mcp-tenant-lib's dashboard.ts).
+  #renderRootConnection(rc: DashboardRootConnection) {
+    const rootId = `root:${rc.name}`;
+    const key = `${rootId}::${rc.id}`;
+    const sent = this.#justSent.value.has(key);
+    return html`
+      <div class="connection-row" style="border:1px solid var(--border);border-radius:8px;margin-bottom:8px;">
+        <span class="connection-dot"></span>
+        <span class="connection-kind" title=${KIND_TITLE[rc.kind]}>${KIND_ICON[rc.kind]}</span>
+        <span class="connection-label">${rc.name}</span>
+        <span
+          class="connection-summary"
+          title="Click to read the full description"
+          @click=${() => this.#viewingSummary.set({ label: rc.name, summary: rc.summary ?? '' })}
+        >${rc.summary ?? ''}</span>
+        <button
+          class="view-tools-btn"
+          title="View tools"
+          @click=${() => this.#openModal.set({ channel: rootId, connectionId: rc.id })}
+        >
+          ${rc.toolCount} tool${rc.toolCount === 1 ? '' : 's'}
+        </button>
+        ${rc.internal ? '' : html`
+          <button
+            class="identify-btn ${sent ? 'sent' : ''}"
+            @click=${() => this.#identify(rootId, rc.id)}
+          >
+            ${sent ? 'Sent ✓' : 'Identify'}
+          </button>
+          <button
+            class="move-btn"
+            title="Move into a channel"
+            @click=${() => this.#moveConnection(rootId, rc.id)}
+          >
+            Move…
+          </button>
+        `}
+      </div>
     `;
   }
 
@@ -362,7 +415,7 @@ export class DashboardApp extends LitElement {
                 return html`
                   <div class="connection-row">
                     <span class="connection-dot"></span>
-                    <span class="connection-kind" title=${conn.kind === 'proxy' ? 'MCP server proxy' : 'Browser tab'}>${conn.kind === 'proxy' ? '🔌' : '🌐'}</span>
+                    <span class="connection-kind" title=${KIND_TITLE[conn.kind ?? 'browser']}>${KIND_ICON[conn.kind ?? 'browser']}</span>
                     <span class="connection-label">${conn.label ?? '(unlabeled)'}</span>
                     <span
                       class="connection-summary"
@@ -376,19 +429,21 @@ export class DashboardApp extends LitElement {
                     >
                       ${conn.toolCount} tool${conn.toolCount === 1 ? '' : 's'}
                     </button>
-                    <button
-                      class="identify-btn ${sent ? 'sent' : ''}"
-                      @click=${() => this.#identify(c.channel, conn.id)}
-                    >
-                      ${sent ? 'Sent ✓' : 'Identify'}
-                    </button>
-                    <button
-                      class="move-btn"
-                      title="Move to a different channel"
-                      @click=${() => this.#moveConnection(c.channel, conn.id)}
-                    >
-                      Move…
-                    </button>
+                    ${conn.internal ? '' : html`
+                      <button
+                        class="identify-btn ${sent ? 'sent' : ''}"
+                        @click=${() => this.#identify(c.channel, conn.id)}
+                      >
+                        ${sent ? 'Sent ✓' : 'Identify'}
+                      </button>
+                      <button
+                        class="move-btn"
+                        title="Move to a different channel"
+                        @click=${() => this.#moveConnection(c.channel, conn.id)}
+                      >
+                        Move…
+                      </button>
+                    `}
                   </div>
                 `;
               })}
