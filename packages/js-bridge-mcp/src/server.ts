@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
 import { getOrCreateTenant as getOrCreateTenantFor, tenants, startIdleSweep, startEmptySweep, createHttpServer, attachWebSocketServer } from 'mcp-tenant-lib';
@@ -6,6 +7,7 @@ import { initialHelloState } from './types.js';
 import { registerHelloTools } from './tools/register.js';
 import { initProxyManager } from './proxy/proxy-manager.js';
 import { installProxyAdminRoutes } from './proxy/admin-routes.js';
+import { initAdminChannel } from './proxy/admin-channel.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // __dirname is <pkg>/src when run via tsx (dev/test) and <pkg>/dist/src once
@@ -67,7 +69,13 @@ const DASHBOARD_DIR = path.join(packageRoot, 'dist', 'dashboard');
 const PROXY_UI_ROOT = path.join(packageRoot, __dirname.endsWith(`${path.sep}dist${path.sep}src`) ? 'dist/proxy-ui' : 'src/proxy-ui');
 const ADMIN_UI_DIR = path.join(PROXY_UI_ROOT, 'admin');
 const HUB_UI_DIR = path.join(PROXY_UI_ROOT, 'hub');
-const PROXY_CONFIG_PATH = process.env.PROXY_CONFIG_PATH ?? path.join(packageRoot, '.js-bridge-mcp-proxies.json');
+// Defaults to the home folder, not packageRoot: packageRoot varies with
+// however this instance happens to be installed/run (npx cache dir, a
+// reinstalled node_modules, a different checkout) and isn't guaranteed to
+// persist or even be writable, so a packageRoot-relative path risked losing
+// or forking proxy configs across runs. The home folder is stable and
+// writable regardless of how/where js-bridge-mcp is invoked.
+const PROXY_CONFIG_PATH = process.env.PROXY_CONFIG_PATH ?? path.join(os.homedir(), '.js-bridge-mcp-proxies.json');
 
 const httpServer = createHttpServer({
   port: PORT,
@@ -100,6 +108,7 @@ const httpServer = createHttpServer({
 
 attachWebSocketServer(httpServer, PORT, undefined, initialHelloState);
 installProxyAdminRoutes(httpServer, PORT);
+initAdminChannel();
 initProxyManager(PROXY_CONFIG_PATH);
 
 httpServer.listen(PORT, () => {

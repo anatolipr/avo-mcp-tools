@@ -40,8 +40,10 @@
   .status-paused { opacity: 0.6; }
   button { font: inherit; font-size: 12px; padding: 2px 8px; margin-right: 4px; cursor: pointer; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--bg); color: inherit; }
   button:hover { background: var(--hover); border-color: var(--accent); }
-  form { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 0.6rem; margin: 1rem 0; max-width: 500px; }
-  form label { align-self: center; }
+  #proxy-form { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 0.6rem; margin: 1rem 0; max-width: 500px; }
+  #proxy-form label { align-self: center; }
+  #proxy-json-form { margin: 1rem 0; max-width: 500px; }
+  #proxy-json-form .hint { margin-top: 0; }
   input, select, textarea { font: inherit; padding: 2px 4px; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 4px; }
   textarea { resize: vertical; }
   .err { color: var(--danger); font-size: 12px; }
@@ -65,11 +67,14 @@
   <h1>MCP server proxies</h1>
   <button class="theme-toggle" id="theme-toggle" title="Theme: Auto (click to change)" aria-label="Toggle color theme">◐</button>
 </div>
-<p class="hint">Each proxy spawns/connects to an upstream MCP server and exposes its tools on a dedicated channel, prefixed <code>&lt;slug&gt;__</code>. See <a href="/hub">/hub</a> to bridge every active proxy into one browser tab. This page can also be bridged (or opened with <strong>Cmd/Ctrl+Shift+A</strong> for Human MCP Relay) to manage proxies by name: add/view/edit/pause/resume/restart/remove.</p>
+<p class="hint">Each proxy spawns/connects to an upstream MCP server and exposes its tools on a dedicated channel, prefixed <code>&lt;slug&gt;__</code> and directly joinable by an MCP client via <code>join_channel(slug)</code> — see <code>list_channels</code>/<code>channel_find</code> to discover one by name. See <a href="/hub">/hub</a> for a human-facing grouped view (with per-proxy <code>/hub/&lt;slug&gt;</code> scoping) to use with Human MCP Relay. An MCP client can also <code>join_channel("admin")</code> directly for this same add/view/edit/pause/resume/restart/remove CRUD, no tab needed; this page mirrors it for a human via <strong>Cmd/Ctrl+Shift+A</strong> (Human MCP Relay).</p>
 
 <table id="rows"><thead><tr><th></th><th>slug</th><th>transport</th><th>status</th><th>tools</th><th></th></tr></thead><tbody></tbody></table>
 
-<h2 id="form-title">Add a proxy</h2>
+<div class="header-row" style="margin-top: 1rem;">
+  <h2 id="form-title" style="margin: 0;">Add a proxy</h2>
+  <button type="button" id="json-mode-toggle" class="hint" style="background: none; border: none; text-decoration: underline; cursor: pointer; padding: 0;">Switch to JSON</button>
+</div>
 <form id="proxy-form">
   <input type="hidden" name="editId">
   <label>Slug</label><input name="slug" required pattern="[a-zA-Z0-9_-]+" placeholder="atlassian">
@@ -89,6 +94,14 @@
     <button type="submit" id="submit-btn">Add proxy</button>
     <button type="button" class="cancel-edit" id="cancel-edit">Cancel edit</button>
   </div>
+</form>
+<form id="proxy-json-form" style="display: none;">
+  <input type="hidden" name="editId">
+  <p class="hint">Paste or type a proxy config as JSON — same fields as <code>add_mcp_proxy</code>/<code>edit_mcp_proxy</code> (<code>slug</code>, <code>transport</code>, and <code>command</code>/<code>args</code>/<code>env</code> for stdio or <code>url</code> for sse/streamableHttp), except <code>args</code>/<code>env</code> here are a real array/object, not the space-separated/newline-separated strings the text form uses.</p>
+  <textarea id="json-input" rows="10" spellcheck="false" style="display: block; width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; margin-bottom: 0.5rem;" placeholder='{&#10;  "slug": "atlassian",&#10;  "transport": "stdio",&#10;  "command": "npx",&#10;  "args": ["-y", "some-mcp-server"],&#10;  "env": { "API_KEY": "..." }&#10;}'></textarea>
+  <p class="err" id="json-err"></p>
+  <button type="submit" id="json-submit-btn">Add proxy</button>
+  <button type="button" class="cancel-edit" id="json-cancel-edit">Cancel edit</button>
 </form>
 <p class="err" id="add-err"></p>
 
@@ -176,12 +189,51 @@ function formatEnv(env) {
   return Object.entries(env ?? {}).map(([k, v]) => `${k}=${v}`).join('\n');
 }
 
+// JSON mode — a raw textarea alternative to the field-by-field form above,
+// for pasting a config directly (e.g. one an LLM produced via add_mcp_proxy's
+// own JSON-shaped params, or copied from another proxy's View output).
+// Toggling does not touch either form's current values, so switching modes
+// mid-edit doesn't lose what's already filled in.
+const jsonForm = document.querySelector('#proxy-json-form');
+const jsonInput = document.querySelector('#json-input');
+const jsonErr = document.querySelector('#json-err');
+const jsonSubmitBtn = document.querySelector('#json-submit-btn');
+const jsonCancelEditBtn = document.querySelector('#json-cancel-edit');
+const jsonModeToggle = document.querySelector('#json-mode-toggle');
+let jsonMode = false;
+
+function applyJsonModeVisibility() {
+  form.style.display = jsonMode ? 'none' : '';
+  jsonForm.style.display = jsonMode ? '' : 'none';
+  jsonModeToggle.textContent = jsonMode ? 'Switch to form' : 'Switch to JSON';
+}
+
+jsonModeToggle.addEventListener('click', () => {
+  jsonMode = !jsonMode;
+  applyJsonModeVisibility();
+});
+
+function configToJson(config) {
+  // Same field set add_mcp_proxy/edit_mcp_proxy accept, minus id/paused
+  // (not user-editable here) — args/env stay real JSON array/object rather
+  // than the text-form's space/newline-separated string encoding.
+  const { slug, description, transport, command, args, env, url } = config;
+  const fields = { slug, description, transport, command, args, env, url };
+  for (const key of Object.keys(fields)) if (fields[key] === undefined) delete fields[key];
+  return JSON.stringify(fields, null, 2);
+}
+
 function exitEditMode() {
   form.reset();
   form.editId.value = '';
+  jsonForm.editId.value = '';
+  jsonInput.value = '';
+  jsonErr.textContent = '';
   formTitle.textContent = 'Add a proxy';
   submitBtn.textContent = 'Add proxy';
+  jsonSubmitBtn.textContent = 'Add proxy';
   cancelEditBtn.style.display = 'none';
+  jsonCancelEditBtn.style.display = 'none';
 }
 
 function enterEditMode(config) {
@@ -193,10 +245,15 @@ function enterEditMode(config) {
   form.args.value = formatArgs(config.args);
   form.env.value = formatEnv(config.env);
   form.url.value = config.url ?? '';
+  jsonForm.editId.value = config.id;
+  jsonInput.value = configToJson(config);
+  jsonErr.textContent = '';
   formTitle.textContent = `Edit proxy "${config.slug}"`;
   submitBtn.textContent = 'Save changes';
+  jsonSubmitBtn.textContent = 'Save changes';
   cancelEditBtn.style.display = 'inline-block';
-  form.scrollIntoView({ behavior: 'smooth' });
+  jsonCancelEditBtn.style.display = 'inline-block';
+  (jsonMode ? jsonForm : form).scrollIntoView({ behavior: 'smooth' });
 }
 
 async function refresh() {
@@ -250,6 +307,14 @@ async function refresh() {
 }
 
 cancelEditBtn.addEventListener('click', exitEditMode);
+jsonCancelEditBtn.addEventListener('click', exitEditMode);
+
+async function saveProxy(editId, body) {
+  const res = editId
+    ? await fetch(`/api/proxies/${editId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    : await fetch('/api/proxies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return res.json();
+}
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -264,14 +329,32 @@ form.addEventListener('submit', async (e) => {
       ? { command: data.get('command'), args: parseArgs(data.get('args') || ''), env: parseEnv(data.get('env') || '') }
       : { url: data.get('url') }),
   };
-  const res = editId
-    ? await fetch(`/api/proxies/${editId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    : await fetch('/api/proxies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const result = await res.json();
+  const result = await saveProxy(editId, body);
   document.querySelector('#add-err').textContent = result.ok ? '' : (result.error ?? 'failed to save proxy');
   if (result.ok) { exitEditMode(); refresh(); }
 });
 
+jsonForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  let body;
+  try {
+    body = JSON.parse(jsonInput.value);
+  } catch (err) {
+    jsonErr.textContent = `invalid JSON: ${err.message}`;
+    return;
+  }
+  if (!body.slug || !body.transport) {
+    jsonErr.textContent = 'missing required field "slug" or "transport"';
+    return;
+  }
+  jsonErr.textContent = '';
+  const editId = jsonForm.editId.value;
+  const result = await saveProxy(editId, body);
+  jsonErr.textContent = result.ok ? '' : (result.error ?? 'failed to save proxy');
+  if (result.ok) { exitEditMode(); refresh(); }
+});
+
+applyJsonModeVisibility();
 refresh();
 setInterval(refresh, 3000);
 
@@ -370,18 +453,7 @@ window.__mcpTools = [
 window.__mcpSummary = 'Manage MCP-server proxies for js-bridge-mcp: add/view/edit/pause/resume/restart/remove. See /hub separately to actually USE a proxy\'s tools once it\'s added here.';
 </script>
 
-<!--
-  Two independent consumers of the window.__mcpTools this page just set
-  (same decoupled shape as /hub and htmlpaint.com) — placed AFTER the module
-  block above so window.__mcpTools is already assigned by the time each
-  evaluates: main.js reads it once at import time (no re-sync for a later
-  plain reassignment — see main.ts's own header comment), and since this
-  page's __mcpTools is a static array (not built from an async fetch like
-  /hub's), a plain static <script> tag is safe here — no readiness race.
--->
-<script type="module" src="http://localhost:8766/main.js?server=http%3A%2F%2Flocalhost%3A8766&tenant=admin"></script>
-
-<!-- Human MCP Relay popup, opened with Cmd/Ctrl+Shift+A — reads window.__mcpTools/__mcpSummary at POPUP-OPEN time, so ordering relative to it doesn't matter. -->
+<!-- Human MCP Relay popup, opened with Cmd/Ctrl+Shift+A — reads window.__mcpTools/__mcpSummary at POPUP-OPEN time, so ordering relative to it doesn't matter. An MCP client doesn't need this tab open at all: join_channel("admin") reaches the server-owned admin channel directly (see proxy/admin-channel.ts). -->
 <script type="module" src="https://cdn.jsdelivr.net/npm/human-mcp-relay@0/src/relay.js"></script>
 </body>
 </html>

@@ -149,12 +149,39 @@ export async function handleProxyAdminRoutes(req: IncomingMessage, res: ServerRe
  * proxy-admin route short-circuits before the shared handler ever runs;
  * anything else falls through unchanged.
  */
+/**
+ * mcp-tenant-lib's static file server (createHttpServer, shared with
+ * mcp-form) has no SPA-style fallback: a directory mount only serves
+ * index.html for the mount's exact root, and treats any subpath as a literal
+ * file lookup that 404s if nothing exists there. /hub/:slug (see
+ * hub/index.html's client-side routing) needs every such subpath to load the
+ * same index.html, so rather than teach the shared library a new "SPA mode"
+ * (which mcp-form has no need for), this rewrites the request's own url in
+ * place before it ever reaches createHttpServer's handler — indistinguishable
+ * from a request for "/hub" by the time it gets there.
+ */
+function rewriteHubSubpathToIndex(req: IncomingMessage, port: number): void {
+  const url = new URL(req.url ?? '/', `http://localhost:${port}`);
+  if (/^\/hub\/[^/]+$/.test(url.pathname)) req.url = '/hub';
+}
+
 export function installProxyAdminRoutes(httpServer: Server, port: number) {
   const [originalListener] = httpServer.listeners('request') as ((req: IncomingMessage, res: ServerResponse) => void)[];
   if (!originalListener) throw new Error('installProxyAdminRoutes: httpServer has no existing "request" listener to wrap');
   httpServer.removeAllListeners('request');
   httpServer.on('request', async (req, res) => {
-    if (await handleProxyAdminRoutes(req, res, port)) return;
+    try {
+      if (await handleProxyAdminRoutes(req, res, port)) return;
+    } catch (err: any) {
+      // addProxy/updateProxy throw on invalid input (e.g. a bad slug) rather
+      // than returning a result — without this catch, that throw inside an
+      // async 'request' listener becomes an unhandled rejection with no
+      // listener anywhere in the chain, which Node treats as fatal and takes
+      // the whole server down over one bad admin-UI submission.
+      if (!res.headersSent) sendJson(res, 400, { ok: false, error: err?.message ?? String(err) });
+      return;
+    }
+    rewriteHubSubpathToIndex(req, port);
     originalListener(req, res);
   });
 }

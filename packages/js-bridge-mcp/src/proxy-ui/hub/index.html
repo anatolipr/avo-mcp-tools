@@ -39,6 +39,12 @@
   details { margin: 1rem 0; }
   summary { cursor: pointer; font-size: 12px; opacity: 0.7; }
   pre { font-size: 12px; background: var(--bg-subtle); padding: 0.6rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+  .group { margin: 1.2rem 0; }
+  .group-title { font-size: 15px; margin: 0 0 0.3rem; }
+  .group-title a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--border-strong); }
+  .group-title a:hover { border-bottom-color: var(--accent); color: var(--accent); }
+  .scope-banner { display: flex; align-items: baseline; gap: 8px; background: var(--accent-tint); border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.7rem; margin: 0.8rem 0; }
+  .scope-banner a { color: var(--accent); }
 </style>
 <script>
   // Applied synchronously, before first paint — see admin/index.html's
@@ -50,14 +56,19 @@
 </script>
 
 <!--
-  Same shape as any other app bridged into js-bridge-mcp (e.g. htmlpaint.com):
-  this page defines window.__mcpTools/__mcpSummary itself (below), then two
-  independent consumers attach to that same contract — js-bridge-mcp's own
-  client (main.js, a real MCP transport for an MCP client to join_channel
-  ("hub") into) and human-mcp-relay (a copy/paste popup, Cmd/Ctrl+Shift+A,
-  for a chat with no MCP connection). Neither knows about the other or about
-  proxy-manager.ts. Unlike htmlpaint.com, main.js can't be a static <script>
-  tag here — see the comment right before its import below for why.
+  This page defines window.__mcpTools/__mcpSummary itself (below) for
+  human-mcp-relay (a copy/paste popup, Cmd/Ctrl+Shift+A, for a chat with no
+  MCP connection). There is no server-owned "hub" MCP channel — each proxy
+  already has its own dedicated channel (see proxy-manager.ts), discoverable
+  via list_channels/channel_find/join_channel, so an aggregated channel would
+  just add tool-name-collision risk with no capability a per-proxy channel
+  doesn't already have. This page exists purely for the HUMAN relay path:
+  /hub shows every active proxy's tools grouped by proxy, and /hub/<slug>
+  (click a group's title, or navigate directly) scopes the relay down to just
+  that one proxy — useful when a human wants to hand an LLM a smaller, more
+  focused tool list instead of everything at once. Routing between them is
+  client-side (Navigation API, falling back to pushState) so relay state
+  (window.__mcpTools) updates without a full page reload.
 -->
 </head>
 <body>
@@ -65,9 +76,12 @@
   <h1>js-bridge-mcp hub</h1>
   <button class="theme-toggle" id="theme-toggle" title="Theme: Auto (click to change)" aria-label="Toggle color theme">◐</button>
 </div>
-<p>Merges every active <a href="/admin">proxy</a>'s tools into this one tab's <code>window.__mcpTools</code>. Bridge this tab into an MCP client via the dashboard's "Copy embed snippet…", or press <strong>Cmd/Ctrl+Shift+A</strong> for the Human MCP Relay popup.</p>
+<p>Groups every active <a href="/admin">proxy</a>'s tools for <strong>Cmd/Ctrl+Shift+A</strong> (Human MCP Relay). Click a group's title to scope this page (and the relay) down to just that proxy — e.g. <code>/hub/atlassian</code> — or come back here for everything at once. An MCP client doesn't need any of this: each proxy already has its own channel, joinable directly by slug (<code>join_channel</code>/<code>list_channels</code>).</p>
+<div class="scope-banner" id="scope-banner" style="display: none;">
+  Scoped to <strong id="scope-slug"></strong> — <a href="/hub" id="scope-clear">show every proxy</a>
+</div>
 <p class="status" id="status">loading proxies…</p>
-<ul id="tools"></ul>
+<div id="tools"></div>
 
 <details id="raw-details">
   <summary>window.__mcpTools (raw, live)</summary>
@@ -103,56 +117,100 @@ themeToggleBtn.addEventListener('click', () => {
   renderThemeButton(currentTheme);
 });
 
+// Reads the scope slug (if any) straight from the URL — /hub is unscoped
+// (every active proxy), /hub/<slug> shows just that one. No client-side
+// router library: the Navigation API (with a pushState fallback for
+// browsers without it, e.g. older Safari) intercepts same-origin /hub* link
+// clicks below and re-runs render() in place, so this only needs to read
+// location.pathname fresh each time render() runs.
+function currentScope() {
+  const match = location.pathname.match(/^\/hub\/([^/]+)\/?$/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 // This page's OWN tool definition — same role as htmlpaint's mcpbridge.js:
 // a plain window.__mcpTools array, each entry's fn forwarding through
 // proxy-manager.ts's HTTP call endpoint (this page has no direct in-process
 // access to a proxy's directCall — see tenant.ts).
-async function loadProxies() {
+async function render() {
+  const scope = currentScope();
   const proxies = await fetch('/api/proxies').then((r) => r.json());
-  const active = proxies.filter((p) => !p.paused && p.connected);
-  const perProxyTools = await Promise.all(active.map(async (p) => {
+  const active = proxies.filter((p) => !p.paused && p.connected && (!scope || p.slug === scope));
+
+  const groups = await Promise.all(active.map(async (p) => {
     const { tools } = await fetch(`/api/proxies/channel/${encodeURIComponent(p.slug)}/manifest`).then((r) => r.json());
-    return tools.map((t) => ({
-      ...t,
-      fn: (args) => fetch(`/api/proxies/channel/${encodeURIComponent(p.slug)}/call/${encodeURIComponent(t.name)}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args ?? {}),
-      }).then((r) => r.json()),
-    }));
+    return {
+      slug: p.slug,
+      tools: tools.map((t) => ({
+        ...t,
+        fn: (args) => fetch(`/api/proxies/channel/${encodeURIComponent(p.slug)}/call/${encodeURIComponent(t.name)}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args ?? {}),
+        }).then((r) => r.json()),
+      })),
+    };
   }));
-  window.__mcpTools = perProxyTools.flat();
-  window.__mcpSummary = `js-bridge-mcp hub — every tool here is proxied from a real upstream MCP server (see /admin): ${active.map((p) => p.slug).join(', ') || '(none active)'}. Tool names are prefixed <slug>__ to identify which server a tool belongs to.`;
+
+  window.__mcpTools = groups.flatMap((g) => g.tools);
+  window.__mcpSummary = scope
+    ? `js-bridge-mcp hub, scoped to proxy "${scope}" — every tool here is proxied from that one upstream MCP server (see /admin). Tool names are prefixed ${scope}__ .`
+    : `js-bridge-mcp hub — every tool here is proxied from a real upstream MCP server (see /admin): ${groups.map((g) => g.slug).join(', ') || '(none active)'}. Tool names are prefixed <slug>__ to identify which server a tool belongs to.`;
   // Overrides human-mcp-relay's default primer closing line ("start by
   // calling a read-only tool") — that default assumes one coherent app/
-  // document worth exploring on its own, which doesn't hold here: this
-  // page's tools come from N unrelated upstream servers (e.g. a database
-  // proxy AND an unrelated hello-world proxy), so "just start calling
-  // something" would have the LLM invoke a proxy's tool the human never
-  // asked about. See primer.js's closingNote doc comment.
-  window.__mcpClosingNote =
-    `This list spans ${active.length} separate MCP server(s) (${active.map((p) => p.slug).join(', ') || 'none'}), not one app — do NOT call any tool yet. ` +
-    'First ask the human which proxy/tool they actually want to use for this task, or wait for them to say what they need before proposing a call.';
+  // document worth exploring on its own. Scoped to one proxy, that
+  // assumption actually holds, so the override only applies unscoped, where
+  // tools still span N unrelated upstream servers. See primer.js's
+  // closingNote doc comment.
+  window.__mcpClosingNote = scope
+    ? undefined
+    : `This list spans ${groups.length} separate MCP server(s) (${groups.map((g) => g.slug).join(', ') || 'none'}), not one app — do NOT call any tool yet. ` +
+      'First ask the human which proxy/tool they actually want to use for this task, or wait for them to say what they need before proposing a call. ' +
+      'Prefer directing them to a scoped /hub/<slug> link (one per group below) over calling a tool from here directly.';
 
-  document.querySelector('#status').textContent = `${active.length} active proxy(ies): ${active.map((p) => p.slug).join(', ') || '(none)'}`;
-  document.querySelector('#tools').innerHTML = window.__mcpTools.length
-    ? window.__mcpTools.map((t) => `<li><span class="tool-name">${t.name}</span> — <span class="tool-desc">${t.description ?? ''}</span></li>`).join('')
-    : '<li><em>no tools yet</em></li>';
+  document.querySelector('#scope-banner').style.display = scope ? 'flex' : 'none';
+  if (scope) document.querySelector('#scope-slug').textContent = scope;
+  document.querySelector('#status').textContent = `${groups.length} active proxy(ies): ${groups.map((g) => g.slug).join(', ') || '(none)'}`;
+  document.querySelector('#tools').innerHTML = groups.length
+    ? groups.map((g) => `
+        <div class="group">
+          <h3 class="group-title"><a href="/hub/${encodeURIComponent(g.slug)}">${g.slug}</a></h3>
+          <ul>${g.tools.length
+            ? g.tools.map((t) => `<li><span class="tool-name">${t.name}</span> — <span class="tool-desc">${t.description ?? ''}</span></li>`).join('')
+            : '<li><em>no tools</em></li>'}</ul>
+        </div>`).join('')
+    : `<p><em>no active proxies${scope ? ` matching "${scope}"` : ''}</em></p>`;
   document.querySelector('#raw-tools').textContent = JSON.stringify(window.__mcpTools, null, 2);
 }
 
-await loadProxies();
-setInterval(loadProxies, 5000);
+// Intercepts clicks on same-origin /hub or /hub/<slug> links (the scope
+// banner's "show every proxy" and each group's title) to re-render in place
+// instead of a full page reload — keeps window.__mcpTools/__mcpSummary
+// updates instant or human-mcp-relay would otherwise see the OLD scope if
+// the popup was already open when a link is clicked. Falls back to a normal
+// pushState-based intercept for browsers without the Navigation API yet
+// (e.g. Safari, as of this writing) — same end result, just without the
+// API's built-in back/forward interception for free.
+if ('navigation' in window) {
+  navigation.addEventListener('navigate', (e) => {
+    if (!e.canIntercept) return;
+    const url = new URL(e.destination.url);
+    if (url.origin !== location.origin || !/^\/hub(\/[^/]+)?\/?$/.test(url.pathname)) return;
+    e.intercept({ handler: render });
+  });
+} else {
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest?.('a');
+    if (!link) return;
+    const url = new URL(link.href, location.href);
+    if (url.origin !== location.origin || !/^\/hub(\/[^/]+)?\/?$/.test(url.pathname)) return;
+    e.preventDefault();
+    history.pushState(null, '', url);
+    render();
+  });
+  window.addEventListener('popstate', render);
+}
 
-// main.js reads window.__mcpTools ONCE at import time (see its own header
-// comment) and has no re-sync path for a later plain reassignment of that
-// global — only window.__mcpToolBus changes trigger a resend, which this
-// page never uses. So unlike htmlpaint.com (whose window.__mcpTools is
-// fixed at page load), main.js has to be imported dynamically, AFTER the
-// first loadProxies() completes, rather than as a static <script> tag that
-// could race it and register zero tools. A later proxy pause/resume still
-// needs a fresh main.js import (or a page reload) to be picked up — a
-// fixed `tenant=hub` query param keeps that re-import idempotent from the
-// server's point of view (same channel, not a new one each time).
-await import(`http://localhost:8766/main.js?server=${encodeURIComponent('http://localhost:8766')}&tenant=hub`);
+await render();
+setInterval(render, 5000);
 </script>
 
 <!-- Independent, decoupled attachment (same as htmlpaint.com's index.html): Human MCP Relay popup, opened with Cmd/Ctrl+Shift+A. Reads window.__mcpTools/__mcpSummary at POPUP-OPEN time (not import time), so — unlike main.js above — it has no race to worry about and always sees whatever loadProxies() most recently set. -->

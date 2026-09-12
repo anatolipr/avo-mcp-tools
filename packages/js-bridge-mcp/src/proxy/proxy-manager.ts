@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { getOrCreateTenant, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
+import { getOrCreateTenant, isValidChannelName, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
 import type { ProxyConfig, ProxyStatus, ProxyTransport } from './types.js';
 
 /**
@@ -47,6 +47,25 @@ function loadConfigs(): ProxyConfig[] {
     if (err.code !== 'ENOENT') console.error(`[proxy-manager] failed to read ${configPath}: ${err.message}`);
     return [];
   }
+}
+
+/**
+ * Per-id error for a config entry whose slug fails isValidChannelName —
+ * populated at load time (see initProxyManager) for entries that predate
+ * isValidChannelName being enforced on the write path (addProxy/updateProxy),
+ * e.g. hand-edited JSON or a file written by an older build. Without this
+ * check, such an entry starts normally and produces a channel that
+ * list_channels/describe_channel can see but join_channel can never accept
+ * (the tenant id IS the raw slug), leaving it permanently unusable with no
+ * indication why. Kept separate from RunningProxy.lastError since an invalid
+ * slug is never actually started — listProxies() merges the two so the admin
+ * UI shows one error either way.
+ */
+const invalidSlugErrors = new Map<string, string>(); // keyed by ProxyConfig.id
+
+function slugError(slug: string, configPath: string): string {
+  return `"${slug}" is not a valid channel slug (use only letters, digits, underscore, and hyphen) — ` +
+    `fix it in ${configPath} and restart, or delete/re-add the proxy.`;
 }
 
 function saveConfigs() {
@@ -227,6 +246,12 @@ export function initProxyManager(filePath: string) {
   configPath = filePath;
   configs = loadConfigs();
   for (const config of configs) {
+    if (!isValidChannelName(config.slug)) {
+      const message = slugError(config.slug, configPath);
+      console.error(`[proxy-manager] not starting proxy "${config.id}": ${message}`);
+      invalidSlugErrors.set(config.id, message);
+      continue;
+    }
     if (!config.paused) startProxy(config);
   }
 }
@@ -247,12 +272,15 @@ export function listProxies(): ProxyStatus[] {
       connected: !!entry && !entry.lastError,
       toolCount: entry?.toolCount ?? 0,
       skippedTools: entry?.skippedTools ?? [],
-      lastError: entry?.lastError,
+      lastError: entry?.lastError ?? invalidSlugErrors.get(config.id),
     };
   });
 }
 
 export async function addProxy(input: Omit<ProxyConfig, 'id' | 'paused'>): Promise<ProxyConfig> {
+  if (!isValidChannelName(input.slug)) {
+    throw new Error(slugError(input.slug, configPath));
+  }
   const config: ProxyConfig = { ...input, id: randomUUID(), paused: false };
   configs.push(config);
   saveConfigs();
@@ -273,11 +301,15 @@ export async function addProxy(input: Omit<ProxyConfig, 'id' | 'paused'>): Promi
 export async function updateProxy(id: string, input: Omit<ProxyConfig, 'id' | 'paused'>): Promise<ProxyConfig | undefined> {
   const index = configs.findIndex((c) => c.id === id);
   if (index === -1) return undefined;
+  if (!isValidChannelName(input.slug)) {
+    throw new Error(slugError(input.slug, configPath));
+  }
   const paused = configs[index]!.paused;
   await stopProxy(id);
   const config: ProxyConfig = { ...input, id, paused };
   configs[index] = config;
   saveConfigs();
+  invalidSlugErrors.delete(id);
   if (!config.paused) await startProxy(config);
   return config;
 }
@@ -287,6 +319,7 @@ export async function removeProxy(id: string): Promise<boolean> {
   if (index === -1) return false;
   await stopProxy(id);
   configs.splice(index, 1);
+  invalidSlugErrors.delete(id);
   saveConfigs();
   return true;
 }
@@ -303,6 +336,10 @@ export async function pauseProxy(id: string): Promise<boolean> {
 export async function resumeProxy(id: string): Promise<boolean> {
   const config = configs.find((c) => c.id === id);
   if (!config) return false;
+  if (!isValidChannelName(config.slug)) {
+    invalidSlugErrors.set(id, slugError(config.slug, configPath));
+    return false;
+  }
   config.paused = false;
   saveConfigs();
   await startProxy(config);
@@ -313,6 +350,10 @@ export async function resumeProxy(id: string): Promise<boolean> {
 export async function restartProxy(id: string): Promise<boolean> {
   const config = configs.find((c) => c.id === id);
   if (!config) return false;
+  if (!isValidChannelName(config.slug)) {
+    invalidSlugErrors.set(id, slugError(config.slug, configPath));
+    return false;
+  }
   await stopProxy(id);
   await startProxy(config);
   return true;

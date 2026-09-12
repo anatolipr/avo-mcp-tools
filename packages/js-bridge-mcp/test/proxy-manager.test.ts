@@ -203,6 +203,70 @@ test('restarting a proxy mints a fresh connection id, so a call issued right bef
   await fetch(`${BASE_URL}/api/proxies/${config.id}`, { method: 'DELETE' });
 });
 
+test('a stale config entry with an invalid slug (predating isValidChannelName enforcement) is not started, and surfaces its error via list_proxies instead of producing a silent, unjoinable channel', async () => {
+  const invalidConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), 'js-bridge-mcp-proxy-test-invalid-'));
+  const invalidConfigPath = path.join(invalidConfigDir, 'proxies.json');
+  const invalidId = 'preexisting-invalid-slug-id';
+  fs.writeFileSync(invalidConfigPath, JSON.stringify([
+    { id: invalidId, slug: 'has spaces', transport: 'stdio', command: 'npx', args: ['tsx', STDIO_FIXTURE], paused: false },
+  ]));
+
+  const port = 8910;
+  const invalidServer = spawn('npx', ['tsx', 'src/server.ts'], {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: { ...process.env, PORT: String(port), PROXY_CONFIG_PATH: invalidConfigPath },
+    stdio: ['ignore', 'ignore', 'inherit'],
+    detached: true,
+  });
+  try {
+    const base = `http://localhost:${port}`;
+    for (let i = 0; i < 50; i++) {
+      try {
+        await fetch(base);
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+
+    const proxies: any[] = await fetch(`${base}/api/proxies`).then((r) => r.json());
+    const entry = proxies.find((p) => p.id === invalidId);
+    assert.ok(entry, 'expected the invalid-slug entry to still be listed');
+    assert.equal(entry.connected, false);
+    assert.equal(entry.toolCount, 0);
+    assert.match(entry.lastError ?? '', /not a valid channel slug/);
+
+    // The point of the whole check: no channel exists under the raw slug, so
+    // there's nothing for join_channel to ever find, unjoinable or not.
+    const manifestRes = await fetch(`${base}/api/proxies/channel/${encodeURIComponent('has spaces')}/manifest`);
+    assert.notEqual(manifestRes.status, 200);
+  } finally {
+    if (invalidServer.pid) process.kill(-invalidServer.pid, 'SIGKILL');
+    fs.rmSync(invalidConfigDir, { recursive: true, force: true });
+  }
+});
+
+test('PATCHing a proxy with an invalid slug returns a 400 JSON error instead of crashing the server (addProxy/updateProxy throw on invalid input, and the request handler must catch it)', async () => {
+  const config = await addProxy({ slug: 'patchtargetfake', transport: 'stdio', command: 'npx', args: ['tsx', STDIO_FIXTURE] });
+  await waitForConnected(config.id);
+
+  const res = await fetch(`${BASE_URL}/api/proxies/${config.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slug: 'has spaces', transport: 'stdio', command: 'npx', args: ['tsx', STDIO_FIXTURE] }),
+  });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.ok, false);
+  assert.match(body.error, /not a valid channel slug/);
+
+  // The server process must still be alive and serving requests afterward.
+  const stillUp = await fetch(BASE_URL);
+  assert.ok(stillUp.ok || stillUp.status < 500, 'server did not survive the invalid PATCH');
+
+  await fetch(`${BASE_URL}/api/proxies/${config.id}`, { method: 'DELETE' });
+});
+
 test('list_proxies reflects current state (connected, paused, toolCount)', async () => {
   const config = await addProxy({ slug: 'listedfake', transport: 'stdio', command: 'npx', args: ['tsx', STDIO_FIXTURE] });
   await waitForConnected(config.id);
