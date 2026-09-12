@@ -119,15 +119,50 @@ export async function registerBuiltinTools(): Promise<void> {
     {
       name: 'inject_script',
       description:
-        'Runs JavaScript once in a browser tab (same window/document access as pasting into that tab\'s own DevTools console). ' +
-        'Defaults to the active tab if tabId is omitted. Returns the code\'s return value.',
+        'Runs JavaScript once in a browser tab, with the same window/document access as that tab\'s own DevTools console. ' +
+        'Unlike pasting into DevTools, a bare expression is NOT auto-printed — the code runs as a function body ' +
+        '(new Function(code)), so it must contain an explicit top-level `return` statement to produce a result ' +
+        '(e.g. "return 1+1;", not "1+1"); otherwise this resolves to undefined with no error. ' +
+        'Defaults to the active tab if tabId is omitted.',
       params: {
-        code: { type: 'string', description: 'JavaScript source to run — same signature as new Function(code).' },
+        code: {
+          type: 'string',
+          description: 'JavaScript source to run as a function body — same signature as new Function(code). Must use an explicit `return` to produce a result.',
+        },
         tabId: { type: 'number', description: 'Tab id to run in. Omit for the active tab.', optional: true },
       },
       fn: async (args) => {
         const { code, tabId } = args as { code: string; tabId?: number };
         return injectScriptOnce(await resolveTabId(tabId), code);
+      },
+    },
+    {
+      name: 'human_devtool',
+      description:
+        'Fallback for when inject_script fails or cannot reach a tab at all (most commonly: the page\'s Content-Security-Policy ' +
+        'blocks \'unsafe-eval\', so inject_script\'s new Function(code) throws an EvalError no matter what code is passed — ' +
+        'this happens on sites like claude.ai). Returns a ready-to-paste DevTools Console snippet that runs YOUR code directly ' +
+        'in the human\'s own Console session, which is exempt from the page\'s script-src CSP the same way hand-typing in ' +
+        'DevTools always has been. Give the returned `snippet` to the human and ask them to: open DevTools on that tab, go to ' +
+        'Console, paste it, hit Enter, then paste the printed output back to you. Every call to this tool produces one fresh ' +
+        'snippet for one round of code — there is no persistent bridge installed, so if you need to run more JS afterward, ' +
+        'call this again with the new code and repeat the paste. This only works when a human is present to do the pasting; ' +
+        'it cannot be automated by the extension (that would just be inject_script again, which is exactly what CSP blocks).',
+      params: {
+        code: {
+          type: 'string',
+          description: 'JavaScript source to run as a function body in the human\'s Console — same `return`-to-produce-a-result contract as inject_script\'s code param.',
+        },
+      },
+      fn: async (args) => {
+        const { code } = args as { code: string };
+        const snippet = `(() => {\n  const __result = (function() {\n${code}\n})();\n  const __out = typeof __result === 'string' ? __result : JSON.stringify(__result, null, 2);\n  console.log(__out);\n  return __out;\n})();`;
+        return {
+          snippet,
+          instructions:
+            'Ask the human to open DevTools on the target tab (Cmd+Option+I / F12), go to the Console tab, paste this ' +
+            'snippet verbatim, press Enter, then copy the logged output back to you.',
+        };
       },
     },
     {
