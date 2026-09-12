@@ -464,7 +464,13 @@ export class McpForm extends LitElement {
     const tenantId = location.pathname.startsWith('/t/')
       ? location.pathname.slice('/t/'.length).split('/')[0]
       : '';
-    const wsPath = tenantId ? `/ws?tenant=${encodeURIComponent(tenantId)}` : '/ws';
+    // A trailing colon forces ws.ts to parse this as the CHANNEL part
+    // (channelPart=tenantId, namePart=undefined) rather than a root
+    // connection name — see mcp-tenant-lib's ws.ts split-on-first-colon
+    // convention introduced in 73fe72f. Without the colon, a bare tenantId
+    // lands this page on its own isolated root tenant instead of the real
+    // channel tenant that join_channel/define_form populate.
+    const wsPath = tenantId ? `/ws?tenant=${encodeURIComponent(tenantId)}:` : '/ws';
     const wsUrl = `ws://${location.host}${wsPath}`;
     console.log(`[mcp-ws] connecting: ${wsUrl}`);
     const ws = new WebSocket(wsUrl);

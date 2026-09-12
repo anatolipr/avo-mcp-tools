@@ -46,7 +46,7 @@ const httpServer = createHttpServer({
   staticDir: STATIC_DIR,
   initialSchema: initialFormDef,
   initialValues: initialValuesFor(initialFormDef),
-  identity: { name: 'mcp-form', version: '0.2.0' },
+  identity: { name: 'mcp-form', version: '0.2.1' },
   registerFn: makeRegisterFormTools(initialFormDef),
   // A session that never calls join_channel lands on a root connection
   // named after this server's own identity ("mcp-form") rather than a

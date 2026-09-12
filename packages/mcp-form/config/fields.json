@@ -1,10 +1,10 @@
 {
   "fields": [
     {
-      "name": "text",
-      "label": "Enter text",
-      "type": "textarea",
-      "default": ""
+      "name": "placeholder",
+      "label": "",
+      "type": "html_output",
+      "html": "<p>Nothing defined</p>"
     }
   ]
 }

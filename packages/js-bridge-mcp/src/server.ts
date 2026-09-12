@@ -2,6 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
+import open from 'open';
 import { getOrCreateTenant as getOrCreateTenantFor, tenants, startIdleSweep, startEmptySweep, createHttpServer, attachWebSocketServer } from 'mcp-tenant-lib';
 import { initialHelloState } from './types.js';
 import { registerHelloTools } from './tools/register.js';
@@ -110,11 +111,17 @@ initAdminChannel();
 initProxyManager(PROXY_CONFIG_PATH);
 
 httpServer.listen(PORT, () => {
-  console.error(`[js-bridge-mcp] MCP + bridge server listening on http://localhost:${PORT}`);
-  console.error(`[js-bridge-mcp] dashboard: http://localhost:${PORT}`);
-  console.error(`[js-bridge-mcp] proxy admin: http://localhost:${PORT}/admin`);
-  console.error(`[js-bridge-mcp] proxy hub: http://localhost:${PORT}/hub`);
+  const url = `http://localhost:${PORT}`;
+  console.error(`[js-bridge-mcp] MCP + bridge server listening on ${url}`);
+  console.error(`[js-bridge-mcp] dashboard: ${url}`);
+  console.error(`[js-bridge-mcp] proxy admin: ${url}/admin`);
+  console.error(`[js-bridge-mcp] proxy hub: ${url}/hub`);
   console.error(`[js-bridge-mcp] serve legacy-page/hello-world.html separately: npm run start:static`);
+  if (!process.env.JS_BRIDGE_MCP_NO_OPEN) {
+    open(url).catch(() => {
+      console.error(`[js-bridge-mcp] could not auto-open browser — open ${url} manually`);
+    });
+  }
 });
 
 export { getOrCreateTenant, tenants, httpServer };

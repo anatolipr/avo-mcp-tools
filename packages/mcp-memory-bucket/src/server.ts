@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
+import open from 'open';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { loadConfig, type RemoteFolder } from './config.js';
@@ -270,6 +271,12 @@ app.listen(PORT, () => {
     console.error(
       `[memory-bucket] remote (folderfoo) memory folders${suffix}: ${config.remoteMemoryFolders.map((f) => `${f.name}@${f.server}`).join(', ') || '(none)'}`
     );
+  }
+  if (!process.env.MCP_MEMORY_BUCKET_NO_OPEN) {
+    const url = `http://localhost:${PORT}`;
+    open(url).catch(() => {
+      console.error(`[memory-bucket] could not auto-open browser — open ${url} manually`);
+    });
   }
 });
 
