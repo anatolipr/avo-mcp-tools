@@ -36,6 +36,36 @@ export async function registerBuiltinTools(): Promise<void> {
 
   const tools: Omit<ExtensionTool, 'source'>[] = [
     {
+      name: 'list_tabs',
+      description:
+        'Lists every open browser tab (id, url, title, active/pinned state) regardless of whether it has any js-bridge-mcp ' +
+        'connection — unlike find_tab_by_connection, this also surfaces tabs the extension never connected. Use a returned ' +
+        '`id` as the `tabId` argument to get_network_log/get_console_log/inject_script/enable_debugger_tools to target that ' +
+        'tab directly, with no prior connection required. Each entry also includes `connectedChannel`/`connectedAppLabel` ' +
+        'when the tab happens to already be connected as a named channel.',
+      params: {},
+      fn: async () => {
+        const tabs = await chrome.tabs.query({});
+        const connected = new Map(listConnectedTabs().map((c) => [c.tabId, c]));
+        return {
+          tabs: tabs
+            .filter((tab): tab is chrome.tabs.Tab & { id: number } => typeof tab.id === 'number')
+            .map((tab) => {
+              const conn = connected.get(tab.id);
+              return {
+                id: tab.id,
+                url: tab.url,
+                title: tab.title,
+                active: tab.active,
+                pinned: tab.pinned,
+                windowId: tab.windowId,
+                ...(conn ? { connectedChannel: conn.channel, connectedAppLabel: conn.appLabel } : {}),
+              };
+            }),
+        };
+      },
+    },
+    {
       name: 'find_tab_by_connection',
       description:
         'Resolves a js-bridge-mcp channel name or connection label (e.g. "example", the name shown in describe_tools\' ' +

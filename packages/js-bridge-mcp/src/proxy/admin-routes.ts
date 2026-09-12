@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Server } from 'node:http';
-import { getRootTenant } from 'mcp-tenant-lib';
+import { getRootTenant, listRootTenants } from 'mcp-tenant-lib';
 import { addProxy, getProxyConfig, listProxies, pauseProxy, removeProxy, restartProxy, resumeProxy, updateProxy } from './proxy-manager.js';
 import type { ProxyConfig } from './types.js';
 
@@ -30,6 +30,30 @@ export async function handleProxyAdminRoutes(req: IncomingMessage, res: ServerRe
 
   if (url.pathname === '/api/proxies' && req.method === 'GET') {
     sendJson(res, 200, listProxies());
+    return true;
+  }
+
+  // Hub-page support: root connections that AREN'T user-configured proxies —
+  // today, the "admin" ops channel (admin-channel.ts) and any live browser
+  // extension connection ("extension", "extension2", ... — see
+  // extension-connection.ts). Both are already root tenants addressable
+  // through the exact same channel/:slug/manifest and channel/:slug/call
+  // routes below (they go through getRootTenant(slug) generically, no
+  // proxy-specific code), so this route just needs to enumerate them in a
+  // shape the hub page already knows how to render/call. Proxies are
+  // excluded here since /api/proxies above already lists them (and carries
+  // proxy-only fields like transport/skippedTools that don't apply).
+  if (url.pathname === '/api/root-connections' && req.method === 'GET') {
+    const proxySlugs = new Set(listProxies().map((p) => p.slug));
+    const entries = listRootTenants()
+      .filter((tenant) => !proxySlugs.has(tenant.displayName))
+      .map((tenant) => ({
+        slug: tenant.displayName,
+        kind: [...tenant.connections.values()][0]?.kind ?? 'proxy',
+        connected: tenant.connections.size > 0,
+        toolCount: tenant.toolManifest.length,
+      }));
+    sendJson(res, 200, entries);
     return true;
   }
 

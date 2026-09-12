@@ -78,9 +78,9 @@
   <h1><a href="/" class="back-link" title="Back to dashboard">←</a> js-bridge-mcp hub</h1>
   <button class="theme-toggle" id="theme-toggle" title="Theme: Auto (click to change)" aria-label="Toggle color theme">◐</button>
 </div>
-<p>Groups every active <a href="/admin">proxy</a>'s tools for <strong>Cmd/Ctrl+Shift+A</strong> (Human MCP Relay). Click a group's title to scope this page (and the relay) down to just that proxy — e.g. <code>/hub/atlassian</code> — or come back here for everything at once. An MCP client doesn't need any of this: each proxy already has its own channel, joinable directly by slug (<code>join_channel</code>/<code>list_channels</code>).</p>
+<p>Groups every active <a href="/admin">proxy</a>'s tools, plus the <code>admin</code> ops channel and any connected <code>extension</code>, for <strong>Cmd/Ctrl+Shift+A</strong> (Human MCP Relay). Click a group's title to scope this page (and the relay) down to just that one — e.g. <code>/hub/atlassian</code> or <code>/hub/extension</code> — or come back here for everything at once. An MCP client doesn't need any of this: each of these already has its own root connection, addressable directly (<code>describe_tools</code>).</p>
 <div class="scope-banner" id="scope-banner" style="display: none;">
-  Scoped to <strong id="scope-slug"></strong> — <a href="/hub" id="scope-clear">show every proxy</a>
+  Scoped to <strong id="scope-slug"></strong> — <a href="/hub" id="scope-clear">show everything</a>
 </div>
 <p class="status" id="status">loading proxies…</p>
 <div id="tools"></div>
@@ -136,8 +136,19 @@ function currentScope() {
 // access to a proxy's directCall — see tenant.ts).
 async function render() {
   const scope = currentScope();
-  const proxies = await fetch('/api/proxies').then((r) => r.json());
-  const active = proxies.filter((p) => !p.paused && p.connected && (!scope || p.slug === scope));
+  const [proxies, rootConnections] = await Promise.all([
+    fetch('/api/proxies').then((r) => r.json()),
+    fetch('/api/root-connections').then((r) => r.json()),
+  ]);
+  // Root connections that aren't user-configured proxies — today, the
+  // "admin" ops channel (CRUD for proxies themselves) and any live browser
+  // extension connection ("extension", "extension2", ...). Both are real
+  // root tenants addressable through the exact same channel/:slug/manifest
+  // and channel/:slug/call routes proxies use below, so they're merged into
+  // `active` the same way — no separate rendering path needed. Always
+  // "connected"/unpaused by construction (root-connections only lists a
+  // tenant that already has a live connection; see admin-routes.ts).
+  const active = [...proxies.filter((p) => !p.paused && p.connected), ...rootConnections].filter((p) => !scope || p.slug === scope);
 
   const groups = await Promise.all(active.map(async (p) => {
     const { tools } = await fetch(`/api/proxies/channel/${encodeURIComponent(p.slug)}/manifest`).then((r) => r.json());
@@ -154,8 +165,8 @@ async function render() {
 
   window.__mcpTools = groups.flatMap((g) => g.tools);
   window.__mcpSummary = scope
-    ? `js-bridge-mcp hub, scoped to proxy "${scope}" — every tool here is proxied from that one upstream MCP server (see /admin). Tool names are prefixed ${scope}__ .`
-    : `js-bridge-mcp hub — every tool here is proxied from a real upstream MCP server (see /admin): ${groups.map((g) => g.slug).join(', ') || '(none active)'}. Tool names are prefixed <slug>__ to identify which server a tool belongs to.`;
+    ? `js-bridge-mcp hub, scoped to "${scope}" — every tool here belongs to that one root connection (an MCP proxy, the admin ops channel, or the browser extension). Tool names are prefixed ${scope}__ .`
+    : `js-bridge-mcp hub — every tool here belongs to a root connection (an MCP proxy, the admin ops channel, or the browser extension — see /admin): ${groups.map((g) => g.slug).join(', ') || '(none active)'}. Tool names are prefixed <slug>__ to identify which one a tool belongs to.`;
   // Overrides human-mcp-relay's default primer closing line ("start by
   // calling a read-only tool") — that default assumes one coherent app/
   // document worth exploring on its own. Scoped to one proxy, that
@@ -164,13 +175,13 @@ async function render() {
   // closingNote doc comment.
   window.__mcpClosingNote = scope
     ? undefined
-    : `This list spans ${groups.length} separate MCP server(s) (${groups.map((g) => g.slug).join(', ') || 'none'}), not one app — do NOT call any tool yet. ` +
-      'First ask the human which proxy/tool they actually want to use for this task, or wait for them to say what they need before proposing a call. ' +
+    : `This list spans ${groups.length} separate root connection(s) (${groups.map((g) => g.slug).join(', ') || 'none'}), not one app — do NOT call any tool yet. ` +
+      'First ask the human which one/tool they actually want to use for this task, or wait for them to say what they need before proposing a call. ' +
       'Prefer directing them to a scoped /hub/<slug> link (one per group below) over calling a tool from here directly.';
 
   document.querySelector('#scope-banner').style.display = scope ? 'flex' : 'none';
   if (scope) document.querySelector('#scope-slug').textContent = scope;
-  document.querySelector('#status').textContent = `${groups.length} active proxy(ies): ${groups.map((g) => g.slug).join(', ') || '(none)'}`;
+  document.querySelector('#status').textContent = `${groups.length} active connection(s): ${groups.map((g) => g.slug).join(', ') || '(none)'}`;
   document.querySelector('#tools').innerHTML = groups.length
     ? groups.map((g) => `
         <div class="group">
@@ -179,7 +190,7 @@ async function render() {
             ? g.tools.map((t) => `<li><span class="tool-name">${t.name}</span> — <span class="tool-desc">${t.description ?? ''}</span></li>`).join('')
             : '<li><em>no tools</em></li>'}</ul>
         </div>`).join('')
-    : `<p><em>no active proxies${scope ? ` matching "${scope}"` : ''}</em></p>`;
+    : `<p><em>no active connections${scope ? ` matching "${scope}"` : ''}</em></p>`;
   document.querySelector('#raw-tools').textContent = JSON.stringify(window.__mcpTools, null, 2);
 }
 
