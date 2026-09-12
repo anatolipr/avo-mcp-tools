@@ -299,7 +299,7 @@ export class DashboardApp extends LitElement {
     return html`
       <div class="header-row">
         <div>
-          <h1>Connected apps</h1>
+          <h1>js-bridge-mcp — Connected apps</h1>
           <p class="subtitle">Live connections and channels — updates automatically.</p>
         </div>
         <div class="header-actions">

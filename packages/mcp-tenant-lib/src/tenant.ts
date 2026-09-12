@@ -734,7 +734,7 @@ const isValidConnectionName = isValidChannelName;
  * means in each case, so a freed name/id becomes available again purely by
  * virtue of the check re-running fresh each call (no free-list to maintain).
  */
-function nextAvailableName(desired: string, isTaken: (candidate: string) => boolean): string {
+export function nextAvailableName(desired: string, isTaken: (candidate: string) => boolean): string {
   if (!isTaken(desired)) return desired;
   let n = 2;
   while (isTaken(`${desired}${n}`)) n++;

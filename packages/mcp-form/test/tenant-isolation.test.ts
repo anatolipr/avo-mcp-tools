@@ -146,12 +146,12 @@ test('two MCP sessions have isolated field values once each has joined its own c
   const a = await connectClient();
   const b = await connectClient();
 
-  // Under defaultTenantMode: 'shared' (see server.ts), an unnamed session
-  // would land on its own root connection (isolated already, just unnamed)
-  // — joining a real channel here is what makes the two sessions share a
-  // single, explicitly-named Tenant so the isolation being tested is
-  // between the two *channels*, not an incidental side effect of each
-  // being a distinct root connection.
+  // Under defaultTenantMode: 'shared-channel' (see server.ts), unnamed
+  // sessions all share ONE stable channel ("mcp-form") — joining a real
+  // channel here is what makes the two sessions land on distinct,
+  // explicitly-named Tenants so the isolation being tested is between the
+  // two *channels*, not an incidental side effect of each unnamed session
+  // getting its own tenant.
   await a.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-isolation-a' } });
   await b.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-isolation-b' } });
 
@@ -177,28 +177,23 @@ test('two MCP sessions have isolated field values once each has joined its own c
   await b.client.close();
 });
 
-test('get_form_url returns a root connection URL for a session that never joined a channel', async () => {
+test('get_form_url returns a plain channel URL for a session that never joined a channel', async () => {
   const a = await connectClient();
   const result = await a.client.callTool({ name: 'get_form_url', arguments: {} });
-  // mcp-form runs with defaultTenantMode: 'shared' (see server.ts) — an
-  // unnamed session lands on a root connection named after the server's own
-  // identity (Tenant id `root:mcp-form`, see getOrCreateRootTenant in
-  // mcp-tenant-lib/src/http.ts), not a private per-session UUID and not the
-  // old shared 'default' tenant (retired). Naming a channel via join_channel
-  // is what gets a session its own distinct URL (see the "Pets" scenario
-  // test below).
-  //
-  // Each unnamed session reserves its OWN root connection rather than
-  // sharing one (see reserveRootName/getOrCreateRootTenant) — collisions on
-  // the exact name "mcp-form" bump to "mcp-form2", "mcp-form3", etc, so with
-  // other unnamed-session tests in this same file also claiming that name
-  // pool, only the pattern (not the literal "root:mcp-form") is guaranteed
-  // here.
-  assert.match(textOf(result), /^http:\/\/localhost:8901\/t\/root:mcp-form\d*$/);
+  // mcp-form runs with defaultTenantMode: 'shared-channel' (see server.ts)
+  // — an unnamed session lands on a REAL channel named after the server's
+  // own identity ("mcp-form"), not a `root:`-prefixed root connection and
+  // not a private per-session UUID. Unlike 'shared' mode, this id is
+  // resolved ONCE and reused by every later unnamed session in this same
+  // server process (see resolveSharedTenantId in mcp-tenant-lib/src/http.ts)
+  // — so with THIS test always being the first unnamed-session caller in a
+  // freshly-spawned server, the literal name "mcp-form" (no numeric suffix,
+  // no prefix) is guaranteed here, not just the pattern.
+  assert.equal(textOf(result), `${BASE_URL}/t/mcp-form`);
   await a.client.close();
 });
 
-test('join_channel gives a session its own URL, distinct from the shared root connection', async () => {
+test('join_channel gives a session its own URL, distinct from the shared channel', async () => {
   const a = await connectClient();
   await a.client.callTool({ name: 'join_channel', arguments: { channel: 'unit-test-own-url' } });
   const result = await a.client.callTool({ name: 'get_form_url', arguments: {} });
@@ -300,25 +295,24 @@ test('GET /t/:tenantId serves the form page', async () => {
   await a.client.close();
 });
 
-test('WebSocket connection with a bare, unknown tenant name gets its own fresh root connection, not a shared default', { timeout: 5000 }, async () => {
-  // A bare `?tenant=<name>` (no colon) is a ROOT connection (see ws.ts): its
-  // own single-connection Tenant, keyed internally as `root:<name>`, always
-  // freshly minted rather than looked up/recreated — there is no shared
-  // 'default' tenant to silently fall back to anymore.
+test('WebSocket connection with a bare, unknown tenant name reconnects to that real channel, not a root connection', { timeout: 5000 }, async () => {
+  // mcp-form's attachWebSocketServer call passes { treatBareIdAsChannel:
+  // true } (see server.ts) — this server has no root-connection concept, so
+  // a bare `?tenant=<name>` (no colon) is the WHOLE channel name, looked
+  // up/recreated via getOrCreateTenant exactly like `channel:conn` syntax
+  // (see ws.ts), not minted as a fresh `root:<name>` root connection.
   const ws = new WebSocket(`ws://localhost:${PORT}/ws?tenant=this-tenant-does-not-exist-yet`);
   const initMsg: any = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Timed out waiting for an "init" message on the root connection')), 1000);
+    const timer = setTimeout(() => reject(new Error('Timed out waiting for an "init" message on the channel')), 1000);
     ws.on('message', (raw) => { clearTimeout(timer); resolve(JSON.parse(raw.toString())); });
     ws.on('error', reject);
   });
-  // A real, freshly-minted root connection (not a rejection, and not
-  // silently joined to any shared tenant) responds with its own fresh init
-  // state. Root connections are always newly created, never a reconnect to
-  // an existing one, so `recreated` is always false here (contrast with the
-  // "resync ... after a recreated tenant" test below, which uses a real
-  // named channel where `recreated: true` is meaningful).
+  // The channel didn't exist yet, so it's recreated on demand (same as any
+  // named channel a browser reconnects to — see the "resync ... after a
+  // recreated tenant" test below), not freshly minted as an isolated root
+  // connection.
   assert.equal(initMsg.type, 'init');
-  assert.equal(initMsg.recreated, false);
+  assert.equal(initMsg.recreated, true);
   ws.close();
 });
 

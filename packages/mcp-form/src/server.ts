@@ -46,19 +46,22 @@ const httpServer = createHttpServer({
   staticDir: STATIC_DIR,
   initialSchema: initialFormDef,
   initialValues: initialValuesFor(initialFormDef),
-  identity: { name: 'mcp-form', version: '0.2.1' },
+  identity: { name: 'mcp-form', version: '0.2.2' },
   registerFn: makeRegisterFormTools(initialFormDef),
-  // A session that never calls join_channel lands on a root connection
-  // named after this server's own identity ("mcp-form") rather than a
-  // private per-session UUID — same tradeoff js-bridge-mcp already makes
-  // (see its server.ts). Named channels are the encouraged path (see
-  // join_channel/define_form's tool descriptions); the root connection is
-  // the deliberate, anonymous, unscoped fallback for a genuinely one-off
-  // form, not a private sandbox.
-  defaultTenantMode: 'shared',
+  // A session that never calls join_channel lands on a real channel named
+  // after this server's own identity ("mcp-form", "mcp-form2", ...) rather
+  // than a private per-session UUID — same reconnect-stability tradeoff
+  // js-bridge-mcp makes with 'shared' (see its server.ts), but as a plain
+  // channel rather than a root connection: every mcp-form tenant is
+  // meant to be a real, listable, /t/<id>-addressable form, so there's no
+  // "root connection" concept here and no `root:` prefix should ever leak
+  // into a form URL. Named channels via join_channel are still the
+  // encouraged path (see join_channel/define_form's tool descriptions);
+  // this is the fallback for a genuinely one-off form.
+  defaultTenantMode: 'shared-channel',
 });
 
-attachWebSocketServer(httpServer, PORT, initialFormDef, initialValuesFor(initialFormDef));
+attachWebSocketServer(httpServer, PORT, initialFormDef, initialValuesFor(initialFormDef), { treatBareIdAsChannel: true });
 
 httpServer.listen(PORT, () => {
   console.error(`[mcp-form] UI available at http://localhost:${PORT}`);

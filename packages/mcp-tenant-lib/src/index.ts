@@ -1,11 +1,11 @@
 export {
   Store, Tenant, tenants, getOrCreateTenant, disposeTenant, startIdleSweep, startEmptySweep,
   isValidChannelName, isValidConnectionName, sanitizeChannelName, dashboardEvents,
-  reserveRootName, getRootTenant, getOrCreateRootTenant, listRootTenants,
+  reserveRootName, getRootTenant, getOrCreateRootTenant, listRootTenants, nextAvailableName,
 } from './tenant.js';
 export { buildMcpServer, type RegisterToolsFn, type McpServerIdentity } from './mcp.js';
 export { createHttpServer, type CreateHttpServerOptions } from './http.js';
-export { attachWebSocketServer } from './ws.js';
+export { attachWebSocketServer, type AttachWebSocketServerOptions } from './ws.js';
 export { createManifestToolRegistry, type ManifestToolRegistry } from './manifest-tools.js';
 export { registerChannelTools } from './channel-tools.js';
 export {

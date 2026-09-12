@@ -20,7 +20,25 @@ interface HeartbeatState {
 }
 const heartbeatState = new WeakMap<WebSocket, HeartbeatState>();
 
-export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port: number, initialSchema: TSchema, initialValues: TValues) {
+export interface AttachWebSocketServerOptions {
+  /**
+   * A colon-free `?tenant=` value is normally treated as a ROOT connection
+   * name (see the colon-split comment below) — appropriate for a server
+   * like js-bridge-mcp where many independent bridged apps each get their
+   * own hidden-from-list_channels identity. Set this true for a server
+   * that has no root-connection concept at all and whose tenant ids are
+   * always plain, real channel names (e.g. mcp-form's "mcp-form",
+   * "mcp-form2", ...) — a colon-free id is then looked up/created as a
+   * channel via getOrCreateTenant instead of minted as a new root tenant.
+   * Without this, such a server's own '/t/<id>' URLs would silently
+   * misroute: the id the HTTP/MCP side created as a channel tenant would
+   * never match what the WS side resolves for the same string.
+   */
+  treatBareIdAsChannel?: boolean;
+}
+
+export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port: number, initialSchema: TSchema, initialValues: TValues, options: AttachWebSocketServerOptions = {}) {
+  const { treatBareIdAsChannel = false } = options;
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
   const heartbeat = setInterval(() => {
@@ -54,7 +72,12 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
     if (rawTenantParam !== null) {
       const colonIdx = rawTenantParam.indexOf(':');
       if (colonIdx === -1) {
-        namePart = rawTenantParam;
+        // treatBareIdAsChannel: this server has no root-connection concept,
+        // so a colon-free id is the WHOLE channel name (e.g. mcp-form's
+        // "mcp-form20"), not a root-connection name — see this option's
+        // doc comment on AttachWebSocketServerOptions.
+        if (treatBareIdAsChannel) channelPart = rawTenantParam;
+        else namePart = rawTenantParam;
       } else {
         channelPart = rawTenantParam.slice(0, colonIdx);
         namePart = rawTenantParam.slice(colonIdx + 1) || undefined;

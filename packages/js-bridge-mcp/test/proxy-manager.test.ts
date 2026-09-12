@@ -35,7 +35,7 @@ before(async () => {
   // real server past the test run.
   serverProcess = spawn('npx', ['tsx', 'src/server.ts'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, PORT: String(PORT), PROXY_CONFIG_PATH: proxyConfigPath },
+    env: { ...process.env, PORT: String(PORT), PROXY_CONFIG_PATH: proxyConfigPath, JS_BRIDGE_MCP_NO_OPEN: '1' },
     stdio: ['ignore', 'ignore', 'inherit'],
     detached: true,
   });
@@ -214,7 +214,7 @@ test('a stale config entry with an invalid slug (predating isValidChannelName en
   const port = 8910;
   const invalidServer = spawn('npx', ['tsx', 'src/server.ts'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, PORT: String(port), PROXY_CONFIG_PATH: invalidConfigPath },
+    env: { ...process.env, PORT: String(port), PROXY_CONFIG_PATH: invalidConfigPath, JS_BRIDGE_MCP_NO_OPEN: '1' },
     stdio: ['ignore', 'ignore', 'inherit'],
     detached: true,
   });

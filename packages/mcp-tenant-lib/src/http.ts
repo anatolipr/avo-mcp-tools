@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { getOrCreateTenant, getOrCreateRootTenant } from './tenant.js';
+import { getOrCreateTenant, getOrCreateRootTenant, tenants, nextAvailableName } from './tenant.js';
 import { buildMcpServer, type RegisterToolsFn, type McpServerIdentity } from './mcp.js';
 import { handleDashboardRoutes } from './dashboard.js';
 
@@ -50,8 +50,23 @@ export interface CreateHttpServerOptions<TSchema, TValues> {
    *   with no ?tenant=, and under 'per-session' each such reconnect mints
    *   a new, empty tenant that orphans whatever browser tab was already
    *   bridged to the previous one.
+   *
+   * - 'shared-channel': same stable-landing behavior as 'shared', but the id
+   *   is a plain, unprefixed channel name (e.g. "mcp-form", picking
+   *   "mcp-form2" etc. only if that exact name is already live) rather than
+   *   a `root:`-prefixed one. Use this when the server has no separate
+   *   "root connection" concept and every tenant is meant to be a real,
+   *   listable, `/t/<id>`-addressable channel — e.g. mcp-form, where a
+   *   form's URL should never expose internal root/channel bookkeeping.
+   *
+   * Both 'shared' and 'shared-channel' resolve their id ONCE, lazily, on the
+   * first unpinned session, and reuse it for every later unpinned session —
+   * not recomputed per-request, which would otherwise see its own
+   * previously-created tenant as "taken" and mint a new numbered one on
+   * every reconnect (the actual bug this guards against; see
+   * resolveSharedTenantId below).
    */
-  defaultTenantMode?: 'per-session' | 'shared';
+  defaultTenantMode?: 'per-session' | 'shared' | 'shared-channel';
   /**
    * Extra static asset roots served ahead of `staticDir`, keyed by URL path
    * prefix. Two shapes:
@@ -75,6 +90,26 @@ export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSch
     t.touch();
     return t;
   };
+
+  // Resolved once (lazily, on first unpinned session) and reused for every
+  // later unpinned session under 'shared'/'shared-channel' — NOT recomputed
+  // per-request. getOrCreateRootTenant/nextAvailableName both resolve name
+  // collisions against OTHER currently-live tenants, which is the right
+  // check for "a new independent connection wants this name" but the wrong
+  // one for "which tenant do repeat unpinned sessions land on": calling
+  // either fresh on every request would see its own previously-created
+  // tenant as "already taken" and increment past it every time (mcp-form,
+  // mcp-form2, mcp-form3, ... — one new empty tenant per reconnect, the
+  // exact bug this cache prevents).
+  let sharedTenantId: string | undefined;
+  function resolveSharedTenantId(): string | undefined {
+    if (defaultTenantMode === 'per-session') return undefined;
+    if (sharedTenantId !== undefined) return sharedTenantId;
+    sharedTenantId = defaultTenantMode === 'shared'
+      ? getOrCreateRootTenant(identity.name, initialSchema, initialValues).tenant.id
+      : getOrCreateTenant(nextAvailableName(identity.name, (candidate) => tenants.has(candidate)), initialSchema, initialValues).id;
+    return sharedTenantId;
+  }
 
   const httpServer = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://localhost:${port}`);
@@ -101,8 +136,7 @@ export function createHttpServer<TSchema, TValues>({ port, staticDir, initialSch
         // map is keyed on it) so concurrent clients don't collide; only
         // which *tenant* the session operates on varies by mode.
         const requestedTenantId = url.searchParams.get('tenant');
-        const tenantId = requestedTenantId
-          || (defaultTenantMode === 'shared' ? getOrCreateRootTenant(identity.name, initialSchema, initialValues).tenant.id : randomUUID());
+        const tenantId = requestedTenantId || resolveSharedTenantId() || randomUUID();
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {

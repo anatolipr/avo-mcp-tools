@@ -25,7 +25,7 @@ before(async () => {
   // assertion detail even when every individual test already passed.
   serverProcess = spawn('npx', ['tsx', 'src/server.ts'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, PORT: String(PORT) },
+    env: { ...process.env, PORT: String(PORT), JS_BRIDGE_MCP_NO_OPEN: '1' },
     stdio: ['ignore', 'ignore', 'inherit'],
     detached: true,
   });
