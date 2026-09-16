@@ -5,7 +5,7 @@ export interface SubmitPayload {
 }
 
 export type ServerMessage<TSchema = unknown, TValues = unknown> =
-  | { type: 'init'; schema: TSchema; state: TValues; waiting: boolean; submitted: boolean; recreated: boolean }
+  | { type: 'init'; schema: TSchema; state: TValues; waiting: boolean; submitted: boolean; recreated: boolean; resolvedName: string }
   | { type: 'reinit'; schema: TSchema; state: TValues; waiting: boolean; submitted: boolean }
   | { type: 'update'; field: string; value: unknown }
   | { type: 'waiting'; waiting: boolean }

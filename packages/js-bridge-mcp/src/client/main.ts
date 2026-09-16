@@ -87,7 +87,43 @@ function labelForFirstRegister(): string | undefined {
 
 const scriptUrl = new URL(import.meta.url);
 const serverUrl = scriptUrl.searchParams.get('server') ?? undefined;
-const tenant = scriptUrl.searchParams.get('tenant') ?? undefined;
+const requestedTenant = scriptUrl.searchParams.get('tenant') ?? undefined;
+
+// Sticky per-tab connection naming: unlike cookies/localStorage,
+// sessionStorage is scoped per (origin, tab) - not shared across other tabs
+// open to the SAME origin/URL, but preserved across reloads of THIS tab. On
+// a fresh tab we request `requestedTenant` as-is; the server may resolve a
+// root connection's collision to a suffixed name (e.g. "bulletino-ideas" ->
+// "bulletino-ideas3" if other tabs already hold lower suffixes - see
+// reserveRootName in mcp-tenant-lib/tenant.ts). Previously every reload
+// re-requested the original desired name and re-entered that live collision
+// race from scratch, so the SAME tab could land on a different suffix each
+// reload depending on which other tabs happened to be connected at that
+// instant. Persisting the resolved name and requesting THAT on the next
+// connect makes a tab keep its suffix for its whole lifetime (fresh tabs,
+// and tabs opened before this change ran once, still race normally).
+//
+// Keyed by the originally-requested tenant (not a fixed key) so a page that
+// switches channel (onMove/changeChannel) or a snippet embedded on multiple
+// distinct pages of the same origin each get their own sticky slot.
+const STICKY_NAME_KEY = requestedTenant ? `__mcp_resolved_tenant__:${requestedTenant}` : undefined;
+function readStickyName(): string | undefined {
+  if (!STICKY_NAME_KEY) return undefined;
+  try {
+    return sessionStorage.getItem(STICKY_NAME_KEY) ?? undefined;
+  } catch {
+    return undefined; // sessionStorage unavailable (private mode, sandboxed iframe, ...) - fall back to requestedTenant
+  }
+}
+function writeStickyName(name: string): void {
+  if (!STICKY_NAME_KEY) return;
+  try {
+    sessionStorage.setItem(STICKY_NAME_KEY, name);
+  } catch {
+    // best-effort only
+  }
+}
+const tenant = readStickyName() ?? requestedTenant;
 
 // tool-bus.js is optional, host-page-loaded infrastructure by design (see
 // its own header comment) - a page that never imports it simply has no
@@ -127,6 +163,9 @@ const socket = connectStateSocket<undefined, undefined>(
       const label = labelForFirstRegister();
       console.log(`[js-bridge-mcp] connected as "${label ?? '(unlabeled)'}"`);
       socket.send({ type: 'register_tools', tools: manifest, summary: pageSummary, appLabel: label });
+    },
+    onResolvedName(name) {
+      writeStickyName(name);
     },
     async onCall(id, name, args) {
       try {

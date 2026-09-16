@@ -98,6 +98,17 @@ export interface StateSocketHandlers<TSchema, TValues> {
   onCall?(id: string, name: string, args: unknown): void;
   onConnect?(): void;
   onDisconnect?(): void;
+  /**
+   * The connection name the server actually landed on for this socket — for
+   * a root connection this is post-collision (e.g. a requested "bulletino-ideas"
+   * can resolve to "bulletino-ideas3" if other tabs already hold lower
+   * suffixes; see reserveRootName in tenant.ts). Fired once per successful
+   * connect, from the 'init' message. Callers that want a stable per-tab
+   * name across reloads should persist this and request it back as the
+   * `tenant` on their next connect, rather than re-requesting the original
+   * desired name and re-entering the live collision race each time.
+   */
+  onResolvedName?(name: string): void;
   /** Server-pushed "identify yourself" signal (see identify_connection tool). Defaults to a window.alert(). */
   onIdentify?(label: string | undefined): void;
   /**
@@ -205,7 +216,10 @@ export function connectStateSocket<TSchema, TValues>(
     };
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data) as ServerMessage<TSchema, TValues>;
-      if (msg.type === 'init') handlers.onInit?.(msg.schema, msg.state);
+      if (msg.type === 'init') {
+        handlers.onInit?.(msg.schema, msg.state);
+        handlers.onResolvedName?.(msg.resolvedName);
+      }
       if (msg.type === 'reinit') handlers.onReinit?.(msg.schema, msg.state);
       if (msg.type === 'update') handlers.onUpdate?.(msg.field, msg.value);
       if (msg.type === 'call') handlers.onCall?.(msg.id, msg.name, msg.args);

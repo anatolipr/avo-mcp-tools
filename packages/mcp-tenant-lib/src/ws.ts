@@ -156,7 +156,12 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
       if (state) state.isAlive = true;
     });
 
-    ws.send(JSON.stringify({ type: 'init', schema: t.schema, state: t.store.snapshot(), waiting: t.waiting, submitted: t.submitted, recreated }));
+    // For a root connection, the name that matters for a client to remember
+    // is the TENANT's resolved name (t.displayName, e.g. "bulletino-ideas3"
+    // after reserveRootName's collision loop) — resolvedName above is only
+    // the per-CONNECTION name inside a channel's own connections map, which
+    // is a different collision domain (see registerConnection).
+    ws.send(JSON.stringify({ type: 'init', schema: t.schema, state: t.store.snapshot(), waiting: t.waiting, submitted: t.submitted, recreated, resolvedName: channelPart !== undefined ? resolvedName : t.displayName }));
 
     ws.on('message', (raw) => {
       t.touch();
