@@ -761,9 +761,25 @@ function getOrCreateTenant<TSchema, TValues>(id: string, initialSchema: TSchema,
  * connection Tenant (see ROOT_PREFIX), so "two root connections want the
  * same name" is a collision on the `root:<name>` tenant id itself, checked
  * here rather than inside any one Tenant's `connections` map.
+ *
+ * "Taken" means a root tenant exists AND still has a live connection — an
+ * EMPTY root tenant (connections.size === 0, its previous socket already
+ * closed) is free to reclaim under the same name rather than forcing a
+ * fresh suffix. Without this, a page reload's new socket reliably lost the
+ * race against its own OLD socket's close event (WS 'close' -> removeConnection
+ * is async, see ws.ts) — the old, about-to-be-disposed tenant was still in
+ * `tenants` at the instant the new socket connected, so a client trying to
+ * stay on its sticky name (see js-bridge-mcp's main.ts sessionStorage cache)
+ * got bounced to a NEW suffix on every single reload, compounding
+ * ("bulletino-ideas3" -> "bulletino-ideas32" -> "bulletino-ideas322", ...)
+ * since each reload's resolved name became the next reload's colliding
+ * "desired" name.
  */
 function reserveRootName(desired: string): string {
-  return nextAvailableName(desired, (candidate) => tenants.has(`${ROOT_PREFIX}${candidate}`));
+  return nextAvailableName(desired, (candidate) => {
+    const tenant = tenants.get(`${ROOT_PREFIX}${candidate}`);
+    return !!tenant && tenant.connections.size > 0;
+  });
 }
 
 /** Read-only lookup of one root connection's Tenant by its (unprefixed) name — the only place besides getOrCreateRootTenant that should construct a `root:`-prefixed key. */
@@ -773,13 +789,16 @@ function getRootTenant(name: string): Tenant<any, any> | undefined {
 
 /**
  * Gets-or-creates the root tenant for `desiredName`, resolving a collision
- * with an already-live root connection via reserveRootName first — i.e. the
+ * with an already-LIVE root connection via reserveRootName first — i.e. the
  * root-connection equivalent of getOrCreateTenant, folding in name
- * reservation since (unlike a channel, which is deliberately reused when an
- * agent rejoins the same name) two independent root connections asking for
- * the same name are never meant to become the same Tenant. Returns both the
+ * reservation since two independent, currently-connected root connections
+ * are never meant to become the same Tenant. An EMPTY root tenant under
+ * `desiredName` (previous socket already closed — see reserveRootName's own
+ * doc comment) IS reused here, same as a named channel reconnecting under
+ * its existing id — getOrCreateTenant below finds and returns the existing
+ * (empty) Tenant object rather than minting a new one. Returns both the
  * created/existing Tenant and the name it actually landed on (which may
- * differ from `desiredName` on collision).
+ * differ from `desiredName` on collision with a still-live root connection).
  */
 function getOrCreateRootTenant<TSchema, TValues>(desiredName: string, initialSchema: TSchema, initialValues: TValues): { tenant: Tenant<TSchema, TValues>; name: string } {
   const name = reserveRootName(desiredName);
