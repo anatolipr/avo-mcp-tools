@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+// Shorthand: `mcp-memory-bucket cloud` (or dev/off) is equivalent to
+// `mcp-memory-bucket --folderfoo-mode cloud` — lets people skip the flag name.
+if (['off', 'dev', 'cloud'].includes(process.argv[2])) {
+  process.argv.splice(2, 1, '--folderfoo-mode', process.argv[2]);
+}
+
 if (process.argv[2] === 'stop') {
   const { execSync } = await import('node:child_process');
   const port = process.env.PORT || 8767;
