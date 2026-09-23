@@ -650,9 +650,11 @@ export class SkillRepository {
   ): Promise<SkillDoc> {
     const existing = await this.get(name, folder);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
-    // `paused` is local-cache-only and must never reach writeMarkdownFile — split it off of
-    // `existing` before spreading the rest into the frontmatter that gets written to disk.
-    const { paused: existingPaused, ...existingForFile } = existing;
+    // `paused` is local-cache-only and `body` is written separately as the markdown body, not
+    // frontmatter — both must be split off of `existing` before spreading the rest into
+    // `merged`, or they'd ride along into the SkillFrontmatter written to disk (duplicating the
+    // body inside its own frontmatter as a `body:` key).
+    const { paused: existingPaused, body: _existingBody, ...existingForFile } = existing;
 
     // Builtin skills (e.g. memory-bucket-authoring) are the server's own always-present
     // documentation, not user content — deprecating them would hide guidance every session needs.
@@ -711,7 +713,9 @@ export class SkillRepository {
 
     // Rename changes the skill's id, so it becomes a fresh cache row — paused (local-only,
     // keyed by id) does not carry over, same as it wouldn't survive deleting the cache file.
-    const { paused: _existingPaused, ...existingForFile } = existing;
+    // `body` is split off too, for the same reason as in update() — it must not ride along into
+    // the SkillFrontmatter written to disk.
+    const { paused: _existingPaused, body: _existingBody, ...existingForFile } = existing;
     const merged: SkillFrontmatter = { ...existingForFile, name: newName };
     const fileContents = formatMarkdownFile(stripSourcePath(merged), existing.body);
 

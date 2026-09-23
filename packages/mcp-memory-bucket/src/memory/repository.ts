@@ -725,9 +725,11 @@ export class MemoryRepository {
   async update(folder: string | undefined, filename: string, frontmatter?: Partial<MemoryFrontmatter>, body?: string, bodyEdits?: BodyEdit[]): Promise<MemoryDoc> {
     const existing = await this.get(folder, filename);
     if (!existing) throw new Error(`memory doc "${filename}" not found`);
-    // `paused` is local-cache-only and must never reach writeMarkdownFile — split it off of
-    // `existing` before spreading the rest into the frontmatter that gets written to disk.
-    const { paused: existingPaused, ...existingForFile } = existing;
+    // `paused` is local-cache-only and `body` is written separately as the markdown body, not
+    // frontmatter — both must be split off of `existing` before spreading the rest into
+    // `merged`, or they'd ride along into the MemoryFrontmatter written to disk (duplicating the
+    // body inside its own frontmatter as a `body:` key).
+    const { paused: existingPaused, body: _existingBody, ...existingForFile } = existing;
 
     const merged: MemoryFrontmatter = {
       ...existingForFile,
