@@ -23,11 +23,11 @@ function notifyDashboard() {
 /**
  * How long Tenant.call waits for some connection to reappear on a tenant
  * before giving up, when the connection it was targeting has already
- * vanished (see Tenant.call). Set comfortably above the client's 2s
- * reconnect retry (client-bridge.ts) so a single dropped-then-reconnected
- * socket doesn't surface as a failed call.
+ * vanished (see Tenant.call). Set comfortably above the client's 10s
+ * reconnect retry (RECONNECT_INTERVAL_MS in client-bridge.ts) so a single
+ * dropped-then-reconnected socket doesn't surface as a failed call.
  */
-const RECONNECT_GRACE_MS = 4_000;
+const RECONNECT_GRACE_MS = 15_000;
 
 /** Cap on Tenant.recentToolRegistrations — a rolling log, not a full history. */
 const RECENT_REGISTRATIONS_LIMIT = 50;
