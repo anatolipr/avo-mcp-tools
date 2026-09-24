@@ -18,8 +18,14 @@ function paramSpecToZod(spec: ToolParamSpec): z.ZodTypeAny {
     case 'string': schema = z.string(); break;
     case 'number': schema = z.number(); break;
     case 'boolean': schema = z.boolean(); break;
-    case 'array': schema = z.array(paramSpecToZod(spec.items)); break;
-    case 'object': schema = z.object(paramsToZodShape(spec.properties)); break;
+    case 'array':
+      if (!spec.items) throw new UnsupportedParamTypeError('array param spec missing "items"');
+      schema = z.array(paramSpecToZod(spec.items));
+      break;
+    case 'object':
+      if (!spec.properties || typeof spec.properties !== 'object') throw new UnsupportedParamTypeError('object param spec missing "properties"');
+      schema = z.object(paramsToZodShape(spec.properties));
+      break;
     default: throw new UnsupportedParamTypeError(`unsupported param type "${(spec as any).type}" (supported: string, number, boolean, array, object)`);
   }
   if (spec.description) schema = schema.describe(spec.description);
