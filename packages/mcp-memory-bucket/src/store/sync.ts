@@ -259,10 +259,46 @@ export function upsertFile<TFrontmatter>(
     .join(', ');
   const conflictTarget = scopedById ? 'folder, id' : 'source_path';
 
-  db.prepare(
-    `INSERT INTO ${spec.table} (${cols.join(', ')}) VALUES (${placeholders})
+  const insert = () =>
+    db
+      .prepare(
+        `INSERT INTO ${spec.table} (${cols.join(', ')}) VALUES (${placeholders})
      ON CONFLICT(${conflictTarget}) DO UPDATE SET ${updateClause}`
-  ).run(...values);
+      )
+      .run(...values);
+
+  try {
+    insert();
+  } catch (err) {
+    // Belt-and-suspenders: the collision guards above are pre-checks against a fresh SELECT, and
+    // can still miss a stale row above (e.g. a source_path left over from before a folder/root
+    // rename, or a filesystem case-sensitivity mismatch between the path stored earlier and the
+    // one passed in now) — in which case the plain INSERT itself throws the raw SQLITE_CONSTRAINT
+    // error, which used to propagate straight out of upsertFile and abort the entire remote
+    // resync/poll tick for every OTHER file too (see the "initial remote skill resync failed"
+    // crash report this was added for). Self-heal instead: whatever row is squatting on this
+    // conflict target, evict it (same as a real delete would) and retry the insert once. If it
+    // still fails after that, log and skip this one file rather than taking the whole sync down.
+    if (err instanceof Error && 'code' in err && (err as { code: string }).code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      const staleSourcePath = scopedById
+        ? (db.prepare(`SELECT source_path FROM ${spec.table} WHERE folder = ? AND id = ?`).get(folder, id) as
+            | { source_path: string }
+            | undefined)?.source_path
+        : filePath;
+      if (staleSourcePath) removeFile(db, spec.table, staleSourcePath);
+      try {
+        insert();
+        console.error(
+          `[memory-bucket] recovered from a stale ${spec.table} row blocking ${filePath} (evicted ${staleSourcePath}) — re-indexed successfully`
+        );
+      } catch (retryErr) {
+        console.error(`[memory-bucket] SKIPPED indexing ${filePath}: unresolvable ${spec.table} conflict — ${(retryErr as Error).message}`);
+        return;
+      }
+    } else {
+      throw err;
+    }
+  }
 
   // ref_folder scopes these two tables' delete-then-reinsert the same way the skills upsert above
   // does: two skills in different folders can now legitimately share an `id`, so ref_id alone is
