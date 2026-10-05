@@ -20,7 +20,7 @@ function tmpDir(prefix: string): string {
 // mocking approach folderfoo-client.test.ts already uses.
 function mockFolderfoo(state: {
   lastChanged: number;
-  files: Array<{ name: string; folderPath: string; mtime: number; content: string }>;
+  files: Array<{ name: string; folderPath: string; mtime: number; content: string | Buffer }>;
 }) {
   const calls: string[] = [];
   return async (url: string) => {
@@ -37,7 +37,7 @@ function mockFolderfoo(state: {
     if (url.includes('/data/')) {
       // ":folderPath:name" or bare "name" - find by matching the tail
       const found = state.files.find((f) => url.endsWith(`:${f.name}`) || url.endsWith(`/${f.name}`));
-      return { ok: true, status: 200, text: async () => found?.content ?? '' } as Response;
+      return new Response(found?.content ?? '');
     }
     throw new Error(`unexpected mocked fetch call: ${url}`);
   };
@@ -46,6 +46,41 @@ function mockFolderfoo(state: {
 function makeFolder(mirrorDir: string): RemoteFolder {
   return { name: 'team-qa', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'plans', mirrorDir, mode: 'dev', username: 'testuser' };
 }
+
+test('pollOne: preserves binary attachment bytes on initial pull and forced resync', async (t) => {
+  const credsDir = tmpDir('mb-remote-sync-creds-');
+  const mirrorDir = tmpDir('mb-remote-sync-mirror-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const spec = memorySyncSpec([{ name: 'team-qa', path: mirrorDir }]);
+  const folder = makeFolder(mirrorDir);
+  const imageBytes = Buffer.concat([
+    Buffer.from('89504e470d0a1a0a', 'hex'),
+    Buffer.from(Array.from({ length: 256 }, (_, index) => index)),
+  ]);
+  const mirrorFile = path.join(mirrorDir, 'notes', 'attachments', 'figma', 'overview.png');
+
+  t.mock.method(globalThis, 'fetch', mockFolderfoo({
+    lastChanged: 100,
+    files: [
+      { name: 'notes.md', folderPath: 'plans', mtime: 100, content: '---\nkey: notes\ndescription: Notes\n---\nbody' },
+      { name: 'overview.png', folderPath: 'plans/notes/attachments/figma', mtime: 100, content: imageBytes },
+    ],
+  }));
+
+  try {
+    await pollOne(db, spec, folder, credsDir);
+    assert.deepEqual(fs.readFileSync(mirrorFile), imageBytes);
+
+    fs.writeFileSync(mirrorFile, Buffer.from(imageBytes.toString('utf8')));
+    await pollOne(db, spec, folder, credsDir, { force: true });
+    assert.deepEqual(fs.readFileSync(mirrorFile), imageBytes);
+  } finally {
+    db.close();
+    fs.rmSync(credsDir, { recursive: true, force: true });
+    fs.rmSync(mirrorDir, { recursive: true, force: true });
+  }
+});
 
 test('pollOne: skips the listing call entirely when last-changed has not moved past the local watermark', async (t) => {
   const credsDir = tmpDir('mb-remote-sync-creds-');

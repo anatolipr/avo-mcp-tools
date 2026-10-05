@@ -4,7 +4,7 @@ import type Database from 'better-sqlite3';
 import type { TableSyncSpec } from '../store/sync.js';
 import { upsertFile, removeFile, walkMarkdownFiles, walkAttachmentFiles, walkSkillSiblingFiles } from '../store/sync.js';
 import type { RemoteFolder } from '../config.js';
-import { getLastChanged, getChangedSince, readFile, FolderfooAuthError } from './folderfoo-client.js';
+import { getLastChanged, getChangedSince, readFile, readBinaryFile, FolderfooAuthError } from './folderfoo-client.js';
 import { isUnderAttachmentsDir } from '../attachments/storage.js';
 
 // Fixed for every remote source in v1 - no per-source tuning knob, per the
@@ -217,7 +217,6 @@ async function pullFile<TFrontmatter>(
   // correct value to pass straight through to readFile (folderfoo expects
   // that same absolute form for GET /data/:filename), but it must be
   // converted to mirror-relative before joining onto folder.mirrorDir.
-  const content = await readFile(folder.server, credentialsBaseDir, folder.tenantId, changedFile.folderPath, changedFile.name, folder.owner);
   const mirrorRelativeDir = toMirrorRelativeDir(folder.folderPath, changedFile.folderPath);
   // spec.remoteFilename.toLocal exists to translate a DOC's own remote name (a skill's fixed
   // "SKILL" -> "SKILL.md", or a memory doc's legacy extensionless remote name -> "<name>.md") - it
@@ -228,6 +227,7 @@ async function pullFile<TFrontmatter>(
   // comparison then saw as absent remotely and deleted on the very same poll - so a directory/file
   // attachment synced down to a second machine, then vanished before its resync even finished.
   const isAttachment = isUnderAttachmentsDir(mirrorRelativeDir);
+  const content = await (isAttachment ? readBinaryFile : readFile)(folder.server, credentialsBaseDir, folder.tenantId, changedFile.folderPath, changedFile.name, folder.owner);
   const localFilename = isAttachment ? changedFile.name : spec.remoteFilename.toLocal(changedFile.name);
   const relPath = mirrorRelativeDir ? path.join(mirrorRelativeDir, localFilename) : localFilename;
   const mirrorPath = path.join(folder.mirrorDir, relPath);

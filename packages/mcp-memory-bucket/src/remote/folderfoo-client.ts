@@ -387,6 +387,15 @@ export async function readFile(server: string, baseDir: string, tenantId: string
   );
 }
 
+export async function readBinaryFile(server: string, baseDir: string, tenantId: string, folderPath: string, name: string, owner?: string): Promise<Buffer> {
+  return withAuth(
+    server,
+    baseDir,
+    (jwt) => fetch(`${server}/data/${filenameParam(folderPath, name, owner)}`, { headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId } }),
+    async (res) => Buffer.from(await res.arrayBuffer())
+  );
+}
+
 /**
  * Writes one file's raw content via POST /save/:filename. `owner`, when passed, writes into
  * someone ELSE's directory via a direct-username share (see filenameParam's own comment) — this is
