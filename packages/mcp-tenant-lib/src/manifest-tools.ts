@@ -341,9 +341,11 @@ export function createManifestToolRegistry<TSchema, TValues>(
         const t = tenant();
         const targetId = id ?? [...t.connections.keys()][0];
         if (!targetId) return { content: [{ type: 'text', text: 'No live connection on this channel to register a tool on.' }], isError: true };
+        const owner = mergedConnections(t).find(({ conn }) => conn.id === targetId)?.owner;
+        if (!owner) return { content: [{ type: 'text', text: `Connection "${targetId}" is no longer connected.` }], isError: true };
         try {
-          const result = await t.call(targetId, REMOTE_REGISTER_BY_PATH_CALL, { name, description, path, params: paramsArgToRecord(params) });
-          t.logToolRegistration(name, description);
+          const result = await owner.call(targetId, REMOTE_REGISTER_BY_PATH_CALL, { name, description, path, params: paramsArgToRecord(params) });
+          owner.logToolRegistration(name, description);
           return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
         } catch (err) {
           return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };
@@ -384,13 +386,15 @@ export function createManifestToolRegistry<TSchema, TValues>(
         const t = tenant();
         const targetId = id ?? [...t.connections.keys()][0];
         if (!targetId) return { content: [{ type: 'text', text: 'No live connection on this channel to register a tool on.' }], isError: true };
+        const owner = mergedConnections(t).find(({ conn }) => conn.id === targetId)?.owner;
+        if (!owner) return { content: [{ type: 'text', text: `Connection "${targetId}" is no longer connected.` }], isError: true };
         try {
           // Registers immediately against the bridged page, no human gate —
           // logToolRegistration below is purely informational: it surfaces
           // a sticky toast on the dashboard's SSE stream so a human can see
           // what was registered after the fact, same as a build log.
-          const result = await t.call(targetId, REMOTE_REGISTER_BY_CODE_CALL, { name, description, code, params: paramsArgToRecord(params) });
-          t.logToolRegistration(name, description, code);
+          const result = await owner.call(targetId, REMOTE_REGISTER_BY_CODE_CALL, { name, description, code, params: paramsArgToRecord(params) });
+          owner.logToolRegistration(name, description, code);
           return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
         } catch (err) {
           return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };
@@ -421,8 +425,10 @@ export function createManifestToolRegistry<TSchema, TValues>(
         const t = tenant();
         const targetId = id ?? [...t.connections.keys()][0];
         if (!targetId) return { content: [{ type: 'text', text: 'No live connection on this channel to unregister a tool from.' }], isError: true };
+        const owner = mergedConnections(t).find(({ conn }) => conn.id === targetId)?.owner;
+        if (!owner) return { content: [{ type: 'text', text: `Connection "${targetId}" is no longer connected.` }], isError: true };
         try {
-          const result = await t.call(targetId, REMOTE_UNREGISTER_CALL, { toolName });
+          const result = await owner.call(targetId, REMOTE_UNREGISTER_CALL, { toolName });
           return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
         } catch (err) {
           return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };

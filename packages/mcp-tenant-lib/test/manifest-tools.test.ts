@@ -179,6 +179,41 @@ test('describe_tools returns a connections[] entry with the page summary and a c
   assert.ok(payload.connections[0].tools.some((e: any) => e.name === 'a__insert_title'));
 });
 
+for (const scenario of [
+  { tool: 'register_page_tool_by_code', reserved: '__register_tool_by_code__', args: { name: 'read_input', description: 'reads input', code: 'return 1;' }, logged: 1 },
+  { tool: 'register_page_tool_by_path', reserved: '__register_tool_by_path__', args: { name: 'read_input', description: 'reads input', path: 'readInput' }, logged: 1 },
+  { tool: 'unregister_page_tool', reserved: '__unregister_tool__', args: { toolName: 'read_input' }, logged: 0 },
+]) {
+test(`${scenario.tool} targets the owning root tenant and logs there`, async () => {
+  const session = new Tenant('registration-session', undefined, {});
+  const root = new Tenant('root:registration-page', undefined, {});
+  session.registerConnection('session-connection', fakeSocket((message) => {
+    if (message.type === 'call') session.resolveCall(message.id, 'wrong connection');
+  }), 'session');
+  root.registerConnection('root-connection', fakeSocket((message) => {
+    if (message.type === 'call') {
+      assert.equal(message.name, scenario.reserved);
+      root.resolveCall(message.id, 'registered on root');
+    }
+  }), 'registration-page');
+  tenants.set(root.id, root);
+  const registry = createManifestToolRegistry(new McpServer({ name: 'test', version: '0.0.1' }), () => session);
+  try {
+    registry.sync();
+    const result: any = await (registry.handles.get(scenario.tool) as any).handler({
+      id: 'root-connection', ...scenario.args,
+    }, {});
+    assert.equal(result.isError, undefined);
+    assert.equal(result.content[0].text, 'registered on root');
+    assert.equal(root.recentToolRegistrations.length, scenario.logged);
+    assert.equal(session.recentToolRegistrations.length, 0);
+  } finally {
+    registry.dispose();
+    tenants.delete(root.id);
+  }
+});
+}
+
 test('WS "register_tools" message updates the tenant manifest; "call_result" resolves a pending call', async () => {
   const port = 18901;
   const httpServer = createHttpServer({
