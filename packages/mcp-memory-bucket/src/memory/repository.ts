@@ -16,6 +16,7 @@ import { normalizeKey } from '../types.js';
 import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, renameFile as renameRemoteFile, trashFile as trashRemoteFile, joinRemoteFolderPath, assertRemoteFolderExists, FolderfooRequestError } from '../remote/folderfoo-client.js';
 import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 import { writeRemoteThenLocal } from '../remote/write-order.js';
+import { isSharedFolderName, sharedItemReadOnlyError } from '../remote/shared-items.js';
 import type { MemoryDoc, MemoryDocType, MemoryFrontmatter, MemoryKeyType, MemoryStatus } from '../types.js';
 
 /** Uppercases and strips everything but letters/digits — used to compare keys that differ only in
@@ -161,7 +162,12 @@ export class MemoryRepository {
         if (!best || folderPath.length > path.resolve(best.path).length) best = folder;
       }
     }
-    if (!best) return undefined;
+    if (!best) {
+      // An item-level share's mirror lives outside every configured folder — it is addressed by
+      // the folder its cache row is filed under instead (see get()).
+      const shared = this.db.prepare(`SELECT folder FROM memory_docs WHERE source_path = ?`).get(sourcePath) as { folder: string } | undefined;
+      return shared && isSharedFolderName(shared.folder) ? { folder: shared.folder, filename: path.basename(sourcePath) } : undefined;
+    }
     return { folder: best.name, filename: path.relative(path.resolve(best.path), resolved) };
   }
 
@@ -483,10 +489,7 @@ export class MemoryRepository {
 
     try {
       // shared_items is LEFT JOINed on m.source_path (== mirror_path for an item-level share —
-      // see remote/shared-items.ts) to surface owner/role on any hit that came from a share, since
-      // a shared item's own `folder` column is always '' (its mirror path is outside every
-      // configured source directory, so folderForFile can't attribute it to one) and would
-      // otherwise look identical to any other unfoldered local doc.
+      // see remote/shared-items.ts) to surface owner/role on any hit that came from a share.
       const rows = this.db
         .prepare(
           `SELECT m.source_path, m.key, m.description, m.doc_type, m.folder,
@@ -531,6 +534,14 @@ export class MemoryRepository {
    * because the last poll tick hasn't run yet.
    */
   async get(folder: string | undefined, filename: string): Promise<MemoryDoc | null> {
+    // A shared item has no configured folder to resolve a path against — match it by filename
+    // among the rows filed under its shared folder. Its mirror is the only copy this side has.
+    if (isSharedFolderName(folder)) {
+      const wanted = MemoryRepository.normalizeFilename(filename);
+      const rows = this.db.prepare(`SELECT * FROM memory_docs WHERE folder = ?`).all(folder) as MemoryRow[];
+      const shared = rows.find((r) => path.basename(r.source_path) === wanted);
+      return shared ? rowToDoc(shared) : null;
+    }
     const sourcePath = this.sourcePathFor(folder, filename);
     const row = this.db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(sourcePath) as MemoryRow | undefined;
     if (!row) return null;
@@ -725,6 +736,7 @@ export class MemoryRepository {
   async update(folder: string | undefined, filename: string, frontmatter?: Partial<MemoryFrontmatter>, body?: string, bodyEdits?: BodyEdit[]): Promise<MemoryDoc> {
     const existing = await this.get(folder, filename);
     if (!existing) throw new Error(`memory doc "${filename}" not found`);
+    if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(filename);
     // `paused` is local-cache-only and `body` is written separately as the markdown body, not
     // frontmatter — both must be split off of `existing` before spreading the rest into
     // `merged`, or they'd ride along into the MemoryFrontmatter written to disk (duplicating the
@@ -823,6 +835,7 @@ export class MemoryRepository {
   async delete(folder: string | undefined, filename: string): Promise<void> {
     const existing = await this.get(folder, filename);
     if (!existing) throw new Error(`memory doc "${filename}" not found`);
+    if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(filename);
     // Archive the remote copy FIRST, before touching anything local — otherwise a deleted-locally-
     // but-still-present-remotely doc gets silently pulled right back in on the next poll (exactly
     // the "deleted doc reappears" bug this fixes). Soft-delete (trash), not a hard remote delete —
@@ -859,6 +872,7 @@ export class MemoryRepository {
   async rename(folder: string | undefined, filename: string, newFilename: string): Promise<MemoryDoc> {
     const existing = await this.get(folder, filename);
     if (!existing) throw new Error(`memory doc "${filename}" not found`);
+    if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(filename);
     const normalizedNew = MemoryRepository.normalizeFilename(newFilename);
     const newPath = path.join(path.dirname(existing.source_path), normalizedNew);
     if (newPath === existing.source_path) return existing;
@@ -914,6 +928,7 @@ export class MemoryRepository {
   async stripFrontmatter(folder: string | undefined, filename: string): Promise<void> {
     const existing = await this.get(folder, filename);
     if (!existing) throw new Error(`memory doc "${filename}" not found`);
+    if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(filename);
     writeMarkdownFile(existing.source_path, {}, existing.body);
     upsertFile(this.db, this.syncSpec, existing.source_path);
   }

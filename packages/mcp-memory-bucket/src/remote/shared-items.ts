@@ -1,7 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
-import { getSharedWithMe, readFile, joinRemoteFolderPath, type SharedWithMeEntry } from './folderfoo-client.js';
+import {
+  getSharedWithMe,
+  readFile,
+  fetchPublicLink,
+  joinRemoteFolderPath,
+  FolderfooAuthError,
+  FolderfooRequestError,
+  type SharedWithMeEntry,
+} from './folderfoo-client.js';
 import { upsertFile, removeFile, type TableSyncSpec } from '../store/sync.js';
 import { sanitizeFolderName, type RemoteFolder } from '../config.js';
 import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
@@ -15,9 +23,35 @@ import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
  * mirrorDirFor nests remote folders under {mode}_{username}, so items from
  * two different folderfoo deployments/tenants never collide on disk.
  */
+export function sharedItemsMirrorRoot(baseDir: string): string {
+  return path.join(baseDir, '.memory-bucket-shared-items');
+}
+
 export function sharedItemsMirrorDir(baseDir: string, server: string, tenantId: string): string {
   const serverSegment = sanitizeFolderName(server.replace(/^https?:\/\//, ''));
-  return path.join(baseDir, '.memory-bucket-shared-items', serverSegment, sanitizeFolderName(tenantId));
+  return path.join(sharedItemsMirrorRoot(baseDir), serverSegment, sanitizeFolderName(tenantId));
+}
+
+/**
+ * The `folder` a shared item's cache row is filed under. A shared item lives outside every
+ * configured source directory, so without this every one of them landed in folder '' — where two
+ * shared skills with the same name collide on the (folder, id) key and the second is never indexed,
+ * and where nothing could tell a shared row from an ordinary one. The prefix is also what the
+ * repositories key their read-only guard on (see isSharedFolderName).
+ */
+const SHARED_FOLDER_PREFIX = 'shared-by-';
+
+export function sharedFolderName(owner: string): string {
+  return `${SHARED_FOLDER_PREFIX}${sanitizeFolderName(owner) || 'unknown'}`;
+}
+
+export function isSharedFolderName(folderName: string | undefined): boolean {
+  return !!folderName && folderName.startsWith(SHARED_FOLDER_PREFIX);
+}
+
+/** Thrown by a repository write against a doc that is someone else's shared item. */
+export function sharedItemReadOnlyError(name: string): Error {
+  return new Error(`"${name}" is shared with you and read-only here — copy it into your own folder with bucket_fork_shared_item (or "Fork to mine" in the web UI) to edit it`);
 }
 
 interface SharedItemRow {
@@ -32,45 +66,102 @@ interface SharedItemRow {
   last_seen_modified_at: string | null;
   status: 'active' | 'revoked';
   added_at: string;
+  username: string;
+  public_token: string | null;
+}
+
+type Specs = { skill: TableSyncSpec<SkillFrontmatter>; memory: TableSyncSpec<MemoryFrontmatter> };
+
+// origin_id becomes a directory name under the mirror root (and that directory is removed
+// recursively on revoke), so it must be exactly the uuid folderfoo mints — never a path fragment.
+const ORIGIN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A row belongs to `username` when it was granted to that login, or isn't login-scoped at all (public link / legacy row). */
+function isVisibleTo(row: Pick<SharedItemRow, 'username'>, username: string | null): boolean {
+  return row.username === '' || row.username === username;
+}
+
+function indexMirror(db: Database.Database, specs: Specs, row: Pick<SharedItemRow, 'kind' | 'owner' | 'mirror_path'>): void {
+  const folder = sharedFolderName(row.owner);
+  const table = row.kind === 'skill' ? 'skills' : 'memory_docs';
+  // upsertFile skips a file whose mtime it has already seen, so a row filed under a different
+  // folder (e.g. '' from before shared items had their own) would otherwise keep it forever.
+  const existing = db.prepare(`SELECT folder FROM ${table} WHERE source_path = ?`).get(row.mirror_path) as { folder: string } | undefined;
+  if (existing && existing.folder !== folder) removeFile(db, table, row.mirror_path);
+  // Branched (not a single `const spec = kind === 'skill' ? ... : ...`) because upsertFile<T> is
+  // generic over TFrontmatter and the ternary's union type satisfies neither call signature.
+  if (row.kind === 'skill') upsertFile(db, specs.skill, row.mirror_path, folder);
+  else upsertFile(db, specs.memory, row.mirror_path, folder);
+}
+
+function removeMirror(db: Database.Database, baseDir: string, row: Pick<SharedItemRow, 'kind' | 'mirror_path'>): void {
+  removeFile(db, row.kind === 'skill' ? 'skills' : 'memory_docs', row.mirror_path);
+  const dir = path.resolve(path.dirname(row.mirror_path));
+  const root = path.resolve(sharedItemsMirrorRoot(baseDir));
+  if (dir.startsWith(root + path.sep)) fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function publicContentToMarkdown(content: unknown): string {
+  return typeof content === 'string' ? content : JSON.stringify(content, null, 2);
 }
 
 /**
- * Registers a newly-accepted share (from the share-link accept flow, or a
- * direct username share the user just picked up) into shared_items and pulls
- * its content immediately — this one fetch is the explicit act of accepting
- * a share, not a background resync, so it doesn't violate "refresh is a
- * UI-only action" (see refreshSharedItems below, which IS that action).
- * Idempotent on origin_id: re-adding an already-tracked share just refreshes
- * its content once, e.g. if `addSharedItem` is called again by mistake, or
- * the item was previously revoked and got re-shared with the same origin.
+ * Registers a share into shared_items and pulls its content immediately. Called for an accepted
+ * share/public link (the explicit act of accepting — see routes.ts) and by refreshSharedItems for
+ * a direct share it just discovered. Idempotent on origin_id: re-adding an already-tracked share
+ * (or one previously revoked and re-shared) just refreshes it.
+ *
+ * `publicToken` marks a public-link item: it has no `shares` row on folderfoo, so its content can
+ * only be read back through the link itself (no login), never the owner-addressed read.
+ * `paused` files the item hidden from agent-facing list/search until the user unpauses it — used
+ * for a share nobody on this side explicitly accepted.
  */
 export async function addSharedItem(
   db: Database.Database,
   baseDir: string,
   skillSpec: TableSyncSpec<SkillFrontmatter>,
   memorySpec: TableSyncSpec<MemoryFrontmatter>,
-  entry: { owner: string; server: string; tenantId: string; path: string; originId: string; kind: 'memory' | 'skill'; role?: 'member' | 'editor' }
+  entry: {
+    owner: string;
+    server: string;
+    tenantId: string;
+    path: string;
+    originId: string;
+    kind: 'memory' | 'skill';
+    role?: 'member' | 'editor';
+    username?: string | null;
+    publicToken?: string;
+    modifiedAt?: string;
+    paused?: boolean;
+  }
 ): Promise<void> {
-  const role = entry.role ?? 'member';
+  if (!ORIGIN_ID_PATTERN.test(entry.originId)) throw new Error('invalid originId');
+  const role = entry.publicToken ? 'member' : (entry.role ?? 'member');
   const mirrorDir = sharedItemsMirrorDir(baseDir, entry.server, entry.tenantId);
-  const localFilename = entry.kind === 'skill' ? 'SKILL.md' : path.basename(entry.path);
+  const remoteName = path.basename(entry.path);
+  if (!remoteName || remoteName === '.' || remoteName === '..') throw new Error('invalid shared item path');
+  // A memory doc pushed before remote names kept their extension has none (see memorySyncSpec's
+  // remoteFilename.toLocal) — its mirror still needs one to be addressable by filename.
+  const localFilename = entry.kind === 'skill' ? 'SKILL.md' : remoteName.endsWith('.md') ? remoteName : `${remoteName}.md`;
   // One subdirectory per origin_id — a skill's SKILL.md needs its own parent
   // directory anyway (skill identity is (folder, id), i.e. the containing
   // directory's name), and giving every shared item (memory or skill) the
   // same shape keeps this code path uniform instead of branching on kind.
   const mirrorPath = path.join(mirrorDir, entry.originId, localFilename);
-  fs.mkdirSync(path.dirname(mirrorPath), { recursive: true });
 
-  const content = await readFile(entry.server, baseDir, entry.tenantId, dirname(entry.path), path.basename(entry.path), entry.owner);
+  const content = entry.publicToken
+    ? publicContentToMarkdown((await fetchPublicLink(entry.server, entry.publicToken)).content)
+    : await readFile(entry.server, baseDir, entry.tenantId, dirname(entry.path), remoteName, entry.owner);
+  fs.mkdirSync(path.dirname(mirrorPath), { recursive: true });
   fs.writeFileSync(mirrorPath, content);
 
-  const now = new Date().toISOString();
   db.prepare(
-    `INSERT INTO shared_items (origin_id, owner, server, tenant_id, kind, role, remote_path, mirror_path, last_seen_modified_at, status, added_at)
-     VALUES (@origin_id, @owner, @server, @tenant_id, @kind, @role, @remote_path, @mirror_path, @last_seen_modified_at, 'active', @added_at)
+    `INSERT INTO shared_items (origin_id, owner, server, tenant_id, kind, role, remote_path, mirror_path, last_seen_modified_at, status, added_at, username, public_token)
+     VALUES (@origin_id, @owner, @server, @tenant_id, @kind, @role, @remote_path, @mirror_path, @last_seen_modified_at, 'active', @added_at, @username, @public_token)
      ON CONFLICT(origin_id) DO UPDATE SET
        owner = excluded.owner, kind = excluded.kind, role = excluded.role, remote_path = excluded.remote_path,
-       mirror_path = excluded.mirror_path, last_seen_modified_at = excluded.last_seen_modified_at, status = 'active'`
+       mirror_path = excluded.mirror_path, last_seen_modified_at = excluded.last_seen_modified_at, status = 'active',
+       username = excluded.username, public_token = excluded.public_token`
   ).run({
     origin_id: entry.originId,
     owner: entry.owner,
@@ -80,16 +171,16 @@ export async function addSharedItem(
     role,
     remote_path: entry.path,
     mirror_path: mirrorPath,
-    last_seen_modified_at: null,
-    added_at: now,
+    last_seen_modified_at: entry.modifiedAt ?? null,
+    added_at: new Date().toISOString(),
+    username: entry.publicToken ? '' : (entry.username ?? ''),
+    public_token: entry.publicToken ?? null,
   });
 
-  // Branched (not a single `const spec = kind === 'skill' ? skillSpec : memorySpec`) because
-  // upsertFile<T> is generic over TFrontmatter — a ternary's inferred union type
-  // TableSyncSpec<SkillFrontmatter> | TableSyncSpec<MemoryFrontmatter> doesn't satisfy either
-  // single-generic call signature, even though each branch alone is perfectly type-safe.
-  if (entry.kind === 'skill') upsertFile(db, skillSpec, mirrorPath);
-  else upsertFile(db, memorySpec, mirrorPath);
+  indexMirror(db, { skill: skillSpec, memory: memorySpec }, { kind: entry.kind, owner: entry.owner, mirror_path: mirrorPath });
+  if (entry.paused) {
+    db.prepare(`UPDATE ${entry.kind === 'skill' ? 'skills' : 'memory_docs'} SET paused = 1 WHERE source_path = ?`).run(mirrorPath);
+  }
 }
 
 /** folderfoo's `path` field for a file is relative to the owner's root — everything but the last segment is its containing folder path. */
@@ -103,73 +194,95 @@ export interface RefreshSummary {
   updated: number;
   revoked: number;
   unchanged: number;
+  /** One message per server or item that could not be refreshed — an empty summary with errors is a failed refresh, not "nothing new". */
+  errors: string[];
+  /** True when folderfoo rejected the stored login; the caller owns telling IdentityTracker. */
+  authExpired: boolean;
 }
 
 /**
- * The ONLY place shared_items ever changes after the initial addSharedItem —
- * called from the web UI's recycle-icon button AND automatically once when
- * the "Shared with me" panel is opened (see mem-bucket-app.ts's #setView),
- * so a direct (non-link) share is discoverable without the user knowing to
- * click refresh first. Still no poller/timer while the panel stays closed —
- * this is "refresh on demand," not a background sync. Diffs
- * GET /shared-with-me (one call per distinct server+tenant the caller is
- * connected to via a remote folder — see `remoteFolders` below, NOT just the
- * servers/tenants already present in shared_items, so a share that never
- * went through the link-redeem flow at all — e.g. folderfoo's Share Manager
- * UI adding a username directly, or bucket_share_item — is still discovered
- * here, not only shares that started life as a link) against locally-tracked
- * origin_ids:
- *  - origin_id present live but NOT locally tracked → a new direct share
- *    (never accepted via a link, so addSharedItem never ran for it) — added
- *    via addSharedItem exactly as the accept route would.
- *  - origin_id missing from the response → the share was revoked (or the
- *    item deleted) — evict from the cache/search-index via removeFile and
- *    mark the row 'revoked' (kept for the UI's dismissible "no longer
- *    shared with you" row, not silently dropped — see routes.ts).
- *  - origin_id present with a newer modifiedAt → refetch content, rewrite
- *    the mirror file, re-run upsertFile (which auto-invalidates search_index
- *    for the new content).
- *  - origin_id present with an unchanged modifiedAt → left alone.
- * A rename on the owner's side is NOT distinguished from a content edit
- * here — both just mean "modifiedAt moved and remote_path may differ" — the
- * mirror_path is deliberately kept path-independent (path.join(mirrorDir,
- * originId, filename)) so a rename never needs a file move, only the
- * `remote_path` bookkeeping column changes.
+ * Brings shared_items in line with folderfoo for the CURRENT login — called from the web UI's
+ * recycle-icon button and once when the "Shared with me" panel opens. Still no poller/timer:
+ * this is "refresh on demand," not a background sync.
+ *
+ * Login-granted items: one GET /shared-with-me per server+tenant in `servers` (plus any already
+ * tracked), diffed by origin_id against the rows granted to `username`. Rows granted to a
+ * different login are never touched — the other login's shares are simply absent from this
+ * response, which is not a revocation.
+ *  - live but not tracked → a direct share nobody here accepted; added PAUSED, so content someone
+ *    else chose to push is not agent-visible until the user unpauses it.
+ *  - tracked but not live → revoked (or deleted); evicted from the cache and mirror, row kept as
+ *    'revoked' for the UI's dismissible "no longer shared with you" entry.
+ *  - newer modifiedAt, or the mirror file is gone → refetched and reindexed.
+ *  - otherwise only the bookkeeping columns (role, remote_path) are brought up to date — an
+ *    owner-side rename or role change does not move modifiedAt.
+ * The mirror path is origin_id-based, so a rename never needs a file move.
+ *
+ * Public-link items have no /shared-with-me entry; each is re-read through its own link.
  */
 export async function refreshSharedItems(
   db: Database.Database,
   baseDir: string,
   skillSpec: TableSyncSpec<SkillFrontmatter>,
   memorySpec: TableSyncSpec<MemoryFrontmatter>,
-  remoteFolders: Array<{ server: string; tenantId: string }>
+  servers: Array<{ server: string; tenantId: string }>,
+  username: string | null
 ): Promise<RefreshSummary> {
-  const summary: RefreshSummary = { added: 0, updated: 0, revoked: 0, unchanged: 0 };
+  const summary: RefreshSummary = { added: 0, updated: 0, revoked: 0, unchanged: 0, errors: [], authExpired: false };
+  const specs: Specs = { skill: skillSpec, memory: memorySpec };
+  const noteError = (what: string, err: unknown) => {
+    if (err instanceof FolderfooAuthError) summary.authExpired = true;
+    summary.errors.push(`${what}: ${(err as Error).message}`);
+    console.error(`[memory-bucket] ${what}:`, err);
+  };
+  const revoke = (row: SharedItemRow) => {
+    removeMirror(db, baseDir, row);
+    db.prepare(`UPDATE shared_items SET status = 'revoked' WHERE origin_id = ?`).run(row.origin_id);
+    summary.revoked++;
+  };
 
-  const tracked = db.prepare(`SELECT * FROM shared_items WHERE status = 'active'`).all() as SharedItemRow[];
-  const byServerTenant = new Map<string, SharedItemRow[]>();
-  for (const row of tracked) {
-    const key = `${row.server}::${row.tenant_id}`;
-    const list = byServerTenant.get(key) ?? [];
-    list.push(row);
-    byServerTenant.set(key, list);
+  const active = db.prepare(`SELECT * FROM shared_items WHERE status = 'active'`).all() as SharedItemRow[];
+
+  for (const row of active.filter((r) => r.public_token)) {
+    try {
+      const content = publicContentToMarkdown((await fetchPublicLink(row.server, row.public_token!)).content);
+      const current = fs.existsSync(row.mirror_path) ? fs.readFileSync(row.mirror_path, 'utf-8') : null;
+      if (current === content) {
+        summary.unchanged++;
+        continue;
+      }
+      fs.mkdirSync(path.dirname(row.mirror_path), { recursive: true });
+      fs.writeFileSync(row.mirror_path, content);
+      indexMirror(db, specs, row);
+      summary.updated++;
+    } catch (err) {
+      // 404 is folderfoo's answer for a revoked, expired, or deleted link — anything else is a
+      // transient failure that must not be mistaken for a revocation.
+      if (err instanceof FolderfooRequestError && err.status === 404) revoke(row);
+      else noteError(`failed to refresh public item ${row.origin_id}`, err);
+    }
   }
-  // Union in every connected remote folder's server+tenant too, even ones with zero tracked shared
-  // items yet — otherwise a user who's never accepted a share link has no known server to poll at
-  // all, and a fresh direct share would never surface no matter how many times they hit refresh.
-  for (const { server, tenantId } of remoteFolders) {
+
+  if (username === null) return summary;
+
+  const byServerTenant = new Map<string, { server: string; tenantId: string; rows: SharedItemRow[] }>();
+  const groupFor = (server: string, tenantId: string) => {
     const key = `${server}::${tenantId}`;
-    if (!byServerTenant.has(key)) byServerTenant.set(key, []);
+    let group = byServerTenant.get(key);
+    if (!group) byServerTenant.set(key, (group = { server, tenantId, rows: [] }));
+    return group;
+  };
+  for (const row of active) {
+    if (!row.public_token && isVisibleTo(row, username)) groupFor(row.server, row.tenant_id).rows.push(row);
   }
+  for (const { server, tenantId } of servers) groupFor(server, tenantId);
 
-  for (const [key, rows] of byServerTenant) {
-    const sepIdx = key.indexOf('::');
-    const server = key.slice(0, sepIdx);
-    const tenantId = key.slice(sepIdx + 2);
+  for (const { server, tenantId, rows } of byServerTenant.values()) {
     let live: SharedWithMeEntry[];
     try {
       live = await getSharedWithMe(server, baseDir, tenantId);
     } catch (err) {
-      console.error(`[memory-bucket] failed to refresh shared items for ${server}:`, err);
+      noteError(`failed to refresh shared items from ${server}`, err);
       continue;
     }
     const liveByOrigin = new Map(live.filter((e) => e.originId).map((e) => [e.originId as string, e]));
@@ -178,38 +291,38 @@ export async function refreshSharedItems(
     for (const row of rows) {
       const liveEntry = liveByOrigin.get(row.origin_id);
       if (!liveEntry) {
-        removeFile(db, row.kind === 'skill' ? 'skills' : 'memory_docs', row.mirror_path);
-        db.prepare(`UPDATE shared_items SET status = 'revoked' WHERE origin_id = ?`).run(row.origin_id);
-        fs.rmSync(path.dirname(row.mirror_path), { recursive: true, force: true });
-        summary.revoked++;
+        revoke(row);
         continue;
       }
-      if (liveEntry.modifiedAt === row.last_seen_modified_at) {
-        summary.unchanged++;
-        continue;
-      }
+      const role = liveEntry.role ?? row.role;
       try {
-        const content = await readFile(server, baseDir, tenantId, dirname(liveEntry.name), path.basename(liveEntry.name), liveEntry.owner);
-        fs.writeFileSync(row.mirror_path, content);
-        const mtimeDate = new Date(liveEntry.modifiedAt);
-        fs.utimesSync(row.mirror_path, mtimeDate, mtimeDate);
-        if (row.kind === 'skill') upsertFile(db, skillSpec, row.mirror_path);
-        else upsertFile(db, memorySpec, row.mirror_path);
-        db.prepare(
-          `UPDATE shared_items SET remote_path = ?, last_seen_modified_at = ?, role = ? WHERE origin_id = ?`
-        ).run(liveEntry.name, liveEntry.modifiedAt, liveEntry.role ?? row.role, row.origin_id);
-        summary.updated++;
+        if (liveEntry.modifiedAt !== row.last_seen_modified_at || !fs.existsSync(row.mirror_path)) {
+          const content = await readFile(server, baseDir, tenantId, dirname(liveEntry.name), path.basename(liveEntry.name), liveEntry.owner);
+          fs.mkdirSync(path.dirname(row.mirror_path), { recursive: true });
+          fs.writeFileSync(row.mirror_path, content);
+          const mtimeDate = new Date(liveEntry.modifiedAt);
+          fs.utimesSync(row.mirror_path, mtimeDate, mtimeDate);
+          indexMirror(db, specs, row);
+          summary.updated++;
+        } else {
+          summary.unchanged++;
+        }
+        db.prepare(`UPDATE shared_items SET remote_path = ?, last_seen_modified_at = ?, role = ?, username = ? WHERE origin_id = ?`).run(
+          liveEntry.name,
+          liveEntry.modifiedAt,
+          role,
+          username,
+          row.origin_id
+        );
       } catch (err) {
-        console.error(`[memory-bucket] failed to refresh shared item ${row.origin_id}:`, err);
+        noteError(`failed to refresh shared item ${row.origin_id}`, err);
       }
     }
 
-    // Anything live for this server/tenant that isn't already tracked is a share this app never
-    // saw an accept event for (a direct-username share, or one made before this feature existed) —
-    // file it exactly as the accept route would, kind-filtered since a plain (non-mcp-memory-
-    // bucket) file/folder share has kind:null and nothing here knows how to mirror it.
+    // kind-filtered: a plain (non-mcp-memory-bucket) file/folder share has kind:null and nothing
+    // here knows how to mirror it.
     for (const entry of live) {
-      if (!entry.originId || !entry.kind || trackedOrigins.has(entry.originId)) continue;
+      if (entry.type !== 'file' || !entry.originId || !entry.kind || trackedOrigins.has(entry.originId)) continue;
       try {
         await addSharedItem(db, baseDir, skillSpec, memorySpec, {
           owner: entry.owner,
@@ -219,10 +332,13 @@ export async function refreshSharedItems(
           originId: entry.originId,
           kind: entry.kind,
           role: entry.role ?? 'member',
+          username,
+          modifiedAt: entry.modifiedAt,
+          paused: true,
         });
         summary.added++;
       } catch (err) {
-        console.error(`[memory-bucket] failed to add newly-discovered shared item ${entry.originId}:`, err);
+        noteError(`failed to add newly-discovered shared item ${entry.originId}`, err);
       }
     }
   }
@@ -230,28 +346,71 @@ export async function refreshSharedItems(
   return summary;
 }
 
+/**
+ * Makes the skills/memory_docs cache agree with shared_items for the current login: an item the
+ * login can see is indexed from its mirror file, anything else (another login's item, a revoked
+ * one) is evicted. Run at startup, on every login/logout, and after a cache rebuild — the rebuild
+ * wipes both tables and rescans only the configured source directories, which never include the
+ * shared mirror. A visible item whose mirror file is gone is marked for refetch on the next refresh.
+ */
+export function syncSharedItemsIndex(
+  db: Database.Database,
+  skillSpec: TableSyncSpec<SkillFrontmatter>,
+  memorySpec: TableSyncSpec<MemoryFrontmatter>,
+  username: string | null
+): void {
+  const rows = db.prepare(`SELECT * FROM shared_items`).all() as SharedItemRow[];
+  for (const row of rows) {
+    try {
+      if (row.status !== 'active' || !isVisibleTo(row, username)) {
+        removeFile(db, row.kind === 'skill' ? 'skills' : 'memory_docs', row.mirror_path);
+      } else if (fs.existsSync(row.mirror_path)) {
+        indexMirror(db, { skill: skillSpec, memory: memorySpec }, row);
+      } else {
+        db.prepare(`UPDATE shared_items SET last_seen_modified_at = NULL WHERE origin_id = ?`).run(row.origin_id);
+      }
+    } catch (err) {
+      console.error(`[memory-bucket] failed to index shared item ${row.origin_id}:`, err);
+    }
+  }
+}
+
 /** Dismisses a revoked row from the "Shared with me" panel — no-ops (does not un-revoke) for a still-active row; use refreshSharedItems to detect revocation in the first place. */
 export function dismissRevokedSharedItem(db: Database.Database, originId: string): void {
   db.prepare(`DELETE FROM shared_items WHERE origin_id = ? AND status = 'revoked'`).run(originId);
 }
 
-export interface SharedItemRowWithEntryId extends SharedItemRow {
+export interface SharedItemRowWithEntryId extends Omit<SharedItemRow, 'public_token'> {
+  /** True for a public-link item. The link's own token is never exposed — it is the credential. */
+  public: boolean;
   /**
-   * The row's addressable id in its table — source_path (== mirror_path)
-   * for memory_docs, or the skill's frontmatter `name` for skills (skills'
-   * real id, NOT mirror_path — see sync.ts's getId). This is what a
-   * Selection{table, id} needs to open the item in the existing
-   * detail-panel; null if the item hasn't been indexed yet (e.g. the very
-   * first upsertFile from addSharedItem raced with this read, or indexing
-   * failed) or if it's revoked and its cache row was already evicted.
+   * The row's addressable id in its table — source_path (== mirror_path) for memory_docs, or the
+   * skill's frontmatter `name` for skills. null if the item isn't indexed (indexing failed, or
+   * it's revoked and its cache row was evicted).
    */
   entryId: string | null;
+  /** The folder its cache row is filed under (see sharedFolderName) — what skill_get/memory_get take as `folder`. */
+  folder: string | null;
+  /** A direct share nobody here accepted arrives paused — hidden from agent-facing list/search until unpaused. */
+  paused: boolean;
 }
 
-/** Single-row lookup by origin_id — used by the "fork to mine" route (routes.ts) to read the
- * mirror_path/kind it needs before handing off to MemoryRepository.create/SkillRepository.create. */
+/** Single-row lookup by origin_id. */
 export function getSharedItem(db: Database.Database, originId: string): SharedItemRow | undefined {
   return db.prepare(`SELECT * FROM shared_items WHERE origin_id = ?`).get(originId) as SharedItemRow | undefined;
+}
+
+/**
+ * The shared item a "fork to mine" may copy, or the reason it can't — shared by the web route and
+ * bucket_fork_shared_item so a revoked item (mirror already evicted) or another login's item fails
+ * with a clear message instead of a raw ENOENT from reading the missing mirror file.
+ */
+export function getForkableSharedItem(db: Database.Database, originId: string, username: string | null): SharedItemRow | { error: string } {
+  const item = getSharedItem(db, originId);
+  if (!item || !isVisibleTo(item, username)) return { error: `no shared item found with origin_id "${originId}"` };
+  if (item.status !== 'active') return { error: 'this item is no longer shared with you' };
+  if (!fs.existsSync(item.mirror_path)) return { error: 'this shared item has no local copy yet — refresh "Shared with me" in the web UI first' };
+  return item;
 }
 
 export interface ShareTarget {
@@ -265,25 +424,44 @@ export interface ShareTarget {
 /**
  * Resolves a table/id doc into the folderfoo coordinates (folderPath, name — the name folderfoo
  * actually stores it under) needed to call shareWithUser/unshareWithUser/createShareLink/
- * createPublicLink. Shared by the web UI's share routes (routes.ts) AND the bucket_share_item/
- * bucket_unshare_item/bucket_fork_shared_item MCP tools (shared/bucket-share-tool.ts) so the "must
- * be remote, must exist under a connected folder" resolution logic lives in exactly one place.
- * Returns null if the doc isn't remote (a purely local doc has nothing on folderfoo to address).
+ * createPublicLink, or the reason it can't be shared. Shared by the web UI's share routes
+ * (routes.ts) AND the bucket_share_item/bucket_unshare_item MCP tools so this resolution lives in
+ * exactly one place. `folder` disambiguates a skill name that exists in more than one folder
+ * (skill ids are unique per folder only); a memory doc's id is its source_path, already unique.
  */
 export function resolveShareTarget(
   db: Database.Database,
   repos: { skill: { listRemoteFolders(): RemoteFolder[] }; memory: { listRemoteFolders(): RemoteFolder[] } },
   table: 'skills' | 'memory_docs',
-  id: string
-): ShareTarget | null {
+  id: string,
+  folder?: string
+): ShareTarget | { error: string } {
   const idCol = table === 'skills' ? 'id' : 'source_path';
-  const row = db.prepare(`SELECT source_path, folder FROM ${table} WHERE ${idCol} = ?`).get(id) as
-    | { source_path: string; folder: string }
-    | undefined;
-  if (!row) return null;
+  const rows = (
+    folder !== undefined && table === 'skills'
+      ? db.prepare(`SELECT source_path, folder FROM skills WHERE id = ? AND folder = ?`).all(id, folder)
+      : db.prepare(`SELECT source_path, folder FROM ${table} WHERE ${idCol} = ?`).all(id)
+  ) as Array<{ source_path: string; folder: string }>;
+  // A same-named item someone shared with the caller is never the one meant here — it only
+  // counts when it is the sole match, so the error below can say why it can't be shared.
+  const own = rows.filter((r) => !isSharedFolderName(r.folder));
+  const candidates = own.length > 0 ? own : rows;
+  if (candidates.length === 0) return { error: 'not found' };
+  if (candidates.length > 1) {
+    return { error: `exists in more than one folder (${candidates.map((r) => r.folder).join(', ')}) — specify folder` };
+  }
+  const row = candidates[0]!;
+  if (isSharedFolderName(row.folder)) {
+    return { error: 'this item is shared with you, not yours to share — fork it into your own folder first' };
+  }
   const repo = table === 'skills' ? repos.skill : repos.memory;
   const remote = repo.listRemoteFolders().find((f) => f.name === row.folder);
-  if (!remote) return null;
+  if (!remote) return { error: 'not connected to a folderfoo remote folder — sharing requires a remote-backed doc' };
+  // folderfoo only lets a file's owner share it (POST /share rejects any other caller), and
+  // addressing remote.folderPath without the owner would resolve inside the CALLER's own tree.
+  if (remote.owner) {
+    return { error: `lives in a folder ${remote.owner} shared with you — only ${remote.owner} can share it; fork it into your own folder first` };
+  }
   // Skills push to folderfoo under the fixed remote name "SKILL" regardless of local filename
   // (see sync.ts's remoteFilename.toRemote) — the folderfoo-relative NAME is therefore the
   // skill's containing directory, with "SKILL" as the addressed file, while memory docs keep
@@ -296,16 +474,15 @@ export function resolveShareTarget(
   return { server: remote.server, tenantId: remote.tenantId, folderPath, name, kind };
 }
 
-export function listSharedItems(db: Database.Database): SharedItemRowWithEntryId[] {
-  const rows = db.prepare(`SELECT * FROM shared_items ORDER BY added_at DESC`).all() as SharedItemRow[];
-  return rows.map((row) => {
-    if (row.kind === 'memory') {
-      const found = db.prepare(`SELECT source_path FROM memory_docs WHERE source_path = ?`).get(row.mirror_path) as
-        | { source_path: string }
-        | undefined;
-      return { ...row, entryId: found?.source_path ?? null };
-    }
-    const found = db.prepare(`SELECT id FROM skills WHERE source_path = ?`).get(row.mirror_path) as { id: string } | undefined;
-    return { ...row, entryId: found?.id ?? null };
+/** Shared items the given login can see (its own, plus public-link items), newest first — never another login's. */
+export function listSharedItems(db: Database.Database, username: string | null): SharedItemRowWithEntryId[] {
+  const rows = (db.prepare(`SELECT * FROM shared_items ORDER BY added_at DESC`).all() as SharedItemRow[]).filter((row) => isVisibleTo(row, username));
+  return rows.map(({ public_token, ...row }) => {
+    const table = row.kind === 'memory' ? 'memory_docs' : 'skills';
+    const idCol = row.kind === 'memory' ? 'source_path' : 'id';
+    const found = db.prepare(`SELECT ${idCol} AS id, folder, paused FROM ${table} WHERE source_path = ?`).get(row.mirror_path) as
+      | { id: string; folder: string; paused: number }
+      | undefined;
+    return { ...row, public: public_token !== null, entryId: found?.id ?? null, folder: found?.folder ?? null, paused: found?.paused === 1 };
   });
 }

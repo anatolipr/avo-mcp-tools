@@ -16,6 +16,7 @@ import { registerRelocateTool } from './shared/relocate-tool.js';
 import { registerSearchTool } from './shared/search-tool.js';
 import { registerBucketFolderTools } from './shared/bucket-folder-tool.js';
 import { registerBucketShareTools } from './shared/bucket-share-tool.js';
+import { syncSharedItemsIndex } from './remote/shared-items.js';
 import { registerAttachmentTools } from './attachments/tools.js';
 import { AttachmentRepository } from './attachments/repository.js';
 import { buildWebRouter } from './web/routes.js';
@@ -113,6 +114,10 @@ skillSpec.onUnmatchedFileChange = (filePath, changeType) => {
 
 initialScan(db, skillSpec);
 initialScan(db, memorySpec);
+// Item-level shares are granted to one folderfoo login — keep only the current login's indexed, on
+// start and again whenever the login changes (see syncSharedItemsIndex).
+syncSharedItemsIndex(db, skillSpec, memorySpec, identity.current().username);
+identity.onIdentityChange((current) => syncSharedItemsIndex(db, skillSpec, memorySpec, current.username));
 const skillWatcher = watchSources(db, skillSpec);
 const memoryWatcher = watchSources(db, memorySpec);
 skillRepo.setWatcher(skillWatcher);
@@ -216,7 +221,7 @@ function buildMcpServer(): McpServer {
   registerRelocateTool(server, skillRepo, memoryRepo);
   registerSearchTool(server, db);
   registerBucketFolderTools(server, config, skillRepo, memoryRepo, db, skillSpec, memorySpec, identity);
-  registerBucketShareTools(server, config, skillRepo, memoryRepo, db);
+  registerBucketShareTools(server, config, skillRepo, memoryRepo, db, identity);
   registerAttachmentTools(server, attachmentRepo);
   registerUiTool(server, PORT);
   registerMemoryChannelTools(server);

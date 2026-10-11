@@ -16,6 +16,7 @@ import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFi
 import { guessMimeType } from '../attachments/storage.js';
 import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 import { writeRemoteThenLocal } from '../remote/write-order.js';
+import { isSharedFolderName, sharedItemReadOnlyError } from '../remote/shared-items.js';
 
 interface SkillRow {
   id: string;
@@ -442,9 +443,7 @@ export class SkillRepository {
 
     try {
       // shared_items is LEFT JOINed on s.source_path (== mirror_path for an item-level share — see
-      // remote/shared-items.ts) — same reasoning as MemoryRepository.search's identical join: a
-      // shared skill's `folder` is always '' and otherwise indistinguishable from any other
-      // unfoldered local skill.
+      // remote/shared-items.ts) — same reasoning as MemoryRepository.search's identical join.
       const rows = this.db
         .prepare(
           `SELECT s.id AS name, s.description, s.folder,
@@ -650,6 +649,7 @@ export class SkillRepository {
   ): Promise<SkillDoc> {
     const existing = await this.get(name, folder);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
+    if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(name);
     // `paused` is local-cache-only and `body` is written separately as the markdown body, not
     // frontmatter — both must be split off of `existing` before spreading the rest into
     // `merged`, or they'd ride along into the SkillFrontmatter written to disk (duplicating the
@@ -697,6 +697,7 @@ export class SkillRepository {
     assertValidSkillName(newName);
     const existing = await this.get(name, folder);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
+    if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(name);
     if (newName === name) return existing;
     // The rename target's collision check is scoped to the SAME folder the existing skill lives
     // in — a rename never moves a skill to a different folder, so only that folder's names matter.
@@ -851,6 +852,7 @@ export class SkillRepository {
   async delete(name: string, folder?: string): Promise<void> {
     const existing = await this.get(name, folder);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
+    if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(name);
     if (this.isBuiltin(existing)) throw new Error(`skill "${name}" is builtin and cannot be deleted`);
     const skillDir = path.dirname(existing.source_path);
     const remote = this.remoteFor(existing.folder);

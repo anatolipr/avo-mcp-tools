@@ -30,9 +30,11 @@ import {
   listSharedItems,
   dismissRevokedSharedItem,
   addSharedItem,
-  getSharedItem,
+  getForkableSharedItem,
   resolveShareTarget,
+  syncSharedItemsIndex,
 } from '../remote/shared-items.js';
+import { TENANT_ID } from '../shared/folderfoo-tenant.js';
 import { shareWithUser, unshareWithUser, createShareLink, createPublicLink, joinRemoteFolderPath, getSharedWithMe, FolderfooRequestError } from '../remote/folderfoo-client.js';
 import { readMarkdownFile } from '../store/markdown-file.js';
 import type { MemoryFrontmatter, SkillFrontmatter } from '../types.js';
@@ -380,7 +382,7 @@ function queryTable(
 // either miss a real match or wrongly include the other folder's same-named skill). Skill entries in
 // these restriction sets are therefore composite `folder\0id` strings; memory_docs entries stay
 // plain ids (source_path — a real filesystem path is globally unique by construction, never collides).
-const SKILL_KEY_SEP = ' ';
+const SKILL_KEY_SEP = '\0';
 function skillKey(folder: string, id: string): string {
   return `${folder}${SKILL_KEY_SEP}${id}`;
 }
@@ -586,6 +588,7 @@ export function buildWebRouter(
       db.exec(`DELETE FROM skills; DELETE FROM memory_docs; DELETE FROM search_index; DELETE FROM doc_dates;`);
       initialScan(db, skillSpec);
       initialScan(db, memorySpec);
+      syncSharedItemsIndex(db, skillSpec, memorySpec, identity.current().username);
       const skillCount = (db.prepare(`SELECT COUNT(*) AS n FROM skills`).get() as { n: number }).n;
       const memoryCount = (db.prepare(`SELECT COUNT(*) AS n FROM memory_docs`).get() as { n: number }).n;
       res.json({ skillCount, memoryCount });
@@ -1594,7 +1597,7 @@ export function buildWebRouter(
   // fresh as the last time POST /refresh below was explicitly clicked. This
   // is the settled "refresh is a UI-only concept" design.
   router.get('/api/shared-items', (_req: Request, res: Response) => {
-    res.json(listSharedItems(db));
+    res.json(listSharedItems(db, identity.current().username));
   });
 
   // Turns a redeemed share-link/public-link (client/share-accept.ts's onSharedItemAccepted) into a
@@ -1602,9 +1605,20 @@ export function buildWebRouter(
   // accepting a share, not the "refresh is UI-only" background sync (see addSharedItem's own doc
   // comment). Called once per accept, never on a timer.
   router.post('/api/shared-items/accept', async (req: Request, res: Response) => {
-    const { owner, path: itemPath, originId, kind, role, server, tenantId } = req.body || {};
+    const { owner, path: itemPath, originId, kind, role, server, tenantId, publicToken } = req.body || {};
     if (!owner || !itemPath || !originId || (kind !== 'memory' && kind !== 'skill') || !server || !tenantId) {
       res.status(400).json({ error: 'owner, path, originId, kind, server, and tenantId are required' });
+      return;
+    }
+    // The body picks which host this process reads from (and, for a share link, sends its stored
+    // login to) — only ever the folderfoo deployment this process was started against.
+    if (!config.folderfooHost || server !== config.folderfooHost) {
+      res.status(400).json({ error: 'server must be this app\'s configured folderfoo host' });
+      return;
+    }
+    const username = identity.current().username;
+    if (!publicToken && !username) {
+      res.status(401).json({ error: 'not logged in to folderfoo' });
       return;
     }
     try {
@@ -1616,6 +1630,8 @@ export function buildWebRouter(
         role: role === 'editor' ? 'editor' : 'member',
         server,
         tenantId,
+        username,
+        publicToken: typeof publicToken === 'string' && publicToken ? publicToken : undefined,
       });
       res.json({ accepted: originId });
     } catch (err) {
@@ -1637,9 +1653,9 @@ export function buildWebRouter(
       res.status(400).json({ error: 'originId is required' });
       return;
     }
-    const item = getSharedItem(db, originId);
-    if (!item) {
-      res.status(404).json({ error: 'shared item not found' });
+    const item = getForkableSharedItem(db, originId, identity.current().username);
+    if ('error' in item) {
+      res.status(404).json({ error: item.error });
       return;
     }
     try {
@@ -1686,11 +1702,15 @@ export function buildWebRouter(
   // before the very first share has been accepted.
   router.post('/api/shared-items/refresh', async (_req: Request, res: Response) => {
     try {
-      const remoteFolders = [...skillRepo.listRemoteFolders(), ...memoryRepo.listRemoteFolders()].map((f) => ({
-        server: f.server,
-        tenantId: f.tenantId,
-      }));
-      const summary = await refreshSharedItems(db, config.baseDir, skillSpec, memorySpec, remoteFolders);
+      const current = identity.current();
+      const servers = [...skillRepo.listRemoteFolders(), ...memoryRepo.listRemoteFolders()]
+        .filter((f) => isFolderVisible(f, current))
+        .map((f) => ({ server: f.server, tenantId: f.tenantId }));
+      // The configured host under this app's own tenant is always checked, connected folder or
+      // not — otherwise a login with no remote folder has no server to ask and never sees a share.
+      if (config.folderfooHost) servers.push({ server: config.folderfooHost, tenantId: TENANT_ID });
+      const summary = await refreshSharedItems(db, config.baseDir, skillSpec, memorySpec, servers, current.username);
+      if (summary.authExpired) identity.clearUsername();
       res.json(summary);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -1715,7 +1735,9 @@ export function buildWebRouter(
   // createPublicLink below. Shared by all three POST routes so the "must be remote, must
   // exist under a connected folder" validation lives in exactly one place. Returns null if the
   // doc isn't remote (this app's own local-only docs have nothing on folderfoo to address).
-  const resolveShareTargetHere = (table: 'skills' | 'memory_docs', id: string) => resolveShareTarget(db, { skill: skillRepo, memory: memoryRepo }, table, id);
+  // `?folder=` disambiguates a skill name that exists in more than one folder.
+  const resolveShareTargetHere = (req: Request, table: 'skills' | 'memory_docs', id: string) =>
+    resolveShareTarget(db, { skill: skillRepo, memory: memoryRepo }, table, id, typeof req.query.folder === 'string' ? req.query.folder : undefined);
 
   router.post('/api/entries/:table/:id/share', async (req: Request, res: Response) => {
     const { table, id } = req.params;
@@ -1732,9 +1754,9 @@ export function buildWebRouter(
       res.status(400).json({ error: 'username is required' });
       return;
     }
-    const target = resolveShareTargetHere(table, id);
-    if (!target) {
-      res.status(400).json({ error: 'this doc is not connected to a folderfoo remote folder' });
+    const target = resolveShareTargetHere(req, table, id);
+    if ('error' in target) {
+      res.status(400).json({ error: target.error });
       return;
     }
     try {
@@ -1755,9 +1777,9 @@ export function buildWebRouter(
       res.status(400).json({ error: 'id and username are required' });
       return;
     }
-    const target = resolveShareTargetHere(table, id);
-    if (!target) {
-      res.status(400).json({ error: 'this doc is not connected to a folderfoo remote folder' });
+    const target = resolveShareTargetHere(req, table, id);
+    if ('error' in target) {
+      res.status(400).json({ error: target.error });
       return;
     }
     try {
@@ -1778,9 +1800,9 @@ export function buildWebRouter(
       res.status(400).json({ error: 'id is required' });
       return;
     }
-    const target = resolveShareTargetHere(table, id);
-    if (!target) {
-      res.status(400).json({ error: 'this doc is not connected to a folderfoo remote folder' });
+    const target = resolveShareTargetHere(req, table, id);
+    if ('error' in target) {
+      res.status(400).json({ error: target.error });
       return;
     }
     try {
@@ -1801,9 +1823,9 @@ export function buildWebRouter(
       res.status(400).json({ error: 'id is required' });
       return;
     }
-    const target = resolveShareTargetHere(table, id);
-    if (!target) {
-      res.status(400).json({ error: 'this doc is not connected to a folderfoo remote folder' });
+    const target = resolveShareTargetHere(req, table, id);
+    if ('error' in target) {
+      res.status(400).json({ error: target.error });
       return;
     }
     try {

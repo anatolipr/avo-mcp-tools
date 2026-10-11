@@ -277,6 +277,30 @@ export async function createPublicLink(
   );
 }
 
+export interface PublicLinkView {
+  content: unknown;
+  owner: string;
+  path: string;
+  type: 'file' | 'folder';
+  originId: string | null;
+  kind: 'memory' | 'skill' | null;
+}
+
+/**
+ * Reads a public link's target via folderfoo's GET /public/:token — no login, the token is the
+ * only credential. `content` is the raw file text for a file stored as raw bytes (every memory
+ * doc/skill), or parsed JSON for folderfoo's legacy .json form. A revoked, expired, or deleted
+ * link is a 404 (FolderfooRequestError).
+ */
+export async function fetchPublicLink(server: string, token: string): Promise<PublicLinkView> {
+  const res = await fetch(`${server}/public/${encodeURIComponent(token)}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new FolderfooRequestError(res.status, (body as { error?: string }).error ?? res.statusText);
+  }
+  return (await res.json()) as PublicLinkView;
+}
+
 /** Thrown when a write targets a remote folder that no longer exists on folderfoo (deleted server-side since the last connect/UI-open sync). */
 export class RemoteFolderGoneError extends Error {
   constructor(folderName: string) {

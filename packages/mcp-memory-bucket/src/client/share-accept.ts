@@ -41,6 +41,8 @@ export async function startShareAccept(onSharedItemAccepted: (entry: {
   role: 'member' | 'editor';
   server: string;
   tenantId: string;
+  /** Set for a public-link accept — the server re-reads the item through the link itself, since a public link grants no login-addressable access. */
+  publicToken?: string;
 }) => void): Promise<void> {
   if (started) return;
   started = true;
@@ -107,6 +109,7 @@ export async function startShareAccept(onSharedItemAccepted: (entry: {
           role: 'member',
           server: folderfooHost,
           tenantId: TENANT_ID,
+          publicToken: token,
         });
       }
     }

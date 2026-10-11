@@ -22,6 +22,7 @@ import { TENANT_ID } from './folderfoo-tenant.js';
 
 const KIND = z.enum(['skill', 'memory']);
 
+import { syncSharedItemsIndex } from '../remote/shared-items.js';
 export function registerBucketFolderTools(
   mcp: McpServer,
   config: BucketConfig,
@@ -191,6 +192,7 @@ export function registerBucketFolderTools(
         db.exec(`DELETE FROM skills; DELETE FROM memory_docs; DELETE FROM search_index; DELETE FROM doc_dates;`);
         initialScan(db, skillSpec);
         initialScan(db, memorySpec);
+        syncSharedItemsIndex(db, skillSpec, memorySpec, identity.current().username);
         const skillCount = (db.prepare(`SELECT COUNT(*) AS n FROM skills`).get() as { n: number }).n;
         const memoryCount = (db.prepare(`SELECT COUNT(*) AS n FROM memory_docs`).get() as { n: number }).n;
         return {

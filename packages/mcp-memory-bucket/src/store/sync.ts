@@ -184,7 +184,10 @@ function folderForFile(sources: NamedFolder[], filePath: string): string {
 export function upsertFile<TFrontmatter>(
   db: Database.Database,
   spec: TableSyncSpec<TFrontmatter>,
-  filePath: string
+  filePath: string,
+  // Item-level shares live outside every configured source directory, so folderForFile can't name
+  // them — remote/shared-items.ts passes the folder to file them under instead.
+  folderOverride?: string
 ): void {
   const existingBySourcePath = db
     .prepare(`SELECT mtime_ms FROM ${spec.table} WHERE source_path = ?`)
@@ -204,7 +207,7 @@ export function upsertFile<TFrontmatter>(
   }
 
   const row = spec.toRow(frontmatter, filePath, parsed.mtimeMs);
-  const folder = folderForFile(spec.sources, filePath);
+  const folder = folderOverride ?? folderForFile(spec.sources, filePath);
 
   // `skills` keys on (folder, id): name is unique PER FOLDER, not globally (see skill_get's
   // folder param) — two different folders each having a same-named skill is legitimate, so the

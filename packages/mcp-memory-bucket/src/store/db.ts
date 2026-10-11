@@ -91,7 +91,9 @@ export function openCache(dbPath: string): Database.Database {
       mirror_path TEXT NOT NULL,       -- local mirror file this item is synced into
       last_seen_modified_at TEXT,      -- folderfoo's modifiedAt as of the last refresh, for change detection
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
-      added_at TEXT NOT NULL
+      added_at TEXT NOT NULL,
+      username TEXT NOT NULL DEFAULT '', -- folderfoo login this share was granted to; '' = not login-scoped (public link, or a row predating this column)
+      public_token TEXT                -- set only for a public-link item, which re-reads through the link itself rather than a login
     );
   `);
 
@@ -110,6 +112,10 @@ export function openCache(dbPath: string): Database.Database {
     ['paused', 'INTEGER NOT NULL DEFAULT 0'],
     ['created_at', 'TEXT'],
     ['attachments', 'TEXT'],
+  ]);
+  ensureColumns(db, 'shared_items', [
+    ['username', "TEXT NOT NULL DEFAULT ''"],
+    ['public_token', 'TEXT'],
   ]);
   ensureSearchIndexHasKeyColumn(db);
   backfillSearchIndex(db);
@@ -199,7 +205,7 @@ function ensureMemoryDocsSourcePathKey(db: Database.Database): void {
 /** Migration for cache files created before a given column existed. Safe to call every startup. */
 function ensureColumns(
   db: Database.Database,
-  table: 'skills' | 'memory_docs',
+  table: 'skills' | 'memory_docs' | 'shared_items',
   columns: Array<[name: string, ddlType: string]>
 ): void {
   const existing = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));

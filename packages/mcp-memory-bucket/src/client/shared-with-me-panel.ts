@@ -15,6 +15,16 @@ export interface SharedItemRow {
   status: 'active' | 'revoked';
   added_at: string;
   entryId: string | null;
+  /** A direct share nobody here accepted arrives paused — hidden from agents until unpaused in its detail view. */
+  paused: boolean;
+}
+
+export interface RefreshSummary {
+  added: number;
+  updated: number;
+  revoked: number;
+  unchanged: number;
+  errors?: string[];
 }
 
 /**
@@ -46,7 +56,7 @@ export class SharedWithMePanel extends LitElement {
 
   declare items: SharedItemRow[];
   declare refreshing: boolean;
-  declare lastRefreshSummary: { added: number; updated: number; revoked: number; unchanged: number } | null;
+  declare lastRefreshSummary: RefreshSummary | null;
   // The fork destination picker's option list, split by kind — a shared memory doc forks into one
   // of the caller's own memory folders, a shared skill into one of their skill folders. Doesn't
   // distinguish local vs. remote: any configured folder the user already owns is a valid target.
@@ -79,6 +89,7 @@ export class SharedWithMePanel extends LitElement {
     .refresh-btn.spinning { animation: shared-refresh-spin 0.8s linear infinite; }
     @keyframes shared-refresh-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
     .summary { font-size: 12px; opacity: 0.6; }
+    .summary.error { opacity: 1; color: var(--danger, #c0392b); cursor: help; }
     .body { flex: 1 1 auto; overflow-y: auto; }
     .owner-group { border-bottom: 1px solid var(--border); }
     .owner-header { padding: 8px 16px 4px; font-size: 12px; font-weight: 600; opacity: 0.7; }
@@ -164,6 +175,9 @@ export class SharedWithMePanel extends LitElement {
         ${revoked
           ? html`<span class="revoked-badge">no longer shared with you</span>`
           : html`<span class="role-badge">${item.role}</span>`}
+        ${!revoked && item.paused
+          ? html`<span class="role-badge" title="Arrived as a direct share — hidden from agents until you open it and unpause it">paused</span>`
+          : ''}
         ${!revoked
           ? html`<button class="fork-btn" @click=${(e: Event) => { e.stopPropagation(); this.#toggleForkPicker(item); }}>Fork to mine</button>`
           : ''}
@@ -195,6 +209,9 @@ export class SharedWithMePanel extends LitElement {
         <h2>Shared with me</h2>
         ${summary
           ? html`<span class="summary">${summary.added} added · ${summary.updated} updated · ${summary.revoked} revoked · ${summary.unchanged} unchanged</span>`
+          : ''}
+        ${summary?.errors?.length
+          ? html`<span class="summary error" title=${summary.errors.join('\n')}>${summary.errors.length} failed</span>`
           : ''}
         <button
           class="refresh-btn ${this.refreshing ? 'spinning' : ''}"

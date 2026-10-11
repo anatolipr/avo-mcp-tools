@@ -159,11 +159,10 @@ export interface CombinedSearchHit {
   folder: string;
   snippet: string;
   score: number;
-  /** Present only when this hit is an item-level share (see remote/shared-items.ts) — a shared
-   * item's `folder` column is always '' (its mirror path lives outside every configured source
-   * directory, so folderForFile can't attribute it to one), which on its own looks identical to
-   * any other unfoldered doc. shared_owner/shared_role surface the provenance a plain folder
-   * column can't, without requiring a caller to cross-reference bucket_list_shared_items separately. */
+  /** Present only when this hit is an item-level share (see remote/shared-items.ts) — its `folder`
+   * is a synthetic "shared-by-<owner>" name, not a configured folder. shared_owner/shared_role
+   * surface the provenance (and the read-only role) without requiring a caller to cross-reference
+   * bucket_list_shared_items separately. */
   shared_owner?: string;
   shared_role?: 'member' | 'editor';
 }

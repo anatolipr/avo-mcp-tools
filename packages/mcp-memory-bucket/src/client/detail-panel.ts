@@ -691,13 +691,18 @@ export class DetailPanel extends LitElement {
     this._shareStatus = null;
   }
 
+  // A skill's id is only unique within its folder — tell the share routes which one this panel is showing.
+  #shareFolderQuery(): string {
+    return this.selected?.table === 'skills' && this._doc?.folder ? `?folder=${encodeURIComponent(this._doc.folder)}` : '';
+  }
+
   async #confirmShareWithUser() {
     if (!this.selected || !this._shareUsername.trim()) return;
     const { table, id } = this.selected;
     this._shareBusy = true;
     this._shareStatus = null;
     try {
-      const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/share`, {
+      const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/share${this.#shareFolderQuery()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: this._shareUsername.trim(), role: this._shareRole }),
@@ -716,7 +721,7 @@ export class DetailPanel extends LitElement {
     this._shareBusy = true;
     this._shareStatus = null;
     try {
-      const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/${kind}`, { method: 'POST' });
+      const res = await fetch(`/api/entries/${table}/${encodeURIComponent(id)}/${kind}${this.#shareFolderQuery()}`, { method: 'POST' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         this._shareStatus = `Failed to create link: ${body.error ?? res.statusText}`;

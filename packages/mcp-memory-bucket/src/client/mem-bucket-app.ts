@@ -11,7 +11,7 @@ import './app-toolbar.js';
 import './shared-with-me-panel.js';
 import './quick-prompts-modal.js';
 import type { Entry, Facets, Selection, TypeFilter, FoldersResponse, Folder, ChannelSummary, ChannelDetail } from './types.js';
-import type { SharedItemRow } from './shared-with-me-panel.js';
+import type { SharedItemRow, RefreshSummary } from './shared-with-me-panel.js';
 import { TENANT_ID, getFolderfooConfig } from './server-config.js';
 import { parseFolderfooAddress } from './folderfoo-address.js';
 import { currentIdentity, startIdentityStream } from './identity-stream.js';
@@ -345,7 +345,7 @@ export class MemBucketApp extends LitElement {
   // own comment for why this deliberately never auto-refreshes on a timer/focus.
   #sharedItems = new Signal<SharedItemRow[]>([]);
   #sharedRefreshing = new Signal<boolean>(false);
-  #sharedRefreshSummary = new Signal<{ added: number; updated: number; revoked: number; unchanged: number } | null>(null);
+  #sharedRefreshSummary = new Signal<RefreshSummary | null>(null);
   #quickPromptsOpen = new Signal<boolean>(false);
   // One-shot flag consumed by quick-prompts-modal's connectedCallback (see its openToAdd prop) —
   // set right before mounting the modal so Cmd/Ctrl+Enter from the main window opens straight into
@@ -865,6 +865,7 @@ export class MemBucketApp extends LitElement {
     role: 'member' | 'editor';
     server: string;
     tenantId: string;
+    publicToken?: string;
   }) {
     const res = await fetch('/api/shared-items/accept', {
       method: 'POST',
