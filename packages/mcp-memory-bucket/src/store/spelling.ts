@@ -18,7 +18,9 @@ function loadVocabulary(db: Database.Database) {
  * The corpus word a misspelled query word most likely meant, or undefined when the word is fine
  * (it, or a stemmed form of it, occurs somewhere) or nothing is close enough. Short words and
  * anything with a digit are left alone — an edit away from a 3-letter word or a ticket number is
- * usually a different word, not a typo. Ties go to the word found in more chunks.
+ * usually a different word, not a typo. A candidate must also start with the same letter: typos
+ * rarely fall on the first letter, while unrelated real words one edit apart often differ exactly
+ * there ("night" is not a misspelled "right"). Ties go to the word found in more chunks.
  */
 export function suggestCorrection(db: Database.Database, word: string): string | undefined {
   const lower = word.toLowerCase();
@@ -33,7 +35,7 @@ export function suggestCorrection(db: Database.Database, word: string): string |
   const maxDistance = lower.length <= 5 ? 1 : 2;
   let best: { term: string; docs: number; distance: number } | undefined;
   for (const { term, docs } of terms) {
-    if (Math.abs(term.length - lower.length) > maxDistance) continue;
+    if (term[0] !== lower[0] || Math.abs(term.length - lower.length) > maxDistance) continue;
     const d = distance(lower, term);
     if (d > maxDistance) continue;
     if (!best || d < best.distance || (d === best.distance && docs > best.docs)) best = { term, docs, distance: d };

@@ -245,6 +245,7 @@ test('a misspelled word is corrected to the closest corpus word; real words and 
   assert.equal(suggestCorrection(db, 'deploy'), undefined); // only "deploying" is in the corpus, but the stemmed index matches
   assert.equal(suggestCorrection(db, 'kubernetes'), undefined); // nothing close
   assert.equal(suggestCorrection(db, 'tol'), undefined); // too short to call a typo
+  assert.equal(suggestCorrection(db, 'borders'), undefined); // a real word one edit from "orders" — different first letter, not a typo
 
   // Keyword search: single misspelled word, and a misspelled word next to an absent one.
   assert.equal(skillRepo.search('tooltp')[0]?.name, 'hover-hints');

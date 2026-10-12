@@ -54,7 +54,12 @@ export function blobToVector(blob: Buffer): Float32Array {
   return new Float32Array(blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength));
 }
 
-const BATCH_SIZE = 16;
+/**
+ * One chunk per model call. A batch is padded to its longest member, and onnxruntime keeps its
+ * peak allocation for the life of the process: on a 1,700-chunk corpus, batches of 16 left the
+ * server holding 1.6 GB and ran slower (45 ms/chunk) than single inputs do (26 ms/chunk, ~490 MB).
+ */
+const BATCH_SIZE = 1;
 const RETRY_AFTER_FAILURE_MS = 5 * 60_000;
 
 /**

@@ -59,15 +59,16 @@ export function questionToFtsQuery(question: string, corrections?: Map<string, s
 
 const WORD_RE = /[\p{L}\p{N}_]+/gu;
 
-/** `query` with each misspelled word swapped for its correction — what gets embedded, since a typo shifts an embedding toward nothing in particular. */
-function respell(query: string, corrections: Map<string, string>): string {
-  return corrections.size === 0 ? query : query.replace(WORD_RE, (word) => corrections.get(word.toLowerCase()) ?? word);
-}
-
 const CANDIDATES_PER_LIST = 30;
 const DOC_CANDIDATES = 10;
 /** Reciprocal-rank-fusion constant — the conventional 60; damps how much a rank-1 hit outweighs a rank-5 one. */
 const RRF_K = 60;
+/**
+ * The semantic list counts double: two of the three fused lists are keyword-based (chunk and doc
+ * BM25), so at equal weight a chunk that is the clear best match by meaning loses to one that
+ * merely shares common words with the question in both keyword lists.
+ */
+const SEMANTIC_WEIGHT = 2;
 const MAX_CHUNKS_PER_DOC = 3;
 /** Fused scores below this fraction of the best hit's are dropped rather than used to fill the token budget. */
 const RELATIVE_SCORE_FLOOR = 0.3;
@@ -119,8 +120,7 @@ export async function semanticDocMatches(
   embedder: Embedder,
   query: string
 ): Promise<Array<{ ref_table: RefTable; ref_id: string; ref_folder: string; similarity: number }>> {
-  const corrections = correctWords(db, query.toLowerCase().match(WORD_RE) ?? []);
-  const [queryVector] = await embedder.embed([respell(query, corrections)], 'query');
+  const [queryVector] = await embedder.embed([query], 'query');
   const hits = vectorSearch(db, embedder.model, queryVector!, 50);
   const floor = Math.max(SEMANTIC_MIN_SIMILARITY, (hits[0]?.similarity ?? 0) - SEMANTIC_WINDOW);
   const chunkDoc = db.prepare(`SELECT ref_table, ref_id, ref_folder FROM chunks WHERE id = ?`);
@@ -141,6 +141,7 @@ interface ChunkRow {
   ord: number;
   heading: string;
   text: string;
+  hash: string;
 }
 
 const docKey = (c: { ref_table: string; ref_id: string; ref_folder: string }) => `${c.ref_table}\0${c.ref_folder}\0${c.ref_id}`;
@@ -155,7 +156,7 @@ const docKey = (c: { ref_table: string; ref_id: string; ref_folder: string }) =>
 export async function recall(db: Database.Database, query: string, opts: RecallOptions = {}): Promise<RecallResult> {
   const { maxTokens = 2000, table, hidden, embedder } = opts;
   const fused = new Map<number, number>();
-  const add = (chunkId: number, rank: number) => fused.set(chunkId, (fused.get(chunkId) ?? 0) + 1 / (RRF_K + rank));
+  const add = (chunkId: number, rank: number, weight = 1) => fused.set(chunkId, (fused.get(chunkId) ?? 0) + weight / (RRF_K + rank));
 
   const corrections = correctWords(db, query.toLowerCase().match(WORD_RE) ?? []);
   const ftsQuery = questionToFtsQuery(query, corrections);
@@ -182,16 +183,16 @@ export async function recall(db: Database.Database, query: string, opts: RecallO
 
   let mode: RecallResult['mode'] = 'lexical';
   if (embedder) {
-    const [queryVector] = await embedder.embed([respell(query, corrections)], 'query');
+    const [queryVector] = await embedder.embed([query], 'query');
     const semantic = vectorSearch(db, embedder.model, queryVector!, CANDIDATES_PER_LIST * (table ? 4 : 1));
     if (semantic.length > 0) mode = 'hybrid';
-    semantic.forEach((hit, i) => add(hit.id, i + 1));
+    semantic.forEach((hit, i) => add(hit.id, i + 1, SEMANTIC_WEIGHT));
   }
 
   // Doc-level boost: every candidate chunk of a doc-level hit gains that doc's rank; a doc with no
   // candidate chunk yet (the query matched only its name/key/tags) contributes its opening chunk.
   const firstChunkOf = db.prepare(`SELECT id FROM chunks WHERE ref_table = ? AND ref_id = ? AND ref_folder = ? ORDER BY ord LIMIT 1`);
-  const chunkById = db.prepare(`SELECT id, ref_table, ref_id, ref_folder, ord, heading, text FROM chunks WHERE id = ?`);
+  const chunkById = db.prepare(`SELECT id, ref_table, ref_id, ref_folder, ord, heading, text, hash FROM chunks WHERE id = ?`);
   const rows = new Map<number, ChunkRow>();
   for (const id of fused.keys()) {
     const row = chunkById.get(id) as ChunkRow | undefined;
@@ -238,13 +239,15 @@ export async function recall(db: Database.Database, query: string, opts: RecallO
 
   const floor = (ranked[0]?.score ?? 0) * RELATIVE_SCORE_FLOOR;
   const perDoc = new Map<string, number>();
+  // The same skill synced into two folders yields byte-identical passages — return each once.
+  const seenText = new Set<string>();
   const chunks: RecallChunk[] = [];
   let budget = maxTokens;
   let truncated = false;
   for (const { row, score, doc } of ranked) {
     if (score < floor) break;
     const key = docKey(row);
-    if ((perDoc.get(key) ?? 0) >= MAX_CHUNKS_PER_DOC) continue;
+    if ((perDoc.get(key) ?? 0) >= MAX_CHUNKS_PER_DOC || seenText.has(row.hash)) continue;
     let text = row.text;
     const cost = () => HEADER_TOKENS + Math.ceil((row.heading.length + text.length) / CHARS_PER_TOKEN);
     if (cost() > budget) {
@@ -255,6 +258,7 @@ export async function recall(db: Database.Database, query: string, opts: RecallO
     }
     budget -= cost();
     perDoc.set(key, (perDoc.get(key) ?? 0) + 1);
+    seenText.add(row.hash);
     chunks.push({ ref_table: row.ref_table, id: doc.id, folder: doc.folder, key: doc.key, heading: row.heading, ord: row.ord, text, score });
   }
   return { mode, chunks, truncated, corrections: Object.fromEntries(corrections) };

@@ -18,7 +18,7 @@ import type { SkillRepository } from '../skills/repository.js';
 import { stripKey, type MemoryRepository } from '../memory/repository.js';
 import { pruneOrphanChunks } from '../store/chunks.js';
 import { initialScan, walkMarkdownFiles, type TableSyncSpec } from '../store/sync.js';
-import { SEARCH_BM25, withOrFallback, hasExplicitSyntax } from '../store/search.js';
+import { SEARCH_BM25, withOrFallback, hasExplicitSyntax, sanitizeFtsQuery } from '../store/search.js';
 import { semanticDocMatches } from '../store/recall.js';
 import type { EmbeddingIndexer } from '../store/embeddings.js';
 import { resolveWithinBase } from '../store/safe-path.js';
@@ -442,6 +442,8 @@ function matchDateRange(
  * reciprocal rank fusion, so a doc matching in meaning but sharing no keyword still appears; the
  * stored rank is then the negated fused score, keeping "lower is better".
  */
+const LOOSENED_RESULT_LIMIT = 15;
+
 function matchSearch(
   db: Database.Database,
   q: string,
@@ -455,7 +457,15 @@ function matchSearch(
     const statement = db.prepare(
       `SELECT ref_table, ref_id, ref_folder, ${SEARCH_BM25} AS score FROM search_index WHERE search_index MATCH ? ORDER BY score`
     );
-    rows = withOrFallback(db, q, 0, (ftsQuery) => statement.all(ftsQuery) as typeof rows);
+    const strict = sanitizeFtsQuery(q);
+    let loosened = false;
+    rows = withOrFallback(db, q, 0, (ftsQuery) => {
+      loosened = ftsQuery !== strict;
+      return statement.all(ftsQuery) as typeof rows;
+    });
+    // Any-word and typo-corrected matches are a best guess, not what was typed — a query of common
+    // words would otherwise list half the bucket. Keep only the strongest.
+    if (loosened) rows = rows.slice(0, LOOSENED_RESULT_LIMIT);
   } catch {
     // Bad FTS5 query syntax (e.g. a bare quote) — treat as no matches rather than 500ing.
     return { skills, memory_docs, rank };
