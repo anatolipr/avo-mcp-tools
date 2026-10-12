@@ -37,6 +37,8 @@ export interface DashboardRootConnection {
   lastActivityAt: number;
   /** See TenantConnection.internal — true hides identify/move for this connection in the dashboard (no page to alert, or nothing useful to move). */
   internal: boolean;
+  /** Same rolling log DashboardChannel carries — a tool registered on a root connection is logged on that root Tenant, so without this field the dashboard could never toast it. */
+  recentToolRegistrations: DashboardToolRegistration[];
 }
 
 export interface DashboardToolRegistration {
@@ -105,6 +107,7 @@ export function buildRootConnectionsSnapshot(): DashboardRootConnection[] {
         kind: conn.kind,
         lastActivityAt: t.lastActivityAt,
         internal: conn.internal ?? false,
+        recentToolRegistrations: t.recentToolRegistrations.map((r) => ({ ...r })),
       };
     })
     .sort((a, b) => b.lastActivityAt - a.lastActivityAt);

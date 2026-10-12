@@ -15,7 +15,11 @@ class UnsupportedParamTypeError extends Error {}
 function paramSpecToZod(spec: ToolParamSpec): z.ZodTypeAny {
   let schema: z.ZodTypeAny;
   switch (spec.type) {
-    case 'string': schema = z.string(); break;
+    case 'string':
+      schema = Array.isArray(spec.enum) && spec.enum.length > 0 && spec.enum.every((v) => typeof v === 'string')
+        ? z.enum(spec.enum as [string, ...string[]])
+        : z.string();
+      break;
     case 'number': schema = z.number(); break;
     case 'boolean': schema = z.boolean(); break;
     case 'array':
@@ -26,7 +30,8 @@ function paramSpecToZod(spec: ToolParamSpec): z.ZodTypeAny {
       if (!spec.properties || typeof spec.properties !== 'object') throw new UnsupportedParamTypeError('object param spec missing "properties"');
       schema = z.object(paramsToZodShape(spec.properties));
       break;
-    default: throw new UnsupportedParamTypeError(`unsupported param type "${(spec as any).type}" (supported: string, number, boolean, array, object)`);
+    case 'any': schema = z.any(); break;
+    default: throw new UnsupportedParamTypeError(`unsupported param type "${(spec as any).type}" (supported: string, number, boolean, array, object, any)`);
   }
   if (spec.description) schema = schema.describe(spec.description);
   if (spec.nullable) schema = schema.nullable();
@@ -65,6 +70,7 @@ const TOOL_PARAM_SPEC_SCHEMA: z.ZodType<ToolParamSpec> = z.lazy(() =>
   z.discriminatedUnion('type', [
     z.object({
       type: z.enum(['string', 'number', 'boolean']),
+      enum: z.array(z.string()).optional(),
       description: z.string().optional(),
       optional: z.boolean().optional(),
       nullable: z.boolean().optional(),
@@ -79,6 +85,12 @@ const TOOL_PARAM_SPEC_SCHEMA: z.ZodType<ToolParamSpec> = z.lazy(() =>
     z.object({
       type: z.literal('object'),
       properties: z.record(z.string(), TOOL_PARAM_SPEC_SCHEMA),
+      description: z.string().optional(),
+      optional: z.boolean().optional(),
+      nullable: z.boolean().optional(),
+    }),
+    z.object({
+      type: z.literal('any'),
       description: z.string().optional(),
       optional: z.boolean().optional(),
       nullable: z.boolean().optional(),
@@ -553,7 +565,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
             // Dispatches against the connection's OWNING tenant, not the
             // session's ambient tenant() — for a merged-in root tool, owner
             // is a different Tenant instance than tenant() resolves to.
-            const result = await owner.call(connectionId, entry.name, args);
+            const result = await owner.call(connectionId, entry.name, args, entry.timeoutMs);
             return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
           } catch (err) {
             return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };

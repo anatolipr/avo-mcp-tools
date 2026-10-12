@@ -5,24 +5,24 @@
 // network round trip). Exports start()/stop() rather than running
 // standalone, so the test file controls its lifecycle directly.
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 
 export async function startMockHttpUpstream(port: number): Promise<{ close: () => Promise<void> }> {
-  const server = new McpServer({ name: 'mock-http-upstream', version: '0.0.1' });
-  server.tool('echo', 'Echoes back the given text', { text: z.string() }, async ({ text }) => ({
-    content: [{ type: 'text', text: `echo: ${text}` }],
-  }));
-
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
-  await server.connect(transport);
-
-  const httpServer = http.createServer((req, res) => {
-    transport.handleRequest(req, res);
+  // Stateless (no session id), with a fresh server + transport per request:
+  // a single shared stateful transport accepts exactly one `initialize` for
+  // its whole lifetime, so only the first proxy in a test run could ever
+  // connect to it.
+  const httpServer = http.createServer(async (req, res) => {
+    const server = new McpServer({ name: 'mock-http-upstream', version: '0.0.1' });
+    server.tool('echo', 'Echoes back the given text', { text: z.string() }, async ({ text }) => ({
+      content: [{ type: 'text', text: `echo: ${text}` }],
+    }));
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => { transport.close(); server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
   });
 
   await new Promise<void>((resolve) => httpServer.listen(port, resolve));

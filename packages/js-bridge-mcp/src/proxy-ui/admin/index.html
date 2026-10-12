@@ -219,8 +219,8 @@ function configToJson(config) {
   // Same field set add_mcp_proxy/edit_mcp_proxy accept, minus id/paused
   // (not user-editable here) — args/env stay real JSON array/object rather
   // than the text-form's space/newline-separated string encoding.
-  const { slug, description, transport, command, args, env, url } = config;
-  const fields = { slug, description, transport, command, args, env, url };
+  const { slug, description, transport, command, args, env, url, headers, callTimeoutMs } = config;
+  const fields = { slug, description, transport, command, args, env, url, headers, callTimeoutMs };
   for (const key of Object.keys(fields)) if (fields[key] === undefined) delete fields[key];
   return JSON.stringify(fields, null, 2);
 }
@@ -383,7 +383,7 @@ window.__mcpTools = [
   },
   {
     name: 'view_mcp_proxy',
-    description: 'Returns one proxy\'s full config (transport, command/args or url, description) by slug.',
+    description: 'Returns one proxy\'s full config (transport, command/args/env or url/headers, description) by slug.',
     params: { slug: { type: 'string', description: 'The proxy\'s slug, e.g. "atlassian".' } },
     fn: async ({ slug }) => fetch(`/api/proxies/${await resolveIdBySlug(slug)}`).then((r) => r.json()),
   },

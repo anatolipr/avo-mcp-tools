@@ -13,31 +13,24 @@ export interface ToolDef {
 const getEmbedSnippet: ToolDef = {
   name: 'get_embed_snippet',
   description:
-    'Returns a single line of executable JavaScript that connects the current page to this MCP session\'s ' +
-    'channel. Paste it directly into the browser DevTools console on the target page and press enter — no ' +
-    'source edits needed (or wrap in <script type="module">...</script> before </body> to bake it into the ' +
-    'page). Once run, the page pushes its tool manifest (window.__mcpTools, optional window.__mcpSummary — see ' +
-    'describe_tools) to this session\'s channel, and its tools become callable from THIS conversation. Share ' +
-    'the snippet and tell the user to paste it in DevTools\' Console tab and press enter; do not construct the ' +
-    'URL by hand. ' +
-    '\n\n' +
-    'DEFAULT TO calling join_channel with a topic-scoped name (e.g. "bulletino", from the page/app or task) ' +
-    'BEFORE this — the normal path, not something reserved for when it happens to matter. Skip only for a ' +
-    'genuinely one-off bridge, or when nothing suggests a name worth giving it: staying on "default" means ' +
-    'sharing state with every other unnamed session on this server, and blocks another agent from reconnecting ' +
-    'to the SAME bridged page later by name. The snippet is generated fresh from whatever channel this session ' +
-    'is on, so join first, then call this. Reusing an already-generated snippet in a second tab connects that ' +
-    'tab to the SAME channel, not a new one — join a different name and call this again for a distinct one. ' +
-    '\n\n' +
-    'Running the snippet opens a browser prompt() asking the user to name this connection (pre-filled with the ' +
-    'page title) — warn them before they paste it; dismissing is safe (falls back to the page title). That ' +
-    'name becomes this connection\'s tool-name prefix once a second connection joins the same channel (see ' +
-    'describe_tools).',
+    'Returns one line of JavaScript that bridges a browser page to this server. Give it to the user verbatim ' +
+    '(do not build the URL by hand): they paste it into that page\'s DevTools Console and press enter, or wrap ' +
+    'it in <script type="module">...</script> before </body>. Warn them it opens a prompt() to label the ' +
+    'connection (pre-filled with the page title; dismissing is safe). The page then pushes its tools ' +
+    '(window.__mcpTools, optional window.__mcpSummary) and they become callable here — call describe_tools ' +
+    'for their names. The page connects under this session\'s current name, which is also its tool prefix: ' +
+    'call join_channel with a topic name (e.g. "bulletino") first to choose it, otherwise it is this ' +
+    'server\'s own name. Each paste of the same snippet in another tab adds a separate connection.',
   schema: {},
   handler: async (_args, tenant, port) => {
-    const tenantId = tenant().id;
+    // displayName, not id, for a root tenant: its id is "root:<name>", and
+    // the WS side (ws.ts) reads a colon in ?tenant= as "channel:name" — the
+    // raw id put the page in a literal channel called "root" that no
+    // session was on, so its tools never showed up anywhere.
+    const t = tenant();
+    const tenantId = t.isRoot ? t.displayName : t.id;
     const serverUrl = `http://localhost:${port}`;
-    const moduleUrl = `${serverUrl}/main.js?server=${encodeURIComponent(serverUrl)}&tenant=${tenantId}`;
+    const moduleUrl = `${serverUrl}/main.js?server=${encodeURIComponent(serverUrl)}&tenant=${encodeURIComponent(tenantId)}`;
     const snippet = `import(${JSON.stringify(moduleUrl)});`;
     return { content: [{ type: 'text', text: snippet }] };
   },
@@ -46,12 +39,11 @@ const getEmbedSnippet: ToolDef = {
 const listProxies: ToolDef = {
   name: 'list_proxies',
   description:
-    'Lists every configured MCP-server proxy (see the admin UI at /admin) — each proxy is a real upstream MCP ' +
-    'server exposed as its own dedicated channel, with every one of its tools prefixed `<slug>__<tool>` (e.g. ' +
-    '"atlassian__get_tickets"). Use this BEFORE guessing a tool name to confirm what\'s currently active, ' +
-    'whether it\'s paused, and how many tools it exposes. `connected: false` with a `lastError` usually means ' +
-    'the upstream server needs its own auth (handled in the admin UI), not a bug here. Call describe_channel on ' +
-    'a proxy\'s `slug` to see its actual tool list.',
+    'Lists every configured MCP-server proxy (managed at /admin or with the admin__* tools) and its live ' +
+    'status: connected, paused, toolCount, lastError. A proxy is an upstream MCP server whose tools appear ' +
+    'in every session prefixed `<slug>__` (e.g. "atlassian__get_tickets") — call this before guessing such a ' +
+    'name. `connected: false` with a `lastError` usually means the upstream needs its own auth or a config ' +
+    'fix, not a bug here. describe_connection on a `slug` lists that proxy\'s tools.',
   schema: {},
   handler: async () => {
     return { content: [{ type: 'text', text: JSON.stringify(listProxiesState(), null, 2) }] };

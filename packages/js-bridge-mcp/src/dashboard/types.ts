@@ -39,6 +39,8 @@ export interface DashboardRootConnection {
   lastActivityAt: number;
   // True hides identify/move for this connection — e.g. admin, the browser extension.
   internal: boolean;
+  // Optional: absent from a server built against mcp-tenant-lib < 0.7.8.
+  recentToolRegistrations?: DashboardToolRegistration[];
 }
 
 // Combined shape pushed over the dashboard SSE stream — see dashboard-app.ts's connectedCallback.

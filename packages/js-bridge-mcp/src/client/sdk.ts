@@ -61,8 +61,10 @@ const JSBRIDGE_HOST = 'http://localhost:8766';
 
 let busLoadPromise: Promise<McpToolBus | undefined> | undefined;
 
-function ensureToolBusLoaded(): Promise<McpToolBus | undefined> {
-  busLoadPromise ??= import(/* @vite-ignore */ `${JSBRIDGE_HOST}/tool-bus.js`)
+// `host` only matters to whichever call comes first: the bus installs itself
+// once per page (window.__mcpToolBus ??= ...), so there is one load to share.
+function ensureToolBusLoaded(host: string = JSBRIDGE_HOST): Promise<McpToolBus | undefined> {
+  busLoadPromise ??= import(/* @vite-ignore */ `${host.replace(/\/+$/, '')}/tool-bus.js`)
     .then(() => (window as any).__mcpToolBus as McpToolBus | undefined)
     .catch(() => undefined);
   return busLoadPromise;
@@ -94,6 +96,8 @@ export interface ConnectMcpBridgeOptions {
   appName: string;
   defaultChannel?: string;
   onStateChange?: (state: 'disconnected' | 'connecting' | 'connected', channel: string, appLabel: string) => void;
+  /** js-bridge-mcp's own origin, for a server started on a non-default PORT. Defaults to "http://localhost:8766". */
+  serverUrl?: string;
   /** Extra bus/provider setup beyond the automatic tool-bus load, e.g. registering a provider before the first connect. */
   beforeConnect?: () => Promise<void> | void;
 }
@@ -115,8 +119,9 @@ export function connectMcpBridge(opts: ConnectMcpBridgeOptions) {
     appName: opts.appName,
     defaultChannel: opts.defaultChannel,
     onStateChange: opts.onStateChange,
+    serverUrl: opts.serverUrl,
     beforeConnect: async () => {
-      await ensureToolBusLoaded();
+      await ensureToolBusLoaded(opts.serverUrl);
       await opts.beforeConnect?.();
     },
   });

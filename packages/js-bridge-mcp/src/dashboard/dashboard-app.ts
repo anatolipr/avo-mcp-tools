@@ -171,7 +171,7 @@ export class DashboardApp extends LitElement {
         const snapshot = JSON.parse(event.data) as DashboardSnapshot;
         this.#channels.set(snapshot.channels);
         this.#rootConnections.set(snapshot.root);
-        this.#toastNewRegistrations(snapshot.channels);
+        this.#toastNewRegistrations(snapshot.channels, snapshot.root);
       } catch {
         // malformed event — ignore, next push will self-correct
       }
@@ -183,14 +183,21 @@ export class DashboardApp extends LitElement {
   // #toastedRegistrationIds from whatever's already in the log without
   // toasting it, so opening the dashboard doesn't replay every past
   // registration as a fresh notification.
-  #toastNewRegistrations(channels: DashboardChannel[]) {
+  #toastNewRegistrations(channels: DashboardChannel[], root: DashboardRootConnection[] = []) {
     const isFirstSnapshot = !this.#seenFirstSnapshot;
     this.#seenFirstSnapshot = true;
-    for (const c of channels) {
-      for (const r of c.recentToolRegistrations) {
+    // Root connections too: a page bridged in by bare name (the default) is
+    // one, and its registrations are logged on its own root Tenant, not on
+    // any channel — channels alone missed every one of them.
+    const logs = [
+      ...channels.map((c) => ({ where: c.channel, entries: c.recentToolRegistrations })),
+      ...root.map((rc) => ({ where: rc.name, entries: rc.recentToolRegistrations ?? [] })),
+    ];
+    for (const { where, entries } of logs) {
+      for (const r of entries) {
         if (this.#toastedRegistrationIds.has(r.id)) continue;
         this.#toastedRegistrationIds.add(r.id);
-        if (!isFirstSnapshot) toast.sticky(`New tool registered on "${c.channel}": ${r.name} — ${r.description}`);
+        if (!isFirstSnapshot) toast.sticky(`New tool registered on "${where}": ${r.name} — ${r.description}`);
       }
     }
   }

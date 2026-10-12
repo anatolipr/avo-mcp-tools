@@ -1,14 +1,16 @@
 import path from 'node:path';
 import os from 'node:os';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import open from 'open';
 import { getOrCreateTenant as getOrCreateTenantFor, tenants, startIdleSweep, startEmptySweep, createHttpServer, attachWebSocketServer } from 'mcp-tenant-lib';
 import { initialHelloState } from './types.js';
 import { registerHelloTools } from './tools/register.js';
-import { initProxyManager } from './proxy/proxy-manager.js';
+import { initProxyManager, shutdownProxyManager } from './proxy/proxy-manager.js';
 import { installProxyAdminRoutes } from './proxy/admin-routes.js';
 import { initAdminChannel } from './proxy/admin-channel.js';
+import { isLoopbackAddress, resolveSecurityOptions } from './security.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // __dirname is <pkg>/src when run via tsx (dev/test) and <pkg>/dist/src once
@@ -17,30 +19,115 @@ const packageRoot = __dirname.endsWith(`${path.sep}dist${path.sep}src`)
   ? path.join(__dirname, '..', '..')
   : path.join(__dirname, '..');
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8766;
+const IDENTITY_NAME = 'js-bridge-mcp';
 
-// A stale js-bridge-mcp instance (e.g. left running from a previous editor
-// session/reload) is the overwhelmingly common occupant of this port, and
-// leaving it running would just make this new instance fail to bind. Free
-// the port unconditionally before listening, macOS/Linux only.
-function killWhateverIsOnPort(port: number) {
-  let pids: string;
+function readPackageVersion(): string {
   try {
-    pids = execSync(`lsof -ti tcp:${port}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    return JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf-8')).version ?? '0.0.0';
   } catch {
-    return; // lsof exits non-zero when nothing is listening on the port
-  }
-  if (!pids) return;
-  for (const pid of pids.split('\n')) {
-    if (pid === String(process.pid)) continue;
-    try {
-      process.kill(Number(pid), 'SIGKILL');
-      console.error(`[js-bridge-mcp] killed process ${pid} that was on port ${port}`);
-    } catch {
-      // already gone
-    }
+    return '0.0.0';
   }
 }
-killWhateverIsOnPort(PORT);
+const VERSION = readPackageVersion();
+const security = resolveSecurityOptions();
+const TRUTHY = new Set(['1', 'true', 'yes', 'on']);
+const forceKillPort = process.argv.includes('--force-kill-port') || TRUTHY.has((process.env.JS_BRIDGE_MCP_FORCE_KILL_PORT ?? '').toLowerCase());
+
+function pidsOnPort(port: number): number[] {
+  try {
+    const out = execFileSync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+    return [...new Set(out.split('\n').map((line) => Number(line.trim())).filter((pid) => pid > 0 && pid !== process.pid))];
+  } catch {
+    return []; // lsof exits non-zero when nothing is listening on the port (or isn't installed, e.g. Windows)
+  }
+}
+
+function commandOutput(file: string, args: string[]): string {
+  try {
+    return execFileSync(file, args, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  } catch {
+    return '';
+  }
+}
+
+async function fetchText(url: string): Promise<string> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(800) });
+    return res.ok ? await res.text() : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Is whatever holds `port` an (older) js-bridge-mcp? Asked over HTTP first:
+ * /api/identity exists from 0.7.0 on, and every earlier build's /main.js
+ * bundle carries this server's "[js-bridge-mcp]" log prefix. A hung instance
+ * answers neither, so the process itself is inspected next: its command line
+ * (an npx/global install runs ".../js-bridge-mcp"), or — for a `tsx
+ * src/server.ts` dev run, whose command line is only a relative path — a
+ * server entrypoint in the command line AND this package as its working
+ * directory. The working directory alone is not enough: any unrelated tool
+ * started from this folder would match.
+ */
+async function isStaleJsBridgeInstance(port: number, pid: number): Promise<boolean> {
+  const identity = await fetchText(`http://127.0.0.1:${port}/api/identity`);
+  try {
+    if (JSON.parse(identity).name === IDENTITY_NAME) return true;
+  } catch { /* not JSON — an older build, or something else entirely */ }
+  if ((await fetchText(`http://127.0.0.1:${port}/main.js`)).includes('[js-bridge-mcp]')) return true;
+  const command = commandOutput('ps', ['-p', String(pid), '-o', 'command=']);
+  if (command.includes(IDENTITY_NAME)) return true;
+  return /server\.(ts|js)\b/.test(command) && commandOutput('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn']).includes(IDENTITY_NAME);
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A stale js-bridge-mcp instance (e.g. left running from a previous editor
+ * session/reload) is the overwhelmingly common occupant of this port, and
+ * leaving it running would just make this new instance fail to bind — so it
+ * is replaced. Anything that is NOT recognizably js-bridge-mcp is left alone
+ * (this used to SIGKILL whatever was there, e.g. an unrelated dev server
+ * that happened to pick the same port); --force-kill-port restores that.
+ * SIGTERM first so the old instance can stop its stdio proxy children (see
+ * the shutdown handler below), SIGKILL only if it doesn't exit. macOS/Linux
+ * only — pidsOnPort finds nothing without lsof.
+ */
+async function freePortFromStaleInstance(port: number) {
+  for (const pid of pidsOnPort(port)) {
+    if (!forceKillPort && !(await isStaleJsBridgeInstance(port, pid))) {
+      const command = commandOutput('ps', ['-p', String(pid), '-o', 'command=']) || 'unknown command';
+      console.error(
+        `[js-bridge-mcp] port ${port} is in use by process ${pid} (${command}), which does not look like js-bridge-mcp — not killing it. ` +
+        `Stop it, set PORT to a free port, or pass --force-kill-port (or set JS_BRIDGE_MCP_FORCE_KILL_PORT=1) to kill it anyway.`
+      );
+      // Exit rather than try to listen: binding can still "succeed" next to a
+      // listener on a narrower address (it on 127.0.0.1, this on every
+      // interface), leaving two servers answering the same port.
+      process.exit(1);
+    }
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      continue; // already gone
+    }
+    for (let i = 0; i < 20 && isAlive(pid); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    if (isAlive(pid)) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* exited in between */ }
+      for (let i = 0; i < 10 && isAlive(pid); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    console.error(`[js-bridge-mcp] stopped process ${pid} that was on port ${port}`);
+  }
+}
+await freePortFromStaleInstance(PORT);
 
 const getOrCreateTenant = (id: string) => getOrCreateTenantFor(id, undefined, { ...initialHelloState });
 
@@ -80,7 +167,7 @@ const httpServer = createHttpServer({
   staticDir: DASHBOARD_DIR,
   initialSchema: undefined,
   initialValues: initialHelloState,
-  identity: { name: 'js-bridge-mcp', version: '0.1.0' },
+  identity: { name: IDENTITY_NAME, version: VERSION },
   registerFn: registerHelloTools,
   // Each of these is a fixed-URL asset other pages import cross-origin by
   // absolute path (main.js via get_embed_snippet; tool-bus.js/connect.js
@@ -105,18 +192,64 @@ const httpServer = createHttpServer({
   defaultTenantMode: 'shared',
 });
 
+// Registered before attachWebSocketServer: ws forwards the http server's
+// 'error' to its own emitter, which throws when nothing listens there —
+// this one must run first to print a readable message.
+httpServer.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[js-bridge-mcp] port ${PORT} is already in use — stop whatever holds it or set PORT to a free port`);
+  } else {
+    console.error(`[js-bridge-mcp] server error: ${err.message}`);
+  }
+  process.exit(1);
+});
+
+// Loopback-only unless --allow-remote: the socket is dropped before any HTTP
+// or WebSocket handling, so nothing on the LAN can reach /mcp, /api/* or
+// /ws. Enforced per-connection rather than by binding to 127.0.0.1 because
+// "localhost" resolves to ::1 on some systems and 127.0.0.1 on others —
+// listening on every interface and filtering here keeps both working for
+// same-machine clients exactly as before.
+httpServer.on('connection', (socket) => {
+  if (!security.allowRemote && !isLoopbackAddress(socket.remoteAddress)) {
+    console.error(`[js-bridge-mcp] refused connection from ${socket.remoteAddress} — pass --allow-remote (or set JS_BRIDGE_MCP_ALLOW_REMOTE=1) to accept non-local clients`);
+    socket.destroy();
+  }
+});
+
 attachWebSocketServer(httpServer, PORT, undefined, initialHelloState);
-installProxyAdminRoutes(httpServer, PORT);
+installProxyAdminRoutes(httpServer, PORT, security, { name: IDENTITY_NAME, version: VERSION });
 initAdminChannel();
-initProxyManager(PROXY_CONFIG_PATH);
+initProxyManager(PROXY_CONFIG_PATH, VERSION);
+
+// Closes upstream proxy clients before exiting, so stdio children (an `npx`
+// MCP server per proxy) stop with this process instead of outliving it.
+let shuttingDown = false;
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+  process.on(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    shutdownProxyManager().finally(() => process.exit(0));
+  });
+}
 
 httpServer.listen(PORT, () => {
   const url = `http://localhost:${PORT}`;
-  console.error(`[js-bridge-mcp] MCP + bridge server listening on ${url}`);
+  console.error(`[js-bridge-mcp] v${VERSION} — MCP + bridge server listening on ${url}`);
   console.error(`[js-bridge-mcp] dashboard: ${url}`);
   console.error(`[js-bridge-mcp] proxy admin: ${url}/admin`);
   console.error(`[js-bridge-mcp] proxy hub: ${url}/hub`);
   console.error(`[js-bridge-mcp] serve legacy-page/hello-world.html separately: npm run start:static`);
+  console.error(
+    security.allowRemote
+      ? '[js-bridge-mcp] remote access: ON (--allow-remote) — any device that can reach this port can call /mcp and /api/*, including spawning processes via proxies'
+      : '[js-bridge-mcp] remote access: off (this machine only) — pass --allow-remote (or set JS_BRIDGE_MCP_ALLOW_REMOTE=1) to accept other devices'
+  );
+  console.error(
+    security.allowedOrigins.length
+      ? `[js-bridge-mcp] extra web origins allowed to call /mcp and /api/*: ${security.allowedOrigins.join(', ')}`
+      : '[js-bridge-mcp] web origins allowed to call /mcp and /api/*: localhost pages and browser extensions — pass --allow-origin <origin> (or set JS_BRIDGE_MCP_ALLOWED_ORIGINS) to add one; bridged pages (/ws, /main.js) need none'
+  );
   if (!process.env.JS_BRIDGE_MCP_NO_OPEN) {
     open(url).catch(() => {
       console.error(`[js-bridge-mcp] could not auto-open browser — open ${url} manually`);

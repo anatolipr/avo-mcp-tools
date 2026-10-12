@@ -21,6 +21,8 @@ export interface ProxyConfig {
   /** sse / streamableHttp only. */
   url?: string;
   headers?: Record<string, string>;
+  /** Per-call timeout for this proxy's tools, in ms. Absent means the default (PROXY_CALL_TIMEOUT_MS, 60s) — see proxy-manager.ts's proxyCallTimeoutMs. */
+  callTimeoutMs?: number;
   paused: boolean;
 }
 

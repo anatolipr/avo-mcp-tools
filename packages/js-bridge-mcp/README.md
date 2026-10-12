@@ -51,25 +51,92 @@ npm run start:static  # serves legacy-page/, port 8080, in a second terminal
 Open `http://localhost:8080/hello-world.html` — it renders as-is, not yet
 connected to anything.
 
+### Options
+
+`js-bridge-mcp --help` prints this list. From this repo, pass flags after
+`--`, e.g. `npm run start:mcp -- --allow-remote`.
+
+| Flag | Environment variable | Effect |
+| --- | --- | --- |
+| `--allow-remote` | `JS_BRIDGE_MCP_ALLOW_REMOTE=1` | Accept connections from other devices. Default: this machine only. |
+| `--allow-origin <url>` (repeatable) | `JS_BRIDGE_MCP_ALLOWED_ORIGINS=<url>,<url>` | Let page JavaScript on that web origin call `/mcp` and `/api/*`. |
+| `--force-kill-port` | `JS_BRIDGE_MCP_FORCE_KILL_PORT=1` | Kill whatever holds the port, even if it is not js-bridge-mcp. |
+| | `PORT` | Port to listen on. Default 8766. |
+| | `PROXY_CONFIG_PATH` | Proxy config file. Default `~/.js-bridge-mcp-proxies.json`. |
+| | `PROXY_CALL_TIMEOUT_MS` | Default timeout for a proxied tool call. Default 60000. |
+| | `JS_BRIDGE_MCP_PROXY_RECONNECT=0` | Do not auto-reconnect a proxy whose upstream dropped. |
+| | `JS_BRIDGE_MCP_NO_OPEN=1` | Do not open the dashboard in a browser on start. |
+
+On start, the server replaces an older js-bridge-mcp instance that still
+holds its port. A process that is not js-bridge-mcp is left running and the
+new instance exits with a message instead.
+
+### Who can reach the server
+
+This server can spawn processes (a stdio proxy's `command`) and run
+JavaScript in bridged tabs, so its control surface is restricted by default.
+The startup log states the current setting.
+
+- **Other devices are refused.** Only connections from this machine are
+  accepted. Start with `--allow-remote` to accept the LAN.
+- **`/mcp`, `/api/*` and `/upload` check the caller.** A request with no
+  `Origin` header (Claude Code, VS Code, curl, any non-browser client) is
+  accepted. So is one from a page on `localhost` / `127.0.0.1` (any port) or
+  from a browser extension. Page JavaScript on any other website is refused
+  with `403`; add the site with `--allow-origin https://example.com` if it
+  must call these routes itself. The `Host` header must also be a loopback
+  name, which blocks DNS-rebinding.
+- **Bridging a page in is not restricted.** The WebSocket (`/ws`) and the
+  static files (`/main.js`, `/connect.js`, `/tool-bus.js`) stay reachable
+  from any origin. A hosted site that connects with `connect.js`, the
+  `js-bridge-mcp/client` SDK, or a pasted `import(...)` snippet needs no
+  allowlist entry.
+
+The proxy config file is written with owner-only permissions (`0600`); it
+holds any `env` values and HTTP `headers` you give a proxy.
+
+### MCP proxies
+
+`/admin` (or the `admin__*` MCP tools) adds upstream MCP servers whose tools
+then appear in every session, prefixed `<slug>__`.
+
+- A proxy whose upstream goes away after connecting (a crashed stdio server,
+  a restarted HTTP one) is marked disconnected, its tools are removed, and it
+  reconnects by itself with a growing delay (1s to 30s, six attempts). A
+  proxy that never connected is not retried; fix its config and restart it.
+- When the upstream announces a changed tool list, the proxy re-reads it.
+- An upstream tool parameter that cannot be expressed precisely (`oneOf`,
+  `$ref`, a free-form object) is accepted unvalidated, with its JSON Schema
+  shown in the parameter description. String `enum`s are enforced.
+- Calls time out after 60s by default. Set `callTimeoutMs` in a proxy's JSON
+  config, or `timeoutSeconds` on `admin__add_mcp_proxy` /
+  `admin__edit_mcp_proxy`, to change it for one proxy.
+- HTTP `headers` (for `sse` / `streamableHttp` proxies) can be set from the
+  JSON form in `/admin` or with the `headers` parameter of the admin tools.
+  An edit that does not mention `headers` keeps the existing ones.
+
 ## Connect an agent
 
 1. Point an MCP client at `http://localhost:8766/mcp`.
 2. Call `get_embed_snippet`. It returns something like:
    ```js
-   import("http://localhost:8766/main.js?server=http%3A%2F%2Flocalhost%3A8766&tenant=<uuid>");
+   import("http://localhost:8766/main.js?server=http%3A%2F%2Flocalhost%3A8766&tenant=js-bridge-mcp");
    ```
+   The `tenant` value is the name the page connects under, and its tool
+   prefix. Call `join_channel` with a name of your choice first to change it.
 3. Open `legacy-page/hello-world.html` in a browser, open DevTools, go to
    the Console tab, paste that line, and press enter. (Alternatively, wrap
    it in a `<script type="module">...</script>` tag and paste it into the
    page's HTML before `</body>` — there's a comment marking the spot — then
    reload.)
-4. Call `insert_title` / `insert_main` from the MCP client — the open tab
+4. Call `js_bridge_mcp__insert_title` / `js_bridge_mcp__insert_main` (see
+   `describe_tools` for the exact names) from the MCP client — the open tab
    updates live, no page refresh needed.
 
-The tenant id embedded in the snippet is this MCP session's own tenant, so
-repeated `get_embed_snippet` calls within the same session return the same
-tenant id — the page stays connected to whichever session generated the
-snippet it's using.
+Repeated `get_embed_snippet` calls within the same session return the same
+snippet. A page connected by bare name like this is a root connection: its
+tools are visible to every MCP session on this server, not only the one that
+generated the snippet.
 
 ## Auto-connect on page load (no DevTools paste)
 

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { getOrCreateRootTenant, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
-import { addProxy, listProxies, pauseProxy, removeProxy, restartProxy, resumeProxy, updateProxy } from './proxy-manager.js';
+import { addProxy, getProxyConfig, listProxies, pauseProxy, removeProxy, restartProxy, resumeProxy, updateProxy } from './proxy-manager.js';
 import type { ProxyConfig, ProxyTransport } from './types.js';
 
 const ADMIN_ROOT_NAME = 'admin';
@@ -12,7 +12,7 @@ const ADMIN_ROOT_NAME = 'admin';
  * rules apply (only quote an arg containing whitespace; KEY=VALUE, one per
  * line, for env).
  */
-function parseArgs(text: string): string[] {
+export function parseArgs(text: string): string[] {
   const args: string[] = [];
   const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
   let match: RegExpExecArray | null;
@@ -22,7 +22,7 @@ function parseArgs(text: string): string[] {
   return args;
 }
 
-function parseEnv(text: string): Record<string, string> {
+export function parseEnv(text: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
@@ -34,21 +34,41 @@ function parseEnv(text: string): Record<string, string> {
   return env;
 }
 
+/** HTTP headers as "Name: Value", one per line — split on the first colon only, since a value (a URL, a "Bearer a:b" token) may contain more. */
+export function parseHeaders(text: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const line of text.split('\n')) {
+    const colon = line.indexOf(':');
+    if (colon <= 0) continue;
+    const name = line.slice(0, colon).trim();
+    if (name) headers[name] = line.slice(colon + 1).trim();
+  }
+  return headers;
+}
+
 function resolveIdBySlug(slug: string): string {
   const match = listProxies().find((p) => p.slug === slug);
   if (!match) throw new Error(`no proxy with slug "${slug}" — call list_mcp_proxies to see what's configured`);
   return match.id;
 }
 
+/**
+ * `headers`/`callTimeoutMs` are only present in the result when the caller
+ * actually passed them: updateProxy keeps a proxy's existing value for a key
+ * that is absent, so an edit that doesn't mention them leaves them alone. An
+ * empty `headers` string or a `timeoutSeconds` of 0 clears the stored value.
+ */
 function configFromArgs(args: {
   transport: ProxyTransport;
   command?: string;
   args?: string;
   env?: string;
   url?: string;
+  headers?: string;
+  timeoutSeconds?: number;
   description?: string;
 }): Omit<ProxyConfig, 'id' | 'paused' | 'slug'> {
-  return {
+  const config: Omit<ProxyConfig, 'id' | 'paused' | 'slug'> = {
     transport: args.transport,
     description: args.description || undefined,
     command: args.command,
@@ -56,12 +76,17 @@ function configFromArgs(args: {
     env: args.env ? parseEnv(args.env) : undefined,
     url: args.url,
   };
+  if (typeof args.headers === 'string') config.headers = args.headers.trim() ? parseHeaders(args.headers) : undefined;
+  if (typeof args.timeoutSeconds === 'number') config.callTimeoutMs = args.timeoutSeconds > 0 ? args.timeoutSeconds * 1000 : undefined;
+  return config;
 }
 
 const stdioArgsParam: ToolParamSpec = { type: 'string', description: 'Space-separated command-line args (stdio only), e.g. -y some-mcp-server --dsn "mysql://user:pass@host/db". Only quote an arg if it itself contains a space — quotes are stripped, not passed through to the process.', optional: true };
 const envParam: ToolParamSpec = { type: 'string', description: 'Environment variables to set on the spawned process (stdio only), as KEY=VALUE — one per line for multiple, e.g. "DSN=mysql://root:@127.0.0.1:3306/iram\\nLOG_LEVEL=debug".', optional: true };
 const commandParam: ToolParamSpec = { type: 'string', description: 'Executable to spawn (stdio only), e.g. "npx".', optional: true };
 const urlParam: ToolParamSpec = { type: 'string', description: 'Upstream server URL (sse/streamableHttp only).', optional: true };
+const headersParam: ToolParamSpec = { type: 'string', description: 'HTTP headers sent to the upstream (sse/streamableHttp only), as "Name: Value" — one per line, e.g. "Authorization: Bearer abc".', optional: true };
+const timeoutParam: ToolParamSpec = { type: 'number', description: 'Per-call timeout for this proxy\'s tools, in seconds (default 60).', optional: true };
 const descriptionParam: ToolParamSpec = { type: 'string', description: 'Optional human-readable note about this proxy.', optional: true };
 const slugParam: ToolParamSpec = { type: 'string', description: 'The proxy\'s slug.' };
 const transportParam: ToolParamSpec = { type: 'string', description: '"stdio", "sse", or "streamableHttp".' };
@@ -75,7 +100,7 @@ const manifest: ToolManifestEntry[] = [
   },
   {
     name: 'view_mcp_proxy',
-    description: 'Returns one proxy\'s full config (transport, command/args or url, description) by slug.',
+    description: 'Returns one proxy\'s full config (transport, command/args/env or url/headers, description) plus its live status, by slug.',
     params: { slug: slugParam },
     source: 'host',
   },
@@ -90,6 +115,8 @@ const manifest: ToolManifestEntry[] = [
       args: stdioArgsParam,
       env: envParam,
       url: urlParam,
+      headers: headersParam,
+      timeoutSeconds: timeoutParam,
       description: descriptionParam,
     },
     source: 'host',
@@ -97,7 +124,7 @@ const manifest: ToolManifestEntry[] = [
   {
     name: 'edit_mcp_proxy',
     description:
-      'Replaces an existing proxy\'s config (same fields and quoting rules as add_mcp_proxy) and restarts it under the new config. Its current paused/running state is preserved. Fields not given fall back to empty, so pass the full desired config, not just what changed.',
+      'Replaces an existing proxy\'s config (same fields and quoting rules as add_mcp_proxy) and restarts it under the new config. Its current paused/running state is preserved. Fields not given fall back to empty, so pass the full desired config (view_mcp_proxy returns it), not just what changed — except headers and timeoutSeconds, which keep their current value when omitted (pass "" or 0 to clear).',
     params: {
       slug: { type: 'string', description: 'The EXISTING proxy\'s current slug, to find it.' },
       newSlug: { type: 'string', description: 'The slug to rename it to — same as slug if not renaming.' },
@@ -106,6 +133,8 @@ const manifest: ToolManifestEntry[] = [
       args: stdioArgsParam,
       env: envParam,
       url: urlParam,
+      headers: headersParam,
+      timeoutSeconds: timeoutParam,
       description: descriptionParam,
     },
     source: 'host',
@@ -142,8 +171,11 @@ async function dispatchAdminCall(name: string, args: unknown): Promise<unknown> 
     case 'list_mcp_proxies':
       return listProxies();
     case 'view_mcp_proxy': {
+      // Status AND config: this used to return only the status summary
+      // (the same thing list_mcp_proxies gives), so an agent had no way to
+      // read the command/args/env it must resend in full to edit_mcp_proxy.
       const id = resolveIdBySlug(a.slug);
-      return listProxies().find((p) => p.id === id);
+      return { ...listProxies().find((p) => p.id === id), ...getProxyConfig(id) };
     }
     case 'add_mcp_proxy':
       return addProxy({ slug: a.slug, ...configFromArgs(a as Parameters<typeof configFromArgs>[0]) });

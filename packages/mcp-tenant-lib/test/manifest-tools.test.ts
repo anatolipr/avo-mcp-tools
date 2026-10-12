@@ -632,3 +632,39 @@ test('replaying a dynamic tool consumes the stash so a later reconnect under the
   t.updateConnectionManifest('c', [], undefined, 'mypage');
   assert.equal(calls.length, 1, 'stash should have been consumed by the first replay, nothing left for a second reconnect');
 });
+
+test('a manifest tool with "enum" and "any" params registers (not skipped) and passes both through to the page', async () => {
+  const t = new Tenant('t-enum-any', undefined, {});
+  let seenTimeout: number | undefined;
+  const originalCall = t.call.bind(t);
+  t.call = ((connectionId: string | undefined, name: string, args: unknown, timeoutMs?: number) => {
+    seenTimeout = timeoutMs;
+    return originalCall(connectionId, name, args, timeoutMs);
+  }) as typeof t.call;
+  t.registerDirectConnection('c', async (_name, args) => JSON.stringify(args), 'c');
+  t.updateConnectionManifest('c', [
+    {
+      name: 'search',
+      description: 'd',
+      params: {
+        mode: { type: 'string', enum: ['fast', 'deep'] },
+        filter: { type: 'any', optional: true },
+      },
+      timeoutMs: 45_000,
+    },
+  ]);
+  const mcp = new McpServer({ name: 'test', version: '0.0.1' });
+  const registry = createManifestToolRegistry(mcp, () => t);
+  registry.sync();
+  const handle = registry.handles.get('c__search') as any;
+  assert.ok(handle, 'tool with enum/any params must not be skipped');
+  const shape = handle.inputSchema.shape;
+  assert.equal(shape.mode.safeParse('fast').success, true);
+  assert.equal(shape.mode.safeParse('nope').success, false);
+  assert.equal(shape.filter.safeParse({ anything: [1, 'two'] }).success, true);
+
+  const result = await handle.handler({ mode: 'deep', filter: { a: 1 } }, {});
+  assert.equal(result.content[0].text, JSON.stringify({ mode: 'deep', filter: { a: 1 } }));
+  assert.equal(seenTimeout, 45_000);
+  registry.dispose();
+});

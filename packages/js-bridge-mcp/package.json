@@ -1,6 +1,6 @@
 {
   "name": "js-bridge-mcp",
-  "version": "0.6.7",
+  "version": "0.7.0",
   "type": "module",
   "description": "Generic bridge: exposes MCP tools discovered from a connected page's own JSON tool manifest, dispatched over a cross-origin WebSocket. Ships a hello-world example page under legacy-page/.",
   "repository": {
@@ -40,14 +40,14 @@
     "start:static": "http-server legacy-page --cors -p 8080",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.client.json",
-    "stop": "kill -9 $(lsof -ti :${PORT:-8766}) 2>/dev/null && echo 'Server stopped' || echo 'No server running'",
-    "test": "node --import tsx --test test/**/*.test.ts"
+    "stop": "kill -9 $(lsof -ti tcp:${PORT:-8766} -sTCP:LISTEN) 2>/dev/null && echo 'Server stopped' || echo 'No server running'",
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "avosignals": "^1.0.16",
     "lit": "^3.3.3",
-    "mcp-tenant-lib": "^0.7.7",
+    "mcp-tenant-lib": "^0.7.8",
     "open": "^10.2.0",
     "ws": "^8.18.0",
     "zod": "^3.23.8"

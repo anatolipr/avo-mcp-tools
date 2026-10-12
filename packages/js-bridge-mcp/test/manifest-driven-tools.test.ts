@@ -3,11 +3,18 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { WebSocket } from 'ws';
 
 const PORT = 8907;
 const BASE_URL = `http://localhost:${PORT}`;
 let serverProcess: ChildProcess;
+// A private, empty proxy config — without it this server would load (and
+// spawn) whatever the developer running the tests has in their real
+// ~/.js-bridge-mcp-proxies.json, and the base tool list below would vary.
+const proxyConfigPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'js-bridge-mcp-manifest-test-')), 'proxies.json');
 
 function textOf(result: Record<string, unknown>): string {
   const content = result.content as Array<{ text: string }>;
@@ -25,7 +32,7 @@ before(async () => {
   // assertion detail even when every individual test already passed.
   serverProcess = spawn('npx', ['tsx', 'src/server.ts'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, PORT: String(PORT), JS_BRIDGE_MCP_NO_OPEN: '1' },
+    env: { ...process.env, PORT: String(PORT), PROXY_CONFIG_PATH: proxyConfigPath, JS_BRIDGE_MCP_NO_OPEN: '1' },
     stdio: ['ignore', 'ignore', 'inherit'],
     detached: true,
   });
@@ -44,6 +51,7 @@ after(() => {
   // so this actually reaches the real tsx/node server, not just the npx
   // wrapper that spawned it.
   if (serverProcess.pid) process.kill(-serverProcess.pid, 'SIGKILL');
+  fs.rmSync(path.dirname(proxyConfigPath), { recursive: true, force: true });
 });
 
 async function connectClient() {
@@ -81,12 +89,40 @@ async function waitForTool(client: Client, name: string, timeoutMs = 3000) {
   throw new Error(`tool "${name}" did not appear in tools/list within ${timeoutMs}ms`);
 }
 
+// How a bridged page reaches a session today (these tests predate it and
+// were rewritten): a bare ?tenant=<name> makes the page a ROOT connection
+// called <name>, its tools are always prefixed "<name>__", and root tools
+// are merged into every MCP session with no join_channel needed. Each test
+// uses its own page name so one test's closing socket can't collide with
+// the next one's connect and push it onto a suffixed name.
+
+/** The connection id describe_tools reports for a root page — register/unregister_page_tool need it, since the page is not on the session's own tenant. */
+async function connectionIdFor(client: Client, toolPrefix: string): Promise<string> {
+  const start = Date.now();
+  while (Date.now() - start < 3000) {
+    const payload = JSON.parse(textOf(await client.callTool({ name: 'describe_tools', arguments: {} })));
+    const conn = payload.connections.find((c: any) => c.toolPrefix === toolPrefix);
+    if (conn) return conn.id;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`no connection with tool prefix "${toolPrefix}" appeared in describe_tools`);
+}
+
 test('a fresh session only has the base tools until a page pushes its manifest', async () => {
   const a = await connectClient();
   const names = await toolNames(a.client);
   assert.deepEqual(names.sort(), [
+    'admin__add_mcp_proxy',
+    'admin__edit_mcp_proxy',
+    'admin__list_mcp_proxies',
+    'admin__pause_mcp_proxy',
+    'admin__remove_mcp_proxy',
+    'admin__restart_mcp_proxy',
+    'admin__resume_mcp_proxy',
+    'admin__view_mcp_proxy',
     'channel_find',
     'describe_channel',
+    'describe_connection',
     'describe_tools',
     'get_embed_snippet',
     'identify_connection',
@@ -95,42 +131,29 @@ test('a fresh session only has the base tools until a page pushes its manifest',
     'list_proxies',
     'register_page_tool_by_code',
     'register_page_tool_by_path',
+    'request_reconnect',
     'unregister_page_tool',
   ]);
   await a.client.close();
 });
 
-test('pushing a manifest over WS makes new named tools appear in tools/list, and calling one round-trips through the page', async () => {
+test('pushing a manifest over WS makes new prefixed tools appear in tools/list, and calling one round-trips through the page', async () => {
   const a = await connectClient();
-  // js-bridge-mcp runs with defaultTenantMode: 'shared' (src/server.ts) so
-  // that an MCP client reconnecting with no ?tenant= (observed with VS Code
-  // Copilot, which does this routinely) doesn't orphan an already-bridged
-  // browser tab by landing on a fresh empty tenant each time. That means an
-  // unpinned session's real tenant is 'default', not its own session id —
-  // get_embed_snippet (hello-tools.ts) reflects this by embedding
-  // tenant().id, which is 'default' here, not requireSessionId(a.transport).
-  const tenantId = 'default';
-
-  const ws = await connectWs(tenantId);
-  const manifest = [
-    {
-      name: 'insert_title',
-      description: 'Sets the title',
-      params: { title: { type: 'string' } },
-    },
-  ];
-
+  const ws = await connectWs('pageone');
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw.toString());
     if (msg.type === 'call' && msg.name === 'insert_title') {
       ws.send(JSON.stringify({ type: 'call_result', id: msg.id, result: `title set to "${msg.args.title}"` }));
     }
   });
-  ws.send(JSON.stringify({ type: 'register_tools', tools: manifest }));
+  ws.send(JSON.stringify({
+    type: 'register_tools',
+    tools: [{ name: 'insert_title', description: 'Sets the title', params: { title: { type: 'string' } } }],
+  }));
 
-  await waitForTool(a.client, 'insert_title');
+  await waitForTool(a.client, 'pageone__insert_title');
 
-  const result = await a.client.callTool({ name: 'insert_title', arguments: { title: 'Hi there' } });
+  const result = await a.client.callTool({ name: 'pageone__insert_title', arguments: { title: 'Hi there' } });
   assert.equal(textOf(result), 'title set to "Hi there"');
 
   ws.close();
@@ -139,58 +162,63 @@ test('pushing a manifest over WS makes new named tools appear in tools/list, and
 
 test('a manifest\'s summary is readable via describe_tools once registered', async () => {
   const a = await connectClient();
-  const tenantId = 'default'; // see comment in the previous test — shared-tenant mode
-
-  const ws = await connectWs(tenantId);
+  const ws = await connectWs('pagetwo');
   ws.send(JSON.stringify({
     type: 'register_tools',
     tools: [{ name: 'insert_title', description: 'd', params: { title: { type: 'string' } } }],
     summary: 'This page is a hello-world demo with a title and a body.',
   }));
 
-  await waitForTool(a.client, 'insert_title');
+  await waitForTool(a.client, 'pagetwo__insert_title');
 
-  const result = await a.client.callTool({ name: 'describe_tools', arguments: {} });
-  const payload = JSON.parse(textOf(result));
-  assert.equal(payload.summary, 'This page is a hello-world demo with a title and a body.');
-  assert.ok(payload.tools.some((t: any) => t.name === 'insert_title'));
+  const payload = JSON.parse(textOf(await a.client.callTool({ name: 'describe_tools', arguments: {} })));
+  const conn = payload.connections.find((c: any) => c.toolPrefix === 'pagetwo');
+  assert.equal(conn.summary, 'This page is a hello-world demo with a title and a body.');
+  assert.ok(conn.tools.some((t: any) => t.name === 'pagetwo__insert_title'));
 
   ws.close();
   await a.client.close();
 });
 
-test('two unpinned MCP sessions share the default tenant — a manifest registered from one is visible to the other', async () => {
-  // This intentionally documents the opposite of what per-session-tenant
-  // isolation would give you: js-bridge-mcp runs with defaultTenantMode:
-  // 'shared' (see comment on the earlier WS tests) specifically so that a
-  // client reconnecting with no ?tenant= keeps landing on the same tenant
-  // as the browser tab that's already bridged there, instead of each
-  // reconnect minting a fresh empty one. The tradeoff is that two
-  // different unpinned agent sessions now see each other's tools rather
-  // than staying isolated — get_embed_snippet's description was updated
-  // to say so explicitly (hello-tools.ts).
+test('two unpinned MCP sessions both see a root page\'s tools', async () => {
   const a = await connectClient();
   const b = await connectClient();
 
-  const wsA = await connectWs('default');
-  wsA.send(JSON.stringify({
+  const ws = await connectWs('pagethree');
+  ws.send(JSON.stringify({
     type: 'register_tools',
     tools: [{ name: 'insert_title', description: 'd', params: { title: { type: 'string' } } }],
   }));
 
-  await waitForTool(a.client, 'insert_title');
-  await waitForTool(b.client, 'insert_title');
+  await waitForTool(a.client, 'pagethree__insert_title');
+  await waitForTool(b.client, 'pagethree__insert_title');
 
-  wsA.close();
+  ws.close();
   await a.client.close();
   await b.client.close();
 });
 
+test('get_embed_snippet (no join_channel) yields a snippet whose page is visible to the session that asked for it', async () => {
+  const a = await connectClient();
+  const snippet = textOf(await a.client.callTool({ name: 'get_embed_snippet', arguments: {} }));
+  const moduleUrl = new URL(JSON.parse(snippet.slice('import('.length, -');'.length)));
+  const tenantParam = moduleUrl.searchParams.get('tenant')!;
+  // The raw tenant id ("root:js-bridge-mcp") used to be embedded here; the
+  // WS side read its colon as "channel root, name js-bridge-mcp" and the
+  // page's tools were visible to no one.
+  assert.ok(!tenantParam.includes(':'), `snippet embeds a colon-bearing tenant "${tenantParam}"`);
+
+  const ws = await connectWs(encodeURIComponent(tenantParam));
+  ws.send(JSON.stringify({ type: 'register_tools', tools: [{ name: 'insert_title', description: 'd', params: {} }] }));
+  await waitForTool(a.client, 'js_bridge_mcp__insert_title');
+
+  ws.close();
+  await a.client.close();
+});
+
 test('register_page_tool_by_path round-trips through the server-side reserved-name plumbing', async () => {
   const a = await connectClient();
-  const tenantId = 'default';
-
-  const ws = await connectWs(tenantId);
+  const ws = await connectWs('pagefour');
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw.toString());
     if (msg.type === 'call' && msg.name === '__register_tool_by_path__') {
@@ -198,11 +226,11 @@ test('register_page_tool_by_path round-trips through the server-side reserved-na
     }
   });
   ws.send(JSON.stringify({ type: 'register_tools', tools: [] }));
-  await new Promise((r) => setTimeout(r, 100));
+  const id = await connectionIdFor(a.client, 'pagefour');
 
   const result = await a.client.callTool({
     name: 'register_page_tool_by_path',
-    arguments: { name: 'save', description: 'saves', path: 'myApp.save' },
+    arguments: { id, name: 'save', description: 'saves', path: 'myApp.save' },
   });
   assert.equal(result.isError, undefined);
   assert.match(textOf(result), /registered "save" -> window.myApp.save/);
@@ -211,22 +239,20 @@ test('register_page_tool_by_path round-trips through the server-side reserved-na
   await a.client.close();
 });
 
-async function waitForToolRegistrationLog(channel: string, name: string, timeoutMs = 3000): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const snapshot: any[] = await (await fetch(`${BASE_URL}/api/dashboard`)).json();
-    const c = snapshot.find((ch) => ch.channel === channel);
-    if (c?.recentToolRegistrations?.some((r: any) => r.name === name)) return;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error(`no tool-registration log entry for "${name}" appeared on channel "${channel}" within ${timeoutMs}ms`);
+/** True if `name` shows up in any recentToolRegistrations list anywhere in the dashboard snapshot — channels and root connections report it in different places. */
+async function isRegistrationLogged(name: string): Promise<boolean> {
+  const snapshot = await (await fetch(`${BASE_URL}/api/dashboard`)).json();
+  let found = false;
+  JSON.stringify(snapshot, (key, value) => {
+    if (key === 'recentToolRegistrations' && Array.isArray(value) && value.some((r: any) => r.name === name)) found = true;
+    return value;
+  });
+  return found;
 }
 
 test('register_page_tool_by_code registers immediately (no approval gate) and logs it for the dashboard', async () => {
   const a = await connectClient();
-  const tenantId = 'default';
-
-  const ws = await connectWs(tenantId);
+  const ws = await connectWs('pagefive');
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw.toString());
     if (msg.type === 'call' && msg.name === '__register_tool_by_code__') {
@@ -234,18 +260,22 @@ test('register_page_tool_by_code registers immediately (no approval gate) and lo
     }
   });
   ws.send(JSON.stringify({ type: 'register_tools', tools: [] }));
-  await new Promise((r) => setTimeout(r, 100));
+  const id = await connectionIdFor(a.client, 'pagefive');
 
   const result = await a.client.callTool({
     name: 'register_page_tool_by_code',
-    arguments: { name: 'explore', description: 'discovery', code: 'return 1;' },
+    arguments: { id, name: 'explore', description: 'discovery', code: 'return 1;' },
   });
   assert.equal(result.isError, undefined);
   assert.match(textOf(result), /registered "explore" from code/);
 
   // Registration already happened by the time the tool call resolved — this
   // just confirms it also got logged for the dashboard's sticky-toast feed.
-  await waitForToolRegistrationLog(tenantId, 'explore');
+  const start = Date.now();
+  while (!(await isRegistrationLogged('explore'))) {
+    assert.ok(Date.now() - start < 3000, 'no tool-registration log entry for "explore" appeared within 3000ms');
+    await new Promise((r) => setTimeout(r, 50));
+  }
 
   ws.close();
   await a.client.close();
@@ -253,9 +283,7 @@ test('register_page_tool_by_code registers immediately (no approval gate) and lo
 
 test('register_page_tool_by_code (browser-side rejection) surfaces as an MCP tool error and is not logged', async () => {
   const a = await connectClient();
-  const tenantId = 'default';
-
-  const ws = await connectWs(tenantId);
+  const ws = await connectWs('pagesix');
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw.toString());
     if (msg.type === 'call' && msg.name === '__register_tool_by_code__') {
@@ -263,18 +291,15 @@ test('register_page_tool_by_code (browser-side rejection) surfaces as an MCP too
     }
   });
   ws.send(JSON.stringify({ type: 'register_tools', tools: [] }));
-  await new Promise((r) => setTimeout(r, 100));
+  const id = await connectionIdFor(a.client, 'pagesix');
 
   const result = await a.client.callTool({
     name: 'register_page_tool_by_code',
-    arguments: { name: 'explore3', description: 'discovery', code: '((' },
+    arguments: { id, name: 'explore3', description: 'discovery', code: '((' },
   });
   assert.equal(result.isError, true);
   assert.match(textOf(result), /code failed to compile/);
-
-  const snapshot: any[] = await (await fetch(`${BASE_URL}/api/dashboard`)).json();
-  const c = snapshot.find((ch) => ch.channel === tenantId);
-  assert.ok(!c?.recentToolRegistrations?.some((r: any) => r.name === 'explore3'), 'a failed registration must not be logged');
+  assert.equal(await isRegistrationLogged('explore3'), false, 'a failed registration must not be logged');
 
   ws.close();
   await a.client.close();
@@ -282,9 +307,7 @@ test('register_page_tool_by_code (browser-side rejection) surfaces as an MCP too
 
 test('unregister_page_tool surfaces a "not a tracked dynamic tool" rejection as an MCP tool error', async () => {
   const a = await connectClient();
-  const tenantId = 'default';
-
-  const ws = await connectWs(tenantId);
+  const ws = await connectWs('pageseven');
   ws.on('message', (raw) => {
     const msg = JSON.parse(raw.toString());
     if (msg.type === 'call' && msg.name === '__unregister_tool__') {
@@ -292,11 +315,11 @@ test('unregister_page_tool surfaces a "not a tracked dynamic tool" rejection as 
     }
   });
   ws.send(JSON.stringify({ type: 'register_tools', tools: [] }));
-  await new Promise((r) => setTimeout(r, 100));
+  const id = await connectionIdFor(a.client, 'pageseven');
 
   const result = await a.client.callTool({
     name: 'unregister_page_tool',
-    arguments: { toolName: 'get_embed_snippet' },
+    arguments: { id, toolName: 'get_embed_snippet' },
   });
   assert.equal(result.isError, true);
   assert.match(textOf(result), /host tools can never be unregistered/);

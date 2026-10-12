@@ -32,9 +32,11 @@
 // own root connection named after opts.appName.
 
 // js-bridge-mcp has no production deployment - it only ever runs locally,
-// launched via `npx` (see packages/js-bridge-mcp), so this always targets
-// localhost regardless of where the host app is served from.
-const JSBRIDGE_HOST = 'http://localhost:8766';
+// launched via `npx` (see packages/js-bridge-mcp), so this targets
+// localhost regardless of where the host app is served from. Default only:
+// createMcpConnect's opts.serverUrl overrides it for a server started on a
+// different PORT.
+const DEFAULT_JSBRIDGE_HOST = 'http://localhost:8766';
 
 // Must match js-bridge-mcp's own isValidChannelName (mcp-tenant-lib/src/tenant.ts)
 // exactly - channel names become the WS `?tenant=` query param, and the
@@ -86,6 +88,9 @@ export function parseChannelInput(input) {
  *   Optional convenience callback, called on every state transition - an
  *   alternative to onConnectionStateChange() below for a caller that just
  *   wants one function rather than subscribing.
+ * @param {string} [opts.serverUrl] - js-bridge-mcp's own origin, e.g.
+ *   "http://localhost:9000" for a server started with PORT=9000. Defaults to
+ *   "http://localhost:8766".
  * @param {() => Promise<void>|void} [opts.beforeConnect]
  *   Optional hook run once, before the very first main.js import - for a
  *   host page that layers extra tool providers onto window.__mcpTools ahead
@@ -96,6 +101,7 @@ export function parseChannelInput(input) {
  */
 export function createMcpConnect(opts) {
   const appName = opts.appName;
+  const JSBRIDGE_HOST = (opts.serverUrl ?? DEFAULT_JSBRIDGE_HOST).replace(/\/+$/, '');
   const defaultChannel = opts.defaultChannel ?? appName;
   const CHANNEL_STORAGE_KEY = `${appName}_mcp_channel`;
   const APP_LABEL_STORAGE_KEY = `${appName}_mcp_app_label`;

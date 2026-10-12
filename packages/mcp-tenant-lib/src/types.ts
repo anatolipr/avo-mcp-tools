@@ -76,11 +76,17 @@ export interface LeaveChannelMessage {
  * plain-JSON (no `$ref`/`oneOf`/tuple-`items`) since ToolManifestEntry
  * crosses the WS wire as-is (RegisterToolsMessage) and is echoed back
  * verbatim by describe_tools/describe_channel.
+ *
+ * `enum` (string only) restricts the value to the listed strings. `any`
+ * accepts any JSON value unvalidated — the escape hatch for a schema node
+ * the other variants cannot express (`oneOf`, `$ref`, a free-form object,
+ * ...), so one such field no longer makes its whole tool unregistrable.
  */
 export type ToolParamSpec =
-  | { type: 'string' | 'number' | 'boolean'; description?: string; optional?: boolean; nullable?: boolean }
+  | { type: 'string' | 'number' | 'boolean'; enum?: string[]; description?: string; optional?: boolean; nullable?: boolean }
   | { type: 'array'; items: ToolParamSpec; description?: string; optional?: boolean; nullable?: boolean }
-  | { type: 'object'; properties: Record<string, ToolParamSpec>; description?: string; optional?: boolean; nullable?: boolean };
+  | { type: 'object'; properties: Record<string, ToolParamSpec>; description?: string; optional?: boolean; nullable?: boolean }
+  | { type: 'any'; description?: string; optional?: boolean; nullable?: boolean };
 
 /**
  * The wire form of a manifest entry, as sent to the server in a
@@ -119,6 +125,13 @@ export interface ToolManifestEntry {
    * once the registering session has ended.
    */
   origin?: { kind: 'code'; code: string } | { kind: 'path'; path: string };
+  /**
+   * Per-tool override of Tenant.call's default 10s timeout, applied when
+   * this tool is dispatched (manifest-tools.ts). Absent means the default.
+   * Set by js-bridge-mcp's proxy-manager for proxied upstream tools, which
+   * routinely run longer than a page tool does.
+   */
+  timeoutMs?: number;
 }
 
 export interface RegisterToolsMessage {
