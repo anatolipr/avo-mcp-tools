@@ -4,7 +4,7 @@ import type { MemoryRepository } from './repository.js';
 import { stripKey } from './repository.js';
 import { statusSchema } from '../shared/status.js';
 import { bodyEditsSchema, applyBodyEdits, formatBodyEditsDiff } from '../shared/body-edits.js';
-import { normalizeKey } from '../types.js';
+import { normalizeKey, type MemoryDoc } from '../types.js';
 import { slugify } from '../store/slug.js';
 
 const MEMORY_DOC_TYPES = ['plan', 'spec', 'sql', 'testing-todo', 'discovery', 'session-summary', 'other'] as const;
@@ -25,14 +25,26 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       key: z.string(),
       doc_type: z.enum(MEMORY_DOC_TYPES).optional(),
       include_paused: z.boolean().optional().describe('include paused docs, which are hidden by default (see memory_set_paused)'),
+      include_related: z.boolean().optional().describe('also return docs linked through related_to in either direction (e.g. a plan\'s spec), each marked `related_via`'),
     },
-    async ({ key, doc_type, include_paused }) => {
+    async ({ key, doc_type, include_paused, include_related }) => {
+      // Appended after the docs the key itself matched. A failure here must never cost the caller those.
+      const withRelated = (docs: MemoryDoc[]): unknown[] => {
+        if (!include_related || docs.length === 0) return docs;
+        try {
+          return [...docs, ...repo.getRelated(docs, { includePaused: include_paused })];
+        } catch (err) {
+          console.error('[memory-bucket] memory_get could not resolve related docs:', (err as Error).message);
+          return docs;
+        }
+      };
       const exact = repo.getByKey(key, doc_type, { includePaused: include_paused });
       if (exact.length > 0) {
-        return { content: [{ type: 'text', text: JSON.stringify(exact, null, 2) }] };
+        return { content: [{ type: 'text', text: JSON.stringify(withRelated(exact), null, 2) }] };
       }
       const fallback = repo.getByFilenameContains(key, doc_type, { includePaused: include_paused });
-      const result = fallback.length > 0 ? fallback.map((doc) => ({ ...doc, filename_fallback: true })) : fallback;
+      const related = withRelated(fallback).slice(fallback.length);
+      const result = [...fallback.map((doc) => ({ ...doc, filename_fallback: true })), ...related];
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -109,7 +121,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
       body: z.string(),
       tags: z.array(z.string()).optional(),
       status: statusSchema(MEMORY_STATUS_DEFAULTS).optional().describe('defaults to "active"'),
-      related_to: z.string().optional().describe('key of a related doc, e.g. a spec linking to its plan\'s key'),
+      related_to: z.string().optional().describe('key of a related doc, e.g. a spec linking to its plan\'s key — memory_get(include_related) follows it'),
       subfolder: z.string().optional().describe('optional subdirectory under the memory folder'),
       ...(multiFolder ? { folder: z.string().describe(`which configured memory folder to write into: ${folderNames}`) } : {}),
     },
@@ -235,7 +247,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
 
   mcp.tool(
     'memory_delete',
-    'Hard-deletes a memory doc — removes the markdown file, no tombstone.',
+    'Deletes a memory doc — removes the markdown file from its folder. A copy stays in the server base directory\'s .memory-bucket-trash for 30 days, as does the previous version of any updated doc.',
     docRefSchema,
     async ({ folder, filename }: any) => {
       try {
@@ -249,7 +261,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
 
   mcp.tool(
     'memory_bulk_delete',
-    'Hard-deletes many memory docs in one call — e.g. cleaning up a batch of abandoned docs found via memory_search. No tombstone. Returns per-doc success/failure so one bad entry doesn\'t abort the rest of the batch.',
+    'Deletes many memory docs in one call — e.g. cleaning up a batch of abandoned docs found via memory_search. Returns per-doc success/failure so one bad entry doesn\'t abort the rest of the batch.',
     { refs: z.array(z.object({ folder: z.string().optional(), filename: z.string() })).min(1) },
     async ({ refs }) => {
       const results = await repo.bulkDelete(refs);

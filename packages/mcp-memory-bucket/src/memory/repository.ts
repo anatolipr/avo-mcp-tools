@@ -5,6 +5,8 @@ import type { FSWatcher } from 'chokidar';
 import matter from 'gray-matter';
 import { writeMarkdownFile, formatMarkdownFile } from '../store/markdown-file.js';
 import { resolveWithinBase } from '../store/safe-path.js';
+import { writeFileAtomic } from '../store/atomic-write.js';
+import { moveToTrash, snapshotToTrash } from '../store/trash.js';
 import { uniqueFilename } from '../attachments/storage.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, memorySyncSpec, type TableSyncSpec } from '../store/sync.js';
 import { SearchQueryError, SEARCH_BM25, SEARCH_SNIPPET, withOrFallback } from '../store/search.js';
@@ -408,6 +410,49 @@ export class MemoryRepository {
   }
 
   /**
+   * Docs one hop away from `docs` along `related_to` (which holds the KEY of a paired doc, e.g. a
+   * spec pointing at its plan), in both directions: `related_to` for the docs these point at,
+   * `referenced_by` for docs pointing at these. A `related_to` that matches no key is tried as a
+   * filename, since older docs stored one. Docs already in `docs` are not repeated; paused and
+   * hidden docs are filtered exactly as getByKey does.
+   */
+  getRelated(docs: MemoryDoc[], opts: { includePaused?: boolean } = {}): Array<MemoryDoc & { related_via: 'related_to' | 'referenced_by' }> {
+    const seen = new Set(docs.map((d) => d.source_path));
+    const related: Array<MemoryDoc & { related_via: 'related_to' | 'referenced_by' }> = [];
+    const add = (found: MemoryDoc[], via: 'related_to' | 'referenced_by') => {
+      for (const doc of found) {
+        if (seen.has(doc.source_path)) continue;
+        seen.add(doc.source_path);
+        related.push({ ...doc, related_via: via });
+      }
+    };
+
+    for (const target of new Set(docs.map((d) => d.related_to).filter((t): t is string => !!t))) {
+      const byKey = this.getByKey(target, undefined, opts);
+      if (byKey.length > 0) {
+        add(byKey, 'related_to');
+        continue;
+      }
+      const wanted = MemoryRepository.normalizeFilename(target).toLowerCase();
+      add(this.getByFilenameContains(target, undefined, opts).filter((d) => path.basename(d.source_path).toLowerCase() === wanted), 'related_to');
+    }
+
+    // related_to is stored as the caller typed it, so compare normalized. Selecting only these two
+    // columns keeps the scan off every row's body.
+    const keys = new Set(docs.map((d) => d.key));
+    const hidden = new Set(this.hiddenFolderNames());
+    const pointers = this.db.prepare(`SELECT source_path, related_to FROM memory_docs WHERE related_to IS NOT NULL`).all() as Array<{ source_path: string; related_to: string }>;
+    const rowByPath = this.db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`);
+    for (const pointer of pointers) {
+      if (seen.has(pointer.source_path) || !keys.has(normalizeKey(pointer.related_to))) continue;
+      const row = rowByPath.get(pointer.source_path) as MemoryRow | undefined;
+      if (!row || hidden.has(row.folder) || (row.paused && !opts.includePaused)) continue;
+      add([rowToDoc(row)], 'referenced_by');
+    }
+    return related;
+  }
+
+  /**
    * Every non-paused doc carrying `tag` in its tags array, full body included — unlike search(),
    * this needs no FTS query text (Quick Prompts' palette lists everything tagged `quick-prompt`
    * up front, before the user has typed anything to search for). Sorted by created_at desc (falls
@@ -693,7 +738,7 @@ export class MemoryRepository {
       },
       () => {
         fs.mkdirSync(targetDir, { recursive: true });
-        fs.writeFileSync(filePath, fileContents, 'utf-8');
+        writeFileAtomic(filePath, fileContents);
       }
     );
     upsertFile(this.db, this.syncSpec, filePath);
@@ -762,7 +807,10 @@ export class MemoryRepository {
         const name = path.basename(relPath);
         await writeRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, name, fileContents, remote.owner);
       },
-      () => fs.writeFileSync(existing.source_path, fileContents, 'utf-8')
+      () => {
+        snapshotToTrash(this.credentialsBaseDir, existing.source_path);
+        writeFileAtomic(existing.source_path, fileContents);
+      }
     );
     upsertFile(this.db, this.syncSpec, existing.source_path);
     return { ...merged, body: newBody, paused: existingPaused };
@@ -852,8 +900,12 @@ export class MemoryRepository {
     // The sibling wrapper directory exists solely to hold attachments/ for this doc (memory docs
     // are otherwise flat files), so remove the whole wrapper — not just attachments/ — to avoid
     // leaving an orphaned empty directory behind. No-op if it never existed.
-    fs.rmSync(path.dirname(attachmentsDirFor(existing.source_path, 'memory')), { recursive: true, force: true });
-    fs.unlinkSync(existing.source_path);
+    const attachmentsWrapper = path.dirname(attachmentsDirFor(existing.source_path, 'memory'));
+    // Local undo: the doc and its attachments move to the trash (see store/trash.ts). Whatever that
+    // could not move is still there for the two deletes below, which then behave as they always did.
+    moveToTrash(this.credentialsBaseDir, [existing.source_path, attachmentsWrapper]);
+    fs.rmSync(attachmentsWrapper, { recursive: true, force: true });
+    fs.rmSync(existing.source_path, { force: true });
     removeFile(this.db, 'memory_docs', existing.source_path);
   }
 
@@ -928,6 +980,7 @@ export class MemoryRepository {
     const existing = await this.get(folder, filename);
     if (!existing) throw new Error(`memory doc "${filename}" not found`);
     if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(filename);
+    snapshotToTrash(this.credentialsBaseDir, existing.source_path);
     writeMarkdownFile(existing.source_path, {}, existing.body);
     upsertFile(this.db, this.syncSpec, existing.source_path);
   }

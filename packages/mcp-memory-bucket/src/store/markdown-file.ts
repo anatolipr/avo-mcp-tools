@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import matter from 'gray-matter';
+import { writeFileAtomic } from './atomic-write.js';
 
 export interface ParsedMarkdownFile<TFrontmatter> {
   frontmatter: TFrontmatter;
@@ -33,5 +34,5 @@ export function formatMarkdownFile(frontmatter: Record<string, unknown>, body: s
 }
 
 export function writeMarkdownFile(filePath: string, frontmatter: Record<string, unknown>, body: string): void {
-  fs.writeFileSync(filePath, formatMarkdownFile(frontmatter, body), 'utf-8');
+  writeFileAtomic(filePath, formatMarkdownFile(frontmatter, body));
 }

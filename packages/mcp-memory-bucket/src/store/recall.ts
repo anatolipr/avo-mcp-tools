@@ -18,6 +18,8 @@ export interface RecallChunk {
   ord: number;
   text: string;
   score: number;
+  /** Set when the doc is deprecated or abandoned — such docs rank lower and are labelled in the output. */
+  stale?: 'deprecated' | 'abandoned';
 }
 
 export interface RecallResult {
@@ -72,6 +74,8 @@ const SEMANTIC_WEIGHT = 2;
 const MAX_CHUNKS_PER_DOC = 3;
 /** Fused scores below this fraction of the best hit's are dropped rather than used to fill the token budget. */
 const RELATIVE_SCORE_FLOOR = 0.3;
+/** A deprecated or abandoned doc keeps this fraction of its fused score — still findable, but below a live doc that matches as well. */
+const STALE_SCORE_FACTOR = 0.5;
 const CHARS_PER_TOKEN = 4;
 const HEADER_TOKENS = 20;
 
@@ -87,12 +91,12 @@ function loadVectors(db: Database.Database, model: string): { ids: number[]; vec
 }
 
 /** Chunks by descending cosine similarity (vectors are unit-length, so a dot product). Brute force — a personal corpus is thousands of chunks, not millions. */
-function vectorSearch(db: Database.Database, model: string, query: Float32Array, limit: number): Array<{ id: number; similarity: number }> {
+function vectorSearch(db: Database.Database, model: string, query: Float32Array, limit: number, skip?: Set<number>): Array<{ id: number; similarity: number }> {
   const { ids, vectors } = loadVectors(db, model);
   const scored: Array<{ id: number; similarity: number }> = [];
   for (let i = 0; i < vectors.length; i++) {
     const vector = vectors[i]!;
-    if (vector.length !== query.length) continue;
+    if (vector.length !== query.length || skip?.has(ids[i]!)) continue;
     let dot = 0;
     for (let d = 0; d < vector.length; d++) dot += vector[d]! * query[d]!;
     scored.push({ id: ids[i]!, similarity: dot });
@@ -147,6 +151,41 @@ interface ChunkRow {
 const docKey = (c: { ref_table: string; ref_id: string; ref_folder: string }) => `${c.ref_table}\0${c.ref_folder}\0${c.ref_id}`;
 
 /**
+ * The chunks (and their docs) recall must never return: those of paused docs and of docs in a
+ * folder hidden from the current login. Resolved up front so each ranked list can skip them BEFORE
+ * its candidate cut — filtered afterwards, a corpus with many paused or hidden docs has them take
+ * the candidate slots and visible matches never get ranked at all. Normally empty, and found
+ * through the partial `paused` indexes and the folder indexes (see db.ts), so the common case costs
+ * four index probes. Any failure degrades to "skip nothing": recall()'s own per-doc visibility
+ * check still drops such chunks from the result.
+ */
+function invisibleChunks(db: Database.Database, hidden: RecallOptions['hidden']): { chunkIds: Set<number>; docKeys: Set<string> } {
+  const chunkIds = new Set<number>();
+  const docKeys = new Set<string>();
+  try {
+    const collect = (sql: string, params: string[]) => {
+      for (const row of db.prepare(sql).all(...params) as Array<{ id: number; ref_table: string; ref_id: string; ref_folder: string }>) {
+        chunkIds.add(row.id);
+        docKeys.add(docKey(row));
+      }
+    };
+    // CROSS JOIN pins the doc table as the outer loop, so the (small) filtered doc set drives index lookups into chunks.
+    const skillChunks = `SELECT c.id, c.ref_table, c.ref_id, c.ref_folder FROM skills s CROSS JOIN chunks c ON c.ref_table = 'skills' AND c.ref_id = s.id AND c.ref_folder = s.folder`;
+    const memoryChunks = `SELECT c.id, c.ref_table, c.ref_id, c.ref_folder FROM memory_docs m CROSS JOIN chunks c ON c.ref_table = 'memory_docs' AND c.ref_id = m.source_path AND c.ref_folder = ''`;
+    const placeholders = (names: string[]) => names.map(() => '?').join(', ');
+    collect(`${skillChunks} WHERE s.paused = 1`, []);
+    collect(`${memoryChunks} WHERE m.paused = 1`, []);
+    if (hidden?.skills.length) collect(`${skillChunks} WHERE s.folder IN (${placeholders(hidden.skills)})`, hidden.skills);
+    if (hidden?.memory_docs.length) collect(`${memoryChunks} WHERE m.folder IN (${placeholders(hidden.memory_docs)})`, hidden.memory_docs);
+  } catch (err) {
+    console.error('[memory-bucket] recall could not pre-filter paused/hidden docs:', (err as Error).message);
+    chunkIds.clear();
+    docKeys.clear();
+  }
+  return { chunkIds, docKeys };
+}
+
+/**
  * Retrieves the passages most relevant to a natural-language query, packed into a token budget.
  * Three ranked lists are fused by reciprocal rank: chunk-level BM25, chunk-level embedding
  * similarity (when an embedder is ready), and doc-level weighted BM25 — the last so a query that
@@ -158,6 +197,8 @@ export async function recall(db: Database.Database, query: string, opts: RecallO
   const fused = new Map<number, number>();
   const add = (chunkId: number, rank: number, weight = 1) => fused.set(chunkId, (fused.get(chunkId) ?? 0) + weight / (RRF_K + rank));
 
+  const invisible = invisibleChunks(db, hidden);
+
   const corrections = correctWords(db, query.toLowerCase().match(WORD_RE) ?? []);
   const ftsQuery = questionToFtsQuery(query, corrections);
   const tableFilter = table ? `AND c.ref_table = '${table}'` : '';
@@ -167,24 +208,28 @@ export async function recall(db: Database.Database, query: string, opts: RecallO
       .prepare(
         `SELECT c.id FROM chunk_fts JOIN chunks c ON c.id = chunk_fts.rowid
          WHERE chunk_fts MATCH ? ${tableFilter}
-         ORDER BY bm25(chunk_fts, 3.0, 1.0) LIMIT ${CANDIDATES_PER_LIST}`
+         ORDER BY bm25(chunk_fts, 3.0, 1.0) LIMIT ${CANDIDATES_PER_LIST + invisible.chunkIds.size}`
       )
       .all(ftsQuery) as Array<{ id: number }>;
-    lexical.forEach((row, i) => add(row.id, i + 1));
+    lexical
+      .filter((row) => !invisible.chunkIds.has(row.id))
+      .slice(0, CANDIDATES_PER_LIST)
+      .forEach((row, i) => add(row.id, i + 1));
 
     docRanks = db
       .prepare(
         `SELECT ref_table, ref_id, ref_folder FROM search_index
          WHERE search_index MATCH ? ${table ? `AND ref_table = '${table}'` : ''}
-         ORDER BY ${SEARCH_BM25} LIMIT ${DOC_CANDIDATES}`
+         ORDER BY ${SEARCH_BM25} LIMIT ${DOC_CANDIDATES + invisible.docKeys.size}`
       )
       .all(ftsQuery) as typeof docRanks;
+    docRanks = docRanks.filter((doc) => !invisible.docKeys.has(docKey(doc))).slice(0, DOC_CANDIDATES);
   }
 
   let mode: RecallResult['mode'] = 'lexical';
   if (embedder) {
     const [queryVector] = await embedder.embed([query], 'query');
-    const semantic = vectorSearch(db, embedder.model, queryVector!, CANDIDATES_PER_LIST * (table ? 4 : 1));
+    const semantic = vectorSearch(db, embedder.model, queryVector!, CANDIDATES_PER_LIST * (table ? 4 : 1), invisible.chunkIds);
     if (semantic.length > 0) mode = 'hybrid';
     semantic.forEach((hit, i) => add(hit.id, i + 1, SEMANTIC_WEIGHT));
   }
@@ -214,19 +259,26 @@ export async function recall(db: Database.Database, query: string, opts: RecallO
   });
 
   // Resolve each candidate's parent doc once — for its public handle, and to drop paused/hidden docs.
-  const skillMeta = db.prepare(`SELECT folder, paused FROM skills WHERE id = ? AND folder = ?`);
-  const memoryMeta = db.prepare(`SELECT folder, key, paused FROM memory_docs WHERE source_path = ?`);
-  const docs = new Map<string, { id: string; folder: string; key?: string } | null>();
+  const skillMeta = db.prepare(`SELECT folder, paused, deprecated, status FROM skills WHERE id = ? AND folder = ?`);
+  const memoryMeta = db.prepare(`SELECT folder, key, paused, deprecated, status FROM memory_docs WHERE source_path = ?`);
+  const docs = new Map<string, { id: string; folder: string; key?: string; stale?: RecallChunk['stale'] } | null>();
   const resolveDoc = (row: ChunkRow) => {
     const key = docKey(row);
     if (!docs.has(key)) {
       const meta = (row.ref_table === 'skills' ? skillMeta.get(row.ref_id, row.ref_folder) : memoryMeta.get(row.ref_id)) as
-        | { folder: string; key?: string; paused: number }
+        | { folder: string; key?: string; paused: number; deprecated: number; status: string }
         | undefined;
       const visible = meta && !meta.paused && !(hidden?.[row.ref_table] ?? []).includes(meta.folder);
       docs.set(
         key,
-        visible ? { id: row.ref_table === 'skills' ? row.ref_id : path.basename(row.ref_id), folder: meta.folder, key: meta.key } : null
+        visible
+          ? {
+              id: row.ref_table === 'skills' ? row.ref_id : path.basename(row.ref_id),
+              folder: meta.folder,
+              key: meta.key,
+              stale: meta.deprecated ? 'deprecated' : meta.status === 'abandoned' ? 'abandoned' : undefined,
+            }
+          : null
       );
     }
     return docs.get(key)!;
@@ -235,6 +287,7 @@ export async function recall(db: Database.Database, query: string, opts: RecallO
   const ranked = [...rows.values()]
     .map((row) => ({ row, score: fused.get(row.id) ?? 0, doc: resolveDoc(row) }))
     .filter((c): c is typeof c & { doc: NonNullable<typeof c.doc> } => c.doc !== null)
+    .map((c) => (c.doc.stale ? { ...c, score: c.score * STALE_SCORE_FACTOR } : c))
     .sort((a, b) => b.score - a.score);
 
   const floor = (ranked[0]?.score ?? 0) * RELATIVE_SCORE_FLOOR;
@@ -259,7 +312,7 @@ export async function recall(db: Database.Database, query: string, opts: RecallO
     budget -= cost();
     perDoc.set(key, (perDoc.get(key) ?? 0) + 1);
     seenText.add(row.hash);
-    chunks.push({ ref_table: row.ref_table, id: doc.id, folder: doc.folder, key: doc.key, heading: row.heading, ord: row.ord, text, score });
+    chunks.push({ ref_table: row.ref_table, id: doc.id, folder: doc.folder, key: doc.key, heading: row.heading, ord: row.ord, text, score, stale: doc.stale });
   }
   return { mode, chunks, truncated, corrections: Object.fromEntries(corrections) };
 }
@@ -283,7 +336,7 @@ export function formatRecall(result: RecallResult, note?: string): string {
   for (const group of groups.values()) {
     const first = group[0]!;
     const label = first.ref_table === 'skills' ? `skill ${first.id}` : `memory ${first.id}`;
-    const details = [first.folder && `folder: ${first.folder}`, first.key && `key: ${first.key}`].filter(Boolean).join(', ');
+    const details = [first.folder && `folder: ${first.folder}`, first.key && `key: ${first.key}`, first.stale].filter(Boolean).join(', ');
     lines.push('', `## ${label}${details ? ` (${details})` : ''}`);
     let previousHeading = '';
     for (const chunk of group.sort((a, b) => a.ord - b.ord)) {

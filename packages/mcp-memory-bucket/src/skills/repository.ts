@@ -6,6 +6,8 @@ import matter from 'gray-matter';
 import { writeMarkdownFile, formatMarkdownFile } from '../store/markdown-file.js';
 import { assertValidSkillName } from '../store/skill-name.js';
 import { resolveWithinBase } from '../store/safe-path.js';
+import { writeFileAtomic } from '../store/atomic-write.js';
+import { moveToTrash, snapshotToTrash } from '../store/trash.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, skillSyncSpec, walkSkillSiblingFiles, type TableSyncSpec } from '../store/sync.js';
 import { SearchQueryError, SEARCH_BM25, SEARCH_SNIPPET, withOrFallback } from '../store/search.js';
 import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
@@ -524,6 +526,32 @@ export class SkillRepository {
     return { ...doc, body: liveBody };
   }
 
+  /**
+   * The skills `doc` builds on, nearest first, following `metadata.extends` (the NAME of a base
+   * skill). A base is looked up in the same folder first, then anywhere it is unambiguous. Stops at
+   * a missing or ambiguous base, at a cycle, or after MAX_EXTENDS_DEPTH hops.
+   */
+  async getExtendsChain(doc: SkillDoc): Promise<SkillDoc[]> {
+    const MAX_EXTENDS_DEPTH = 5;
+    const chain: SkillDoc[] = [];
+    const seen = new Set([`${doc.folder}\0${doc.name}`]);
+    let current = doc;
+    while (current.metadata.extends && chain.length < MAX_EXTENDS_DEPTH) {
+      const baseName = current.metadata.extends;
+      let base: SkillDoc | null = null;
+      try {
+        base = (await this.get(baseName, current.folder)) ?? (await this.get(baseName));
+      } catch {
+        // The same base name in several other folders — nothing says which one is meant.
+      }
+      if (!base || seen.has(`${base.folder}\0${base.name}`)) break;
+      seen.add(`${base.folder}\0${base.name}`);
+      chain.push(base);
+      current = base;
+    }
+    return chain;
+  }
+
   /** Fetches many skills by name in one call — e.g. hydrating full bodies for a batch of search() hits. Missing names are simply absent from the result, not errors. */
   async bulkGet(names: string[]): Promise<SkillDoc[]> {
     const docs = await Promise.all(names.map((name) => this.get(name)));
@@ -585,7 +613,7 @@ export class SkillRepository {
       () => this.pushToRemoteIfNeeded(targetFolder.name, filePath, fileContents),
       () => {
         fs.mkdirSync(skillDir, { recursive: true });
-        fs.writeFileSync(filePath, fileContents, 'utf-8');
+        writeFileAtomic(filePath, fileContents);
       }
     );
     upsertFile(this.db, this.syncSpec, filePath);
@@ -678,7 +706,10 @@ export class SkillRepository {
     // Remote-first — see MemoryRepository.create()'s comment on why (remote/write-order.ts).
     await writeRemoteThenLocal(
       () => this.pushToRemoteIfNeeded(existing.folder, existing.source_path, fileContents),
-      () => fs.writeFileSync(existing.source_path, fileContents, 'utf-8')
+      () => {
+        snapshotToTrash(this.credentialsBaseDir, existing.source_path);
+        writeFileAtomic(existing.source_path, fileContents);
+      }
     );
     upsertFile(this.db, this.syncSpec, existing.source_path);
     return { ...merged, body: newBody, paused: existingPaused };
@@ -733,7 +764,7 @@ export class SkillRepository {
         // The rename above already moved SKILL.md verbatim (old name/frontmatter) along with the
         // directory — overwrite it with the new frontmatter (updated `name`) now that it's at its
         // final path.
-        fs.writeFileSync(newFilePath, fileContents, 'utf-8');
+        writeFileAtomic(newFilePath, fileContents);
       }
     );
     removeFile(this.db, 'skills', existing.source_path);
@@ -860,6 +891,9 @@ export class SkillRepository {
       const skillDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, skillDir));
       await trashRemoteFolder(remote.server, this.credentialsBaseDir, remote.tenantId, skillDirRelPath, remote.owner);
     }
+    // Local undo: the whole skill directory moves to the trash (see store/trash.ts); the delete
+    // below then finds nothing, or — if the move failed — removes it as it always did.
+    moveToTrash(this.credentialsBaseDir, [skillDir]);
     fs.rmSync(skillDir, { recursive: true, force: true });
     removeFile(this.db, 'skills', existing.source_path);
   }

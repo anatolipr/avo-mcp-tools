@@ -147,6 +147,14 @@ export function openCache(dbPath: string): Database.Database {
     ['username', "TEXT NOT NULL DEFAULT ''"],
     ['public_token', 'TEXT'],
   ]);
+  // After ensureColumns: `paused`/`folder` may only just have been added to an older cache file.
+  // Both let bucket_recall find the docs it must skip (paused, or in a folder hidden from the
+  // current login) without scanning every row's body — see recall.ts's invisibleChunkIds.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_skills_paused ON skills(folder, id) WHERE paused = 1;
+    CREATE INDEX IF NOT EXISTS idx_memory_docs_paused ON memory_docs(source_path) WHERE paused = 1;
+    CREATE INDEX IF NOT EXISTS idx_memory_docs_folder ON memory_docs(folder);
+  `);
   ensureSearchIndexHasKeyColumn(db);
   backfillSearchIndex(db);
   backfillChunks(db);

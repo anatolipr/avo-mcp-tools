@@ -39,7 +39,7 @@ const TRISTATE_OPTIONS: Array<{ value: TriState; label: string }> = [
   { value: 'only', label: 'Only' },
 ];
 
-const EMPTY_FACETS: Facets = { tags: [], statuses: [], owners: [], doc_types: [], key_types: [], folders: [] };
+const EMPTY_FACETS: Facets = { tags: [], statuses: [], owners: [], doc_types: [], key_types: [], folders: [], groups: [] };
 const EMPTY_FOLDERS: FoldersResponse = { skill: [], memory: [] };
 
 const SPLIT_STORAGE_KEY = 'mem-bucket-split-pct';

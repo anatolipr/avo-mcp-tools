@@ -138,6 +138,13 @@ are, and the cache can be safely deleted; it's rebuilt on next startup.
   Only `SKILL.md` files count for skill folders; any `.md` file counts for
   memory folders. The watcher only looks 10 directories deep. A rename
   arrives as a delete-then-add, not a single rename event.
+- **Files deleted while the server was stopped** are dropped from the cache
+  on the next startup, right after the scan. A folder whose root is missing
+  or empty is left alone, since that is what an unmounted volume looks
+  like.
+- **Rebuilding the cache** (`bucket_rebuild_cache`, or the web UI) keeps
+  each doc's local-only paused flag, and leaves the previous cache in place
+  if the rescan fails.
 - **Adding a folder** (via the web UI, or a `skill_sources`/`memory_sources`
   entry present at startup) triggers a scan of just that folder, not a
   full rescan of every folder already cached.
@@ -183,6 +190,24 @@ type filter, date range, deprecated/paused visibility) is shared between
 both views. Clicking a folder or tag node opens a resizable middle pane
 listing its contents; clicking an item there, or clicking a leaf item
 directly in the tree, opens it in the detail pane on the right.
+
+### Undo: the trash
+
+Deleting a skill or memory doc (through a tool or the web UI) moves it to
+`.memory-bucket-trash/` in the base directory instead of destroying it: one
+timestamped folder per delete, holding the file (or the whole skill
+directory, attachments included) and an `origin.txt` naming the path it came
+from. Updating a doc copies its previous version there first; several edits
+of one file within a minute keep a single copy, the state before the burst.
+To restore, copy the file back to the path in `origin.txt`.
+
+Entries are removed after 30 days. Set `MEMORY_BUCKET_TRASH_DAYS` to change
+that, or to `0` to turn the trash off. For a folderfoo-backed folder this is
+in addition to folderfoo's own trash.
+
+Docs, the config file and the credentials file are written atomically (a
+temp file renamed into place), so a crash mid-write cannot leave one
+truncated.
 
 ### Configuration
 

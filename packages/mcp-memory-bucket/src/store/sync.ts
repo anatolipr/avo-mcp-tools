@@ -11,6 +11,8 @@ import { normalizeKey } from '../types.js';
 import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
 import type { NamedFolder } from '../config.js';
 import { reconcileRenamedAttachmentsDir, isUnderAttachmentsDir } from '../attachments/storage.js';
+import { isAtomicTempFile } from './atomic-write.js';
+import { TRASH_DIRNAME, isUnderTrashDir } from './trash.js';
 
 /**
  * OS-generated bookkeeping files (macOS's per-directory .DS_Store, Windows' Thumbs.db) that the OS
@@ -21,7 +23,8 @@ import { reconcileRenamedAttachmentsDir, isUnderAttachmentsDir } from '../attach
  */
 function isOsJunkFile(filePath: string): boolean {
   const name = path.basename(filePath);
-  return name === '.DS_Store' || name === 'Thumbs.db';
+  // writeFileAtomic's short-lived staging file is bookkeeping in the same sense — never content.
+  return name === '.DS_Store' || name === 'Thumbs.db' || isAtomicTempFile(name);
 }
 
 export interface TableSyncSpec<TFrontmatter> {
@@ -210,139 +213,150 @@ export function upsertFile<TFrontmatter>(
   const row = spec.toRow(frontmatter, filePath, parsed.mtimeMs);
   const folder = folderOverride ?? folderForFile(spec.sources, filePath);
 
-  // `skills` keys on (folder, id): name is unique PER FOLDER, not globally (see skill_get's
-  // folder param) — two different folders each having a same-named skill is legitimate, so the
-  // collision guard and upsert conflict target both scope by folder too. `memory_docs` has no
-  // separate id column at all — its id IS filePath (source_path), the table's actual PRIMARY KEY,
-  // so a "different file claiming the same id" collision is structurally impossible for it; only
-  // skills needs the guard below.
-  const scopedById = spec.table === 'skills';
+  // One transaction for the row, its search_index entry, its chunks and its dates: a crash part-way
+  // would otherwise leave a row with no search entry, which the mtime check above then skips forever.
+  // Nests as a savepoint when the caller is already inside one (initialScan batches a whole scan).
+  const indexed = db.transaction((): boolean => {
+    // `skills` keys on (folder, id): name is unique PER FOLDER, not globally (see skill_get's
+    // folder param) — two different folders each having a same-named skill is legitimate, so the
+    // collision guard and upsert conflict target both scope by folder too. `memory_docs` has no
+    // separate id column at all — its id IS filePath (source_path), the table's actual PRIMARY KEY,
+    // so a "different file claiming the same id" collision is structurally impossible for it; only
+    // skills needs the guard below.
+    const scopedById = spec.table === 'skills';
 
-  if (scopedById) {
-    // id/name is (part of) the table's real PRIMARY KEY (the sole addressing handle across the
-    // whole public API - skill_get(name, folder?)), so a DIFFERENT file claiming the same id
-    // (within the same folder) is a genuine collision, not a re-scan of the same file. The ON
-    // CONFLICT below would otherwise silently overwrite whichever row synced first - the
-    // first-synced item's row (and its full content) simply vanishes from the cache with no error
-    // and no way to address it. Refuse the overwrite and warn loudly instead: the first-synced item
-    // keeps working, the colliding one is visibly excluded rather than invisibly clobbering it.
-    const existingById = db.prepare(`SELECT source_path FROM ${spec.table} WHERE folder = ? AND id = ?`).get(folder, id) as
-      | { source_path: string }
-      | undefined;
-    if (existingById && existingById.source_path !== filePath) {
-      console.error(
-        `[memory-bucket] SKIPPED indexing ${filePath}: id "${id}" in folder "${folder}" already used by ${existingById.source_path} — ` +
-          `names must be unique within a folder. Rename one of these two files (or its frontmatter name) to resolve the collision.`
-      );
-      return;
-    }
-
-    // source_path carries its OWN separate UNIQUE constraint (see db.ts), independent of this
-    // table's (folder, id) primary key — so a file whose frontmatter name or folder changed since
-    // it was last indexed now targets a DIFFERENT (folder, id) than its existing row, and the plain
-    // INSERT below would violate source_path's own uniqueness before ON CONFLICT(folder, id) ever
-    // gets a chance to apply (ON CONFLICT only resolves conflicts on the target it names). Evict the
-    // stale row (and its search_index/doc_dates) first, exactly like removeFile would for a real
-    // delete, so the fresh insert under the new key lands cleanly.
-    if (existingBySourcePath) {
-      const staleRow = db.prepare(`SELECT id, folder FROM ${spec.table} WHERE source_path = ?`).get(filePath) as
-        | { id: string; folder: string }
+    if (scopedById) {
+      // id/name is (part of) the table's real PRIMARY KEY (the sole addressing handle across the
+      // whole public API - skill_get(name, folder?)), so a DIFFERENT file claiming the same id
+      // (within the same folder) is a genuine collision, not a re-scan of the same file. The ON
+      // CONFLICT below would otherwise silently overwrite whichever row synced first - the
+      // first-synced item's row (and its full content) simply vanishes from the cache with no error
+      // and no way to address it. Refuse the overwrite and warn loudly instead: the first-synced item
+      // keeps working, the colliding one is visibly excluded rather than invisibly clobbering it.
+      const existingById = db.prepare(`SELECT source_path FROM ${spec.table} WHERE folder = ? AND id = ?`).get(folder, id) as
+        | { source_path: string }
         | undefined;
-      if (staleRow && (staleRow.id !== id || staleRow.folder !== folder)) {
-        removeFile(db, spec.table, filePath);
-      }
-    }
-  }
-
-  const cols = [...spec.columns, 'source_path', 'folder', 'body', 'mtime_ms'];
-  const values = [...spec.columns.map((c) => row[c]), filePath, folder, parsed.body, parsed.mtimeMs];
-  const placeholders = cols.map(() => '?').join(', ');
-  const updateClause = cols
-    .filter((c) => c !== 'id' && c !== 'source_path' && c !== 'folder')
-    .map((c) => `${c} = excluded.${c}`)
-    .join(', ');
-  const conflictTarget = scopedById ? 'folder, id' : 'source_path';
-
-  const insert = () =>
-    db
-      .prepare(
-        `INSERT INTO ${spec.table} (${cols.join(', ')}) VALUES (${placeholders})
-     ON CONFLICT(${conflictTarget}) DO UPDATE SET ${updateClause}`
-      )
-      .run(...values);
-
-  try {
-    insert();
-  } catch (err) {
-    // Belt-and-suspenders: the collision guards above are pre-checks against a fresh SELECT, and
-    // can still miss a stale row above (e.g. a source_path left over from before a folder/root
-    // rename, or a filesystem case-sensitivity mismatch between the path stored earlier and the
-    // one passed in now) — in which case the plain INSERT itself throws the raw SQLITE_CONSTRAINT
-    // error, which used to propagate straight out of upsertFile and abort the entire remote
-    // resync/poll tick for every OTHER file too (see the "initial remote skill resync failed"
-    // crash report this was added for). Self-heal instead: whatever row is squatting on this
-    // conflict target, evict it (same as a real delete would) and retry the insert once. If it
-    // still fails after that, log and skip this one file rather than taking the whole sync down.
-    if (err instanceof Error && 'code' in err && (err as { code: string }).code === 'SQLITE_CONSTRAINT_UNIQUE') {
-      const staleSourcePath = scopedById
-        ? (db.prepare(`SELECT source_path FROM ${spec.table} WHERE folder = ? AND id = ?`).get(folder, id) as
-            | { source_path: string }
-            | undefined)?.source_path
-        : filePath;
-      if (staleSourcePath) removeFile(db, spec.table, staleSourcePath);
-      try {
-        insert();
+      if (existingById && existingById.source_path !== filePath) {
         console.error(
-          `[memory-bucket] recovered from a stale ${spec.table} row blocking ${filePath} (evicted ${staleSourcePath}) — re-indexed successfully`
+          `[memory-bucket] SKIPPED indexing ${filePath}: id "${id}" in folder "${folder}" already used by ${existingById.source_path} — ` +
+            `names must be unique within a folder. Rename one of these two files (or its frontmatter name) to resolve the collision.`
         );
-      } catch (retryErr) {
-        console.error(`[memory-bucket] SKIPPED indexing ${filePath}: unresolvable ${spec.table} conflict — ${(retryErr as Error).message}`);
-        return;
+        return false;
       }
-    } else {
-      throw err;
+
+      // source_path carries its OWN separate UNIQUE constraint (see db.ts), independent of this
+      // table's (folder, id) primary key — so a file whose frontmatter name or folder changed since
+      // it was last indexed now targets a DIFFERENT (folder, id) than its existing row, and the plain
+      // INSERT below would violate source_path's own uniqueness before ON CONFLICT(folder, id) ever
+      // gets a chance to apply (ON CONFLICT only resolves conflicts on the target it names). Evict the
+      // stale row (and its search_index/doc_dates) first, exactly like removeFile would for a real
+      // delete, so the fresh insert under the new key lands cleanly.
+      if (existingBySourcePath) {
+        const staleRow = db.prepare(`SELECT id, folder FROM ${spec.table} WHERE source_path = ?`).get(filePath) as
+          | { id: string; folder: string }
+          | undefined;
+        if (staleRow && (staleRow.id !== id || staleRow.folder !== folder)) {
+          removeFile(db, spec.table, filePath);
+        }
+      }
     }
-  }
 
-  // ref_folder scopes these two tables' delete-then-reinsert the same way the skills upsert above
-  // does: two skills in different folders can now legitimately share an `id`, so ref_id alone is
-  // no longer enough to identify "this file's" search_index/doc_dates rows without also clobbering
-  // the other folder's same-named skill's rows. memory_docs' id is filePath (globally unique by
-  // construction), so '' (unscoped) is safe there.
-  const refFolder = scopedById ? folder : '';
-  db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(spec.table, id, refFolder);
-  db.prepare(
-    `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key, filename, triggers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    spec.table,
-    id,
-    refFolder,
-    String(row.description ?? ''),
-    parsed.body,
-    flattenTags(String(row.tags ?? '[]')),
-    String(row.key ?? row.skill_group ?? ''),
-    // A skill's file is always SKILL.md, so its name goes here instead — otherwise the name is
-    // only searchable when the description or body happens to repeat it.
-    scopedById ? id : path.basename(filePath),
-    flattenTags(String(row.trigger_phrases ?? '[]'))
-  );
-  writeChunks(db, spec.table, id, refFolder, chunkContext(spec.table, row), String(row.description ?? ''), parsed.body);
+    const cols = [...spec.columns, 'source_path', 'folder', 'body', 'mtime_ms'];
+    const values = [...spec.columns.map((c) => row[c]), filePath, folder, parsed.body, parsed.mtimeMs];
+    const placeholders = cols.map(() => '?').join(', ');
+    const updateClause = cols
+      .filter((c) => c !== 'id' && c !== 'source_path' && c !== 'folder')
+      .map((c) => `${c} = excluded.${c}`)
+      .join(', ');
+    const conflictTarget = scopedById ? 'folder, id' : 'source_path';
 
-  db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(spec.table, id, refFolder);
-  const dates = new Set(extractDates(parsed.body));
-  // created_at is a UTC instant; convert to the OS-local calendar date so it
-  // lines up with what a user in this timezone would call "today", matching
-  // extractDates()'s output, which is already timezone-naive local text.
-  if (row.created_at) dates.add(toLocalDate(String(row.created_at)));
-  if (dates.size > 0) {
-    const insertDate = db.prepare(`INSERT INTO doc_dates (ref_table, ref_id, ref_folder, date) VALUES (?, ?, ?, ?)`);
-    for (const date of dates) insertDate.run(spec.table, id, refFolder, date);
-  }
+    const insert = () =>
+      db
+        .prepare(
+          `INSERT INTO ${spec.table} (${cols.join(', ')}) VALUES (${placeholders})
+       ON CONFLICT(${conflictTarget}) DO UPDATE SET ${updateClause}`
+        )
+        .run(...values);
 
-  spec.onIndexed?.(frontmatter, filePath);
+    try {
+      insert();
+    } catch (err) {
+      // Belt-and-suspenders: the collision guards above are pre-checks against a fresh SELECT, and
+      // can still miss a stale row above (e.g. a source_path left over from before a folder/root
+      // rename, or a filesystem case-sensitivity mismatch between the path stored earlier and the
+      // one passed in now) — in which case the plain INSERT itself throws the raw SQLITE_CONSTRAINT
+      // error, which used to propagate straight out of upsertFile and abort the entire remote
+      // resync/poll tick for every OTHER file too (see the "initial remote skill resync failed"
+      // crash report this was added for). Self-heal instead: whatever row is squatting on this
+      // conflict target, evict it (same as a real delete would) and retry the insert once. If it
+      // still fails after that, log and skip this one file rather than taking the whole sync down.
+      if (err instanceof Error && 'code' in err && (err as { code: string }).code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        const staleSourcePath = scopedById
+          ? (db.prepare(`SELECT source_path FROM ${spec.table} WHERE folder = ? AND id = ?`).get(folder, id) as
+              | { source_path: string }
+              | undefined)?.source_path
+          : filePath;
+        if (staleSourcePath) removeFile(db, spec.table, staleSourcePath);
+        try {
+          insert();
+          console.error(
+            `[memory-bucket] recovered from a stale ${spec.table} row blocking ${filePath} (evicted ${staleSourcePath}) — re-indexed successfully`
+          );
+        } catch (retryErr) {
+          console.error(`[memory-bucket] SKIPPED indexing ${filePath}: unresolvable ${spec.table} conflict — ${(retryErr as Error).message}`);
+          return false;
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    // ref_folder scopes these two tables' delete-then-reinsert the same way the skills upsert above
+    // does: two skills in different folders can now legitimately share an `id`, so ref_id alone is
+    // no longer enough to identify "this file's" search_index/doc_dates rows without also clobbering
+    // the other folder's same-named skill's rows. memory_docs' id is filePath (globally unique by
+    // construction), so '' (unscoped) is safe there.
+    const refFolder = scopedById ? folder : '';
+    db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(spec.table, id, refFolder);
+    db.prepare(
+      `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key, filename, triggers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      spec.table,
+      id,
+      refFolder,
+      String(row.description ?? ''),
+      parsed.body,
+      flattenTags(String(row.tags ?? '[]')),
+      String(row.key ?? row.skill_group ?? ''),
+      // A skill's file is always SKILL.md, so its name goes here instead — otherwise the name is
+      // only searchable when the description or body happens to repeat it.
+      scopedById ? id : path.basename(filePath),
+      flattenTags(String(row.trigger_phrases ?? '[]'))
+    );
+    writeChunks(db, spec.table, id, refFolder, chunkContext(spec.table, row), String(row.description ?? ''), parsed.body);
+
+    db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(spec.table, id, refFolder);
+    const dates = new Set(extractDates(parsed.body));
+    // created_at is a UTC instant; convert to the OS-local calendar date so it
+    // lines up with what a user in this timezone would call "today", matching
+    // extractDates()'s output, which is already timezone-naive local text.
+    if (row.created_at) dates.add(toLocalDate(String(row.created_at)));
+    if (dates.size > 0) {
+      const insertDate = db.prepare(`INSERT INTO doc_dates (ref_table, ref_id, ref_folder, date) VALUES (?, ?, ?, ?)`);
+      for (const date of dates) insertDate.run(spec.table, id, refFolder, date);
+    }
+    return true;
+  })();
+
+  // Outside the transaction: this hook moves directories on disk, which a rollback could not undo.
+  if (indexed) spec.onIndexed?.(frontmatter, filePath);
 }
 
 export function removeFile(db: Database.Database, table: 'skills' | 'memory_docs', filePath: string): void {
+  db.transaction(() => removeFileRows(db, table, filePath))();
+}
+
+function removeFileRows(db: Database.Database, table: 'skills' | 'memory_docs', filePath: string): void {
   const idCol = table === 'skills' ? 'id' : 'source_path';
   const existing = db.prepare(`SELECT ${idCol} AS id, folder FROM ${table} WHERE source_path = ?`).get(filePath) as
     | { id: string; folder: string }
@@ -362,17 +376,62 @@ export function removeFile(db: Database.Database, table: 'skills' | 'memory_docs
 
 /** Full scan of all configured source dirs — used once at startup before the watcher takes over. */
 export function initialScan<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): void {
-  for (const folder of spec.sources) {
-    if (!fs.existsSync(folder.path)) continue;
-    for (const file of walkMarkdownFiles(folder.path)) {
-      if (!spec.matchesFile(file)) continue;
+  for (const folder of spec.sources) scanSingleFolder(db, spec, folder.path);
+}
+
+/**
+ * Removes the cached rows of files that are gone from disk — a file deleted while the server was
+ * not running fires no watcher event, and initialScan only ever adds or updates. A folder whose
+ * root is missing or empty is left alone: that is what an unmounted volume looks like, and pruning
+ * it would throw away every embedding and paused flag for docs that return on the next mount.
+ * Returns how many rows were removed.
+ */
+export function pruneMissingFiles<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): number {
+  const roots = new Map(spec.sources.map((f) => [f.name, f.path]));
+  const rootUsable = new Map<string, boolean>();
+  const isRootUsable = (root: string): boolean => {
+    let usable = rootUsable.get(root);
+    if (usable === undefined) {
       try {
-        upsertFile(db, spec, file);
-      } catch (err) {
-        console.error(`[memory-bucket] failed to index ${file}:`, err);
+        usable = fs.readdirSync(root).length > 0;
+      } catch {
+        usable = false;
       }
+      rootUsable.set(root, usable);
     }
-  }
+    return usable;
+  };
+  const rows = db.prepare(`SELECT source_path, folder FROM ${spec.table}`).all() as Array<{ source_path: string; folder: string }>;
+  const missing = rows.filter((row) => {
+    // A row filed under no configured folder (an item-level share's mirror) has no root to check.
+    const root = roots.get(row.folder);
+    if (root !== undefined && !isRootUsable(root)) return false;
+    return !fs.existsSync(row.source_path);
+  });
+  if (missing.length === 0) return 0;
+  db.transaction(() => {
+    for (const row of missing) removeFileRows(db, spec.table, row.source_path);
+  })();
+  return missing.length;
+}
+
+/**
+ * Wipes the doc tables and repopulates them through `rescan`, keeping what only the cache knows:
+ * the local-only `paused` flags, which no file on disk records. One transaction, so a rescan that
+ * throws leaves the previous cache in place instead of a half-empty one, and the whole rebuild
+ * commits once. `chunks` is deliberately not wiped — see pruneOrphanChunks.
+ */
+export function rebuildDocTables(db: Database.Database, rescan: () => void): void {
+  db.transaction(() => {
+    const pausedSkills = db.prepare(`SELECT folder, id FROM skills WHERE paused = 1`).all() as Array<{ folder: string; id: string }>;
+    const pausedDocs = db.prepare(`SELECT source_path FROM memory_docs WHERE paused = 1`).all() as Array<{ source_path: string }>;
+    db.exec(`DELETE FROM skills; DELETE FROM memory_docs; DELETE FROM search_index; DELETE FROM doc_dates;`);
+    rescan();
+    const pauseSkill = db.prepare(`UPDATE skills SET paused = 1 WHERE folder = ? AND id = ?`);
+    const pauseDoc = db.prepare(`UPDATE memory_docs SET paused = 1 WHERE source_path = ?`);
+    for (const row of pausedSkills) pauseSkill.run(row.folder, row.id);
+    for (const row of pausedDocs) pauseDoc.run(row.source_path);
+  })();
 }
 
 /** Full scan of a single dir — used when a new folder is added live, after registering it in spec.sources. */
@@ -382,25 +441,45 @@ export function scanSingleFolder<TFrontmatter>(
   dirPath: string
 ): void {
   if (!fs.existsSync(dirPath)) return;
-  for (const file of walkMarkdownFiles(dirPath)) {
-    if (!spec.matchesFile(file)) continue;
-    try {
-      upsertFile(db, spec, file);
-    } catch (err) {
-      console.error(`[memory-bucket] failed to index ${file}:`, err);
+  const scan = () => {
+    for (const file of walkMarkdownFiles(dirPath)) {
+      if (!spec.matchesFile(file)) continue;
+      try {
+        upsertFile(db, spec, file);
+      } catch (err) {
+        console.error(`[memory-bucket] failed to index ${file}:`, err);
+      }
     }
+  };
+  // One commit for the whole folder instead of one per file — a first scan of a large folder is
+  // dominated by commit cost otherwise. Each file is still its own savepoint (see upsertFile), so
+  // one bad file is skipped, not the batch. Should the batch itself fail, index file by file as
+  // before: upsertFile's mtime check makes the second pass skip whatever already landed.
+  try {
+    db.transaction(scan)();
+  } catch (err) {
+    console.error(`[memory-bucket] batched scan of ${dirPath} failed, retrying file by file:`, err);
+    scan();
   }
 }
 
 /** Drops all cached rows (and search index entries) belonging to a removed folder. Never touches files on disk. */
 export function unregisterFolder(db: Database.Database, table: 'skills' | 'memory_docs', folderName: string): void {
   const idCol = table === 'skills' ? 'id' : 'source_path';
-  const rows = db.prepare(`SELECT ${idCol} AS id FROM ${table} WHERE folder = ?`).all(folderName) as Array<{ id: string }>;
-  db.prepare(`DELETE FROM ${table} WHERE folder = ?`).run(folderName);
-  for (const row of rows) {
-    db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(table, row.id);
-    deleteChunks(db, table, row.id, table === 'skills' ? folderName : '');
-  }
+  // Same scoping as removeFile: a skill's search_index/doc_dates/chunks rows are keyed by
+  // (ref_id, ref_folder), since another folder may hold a skill of the same name.
+  const refFolder = table === 'skills' ? folderName : '';
+  db.transaction(() => {
+    const rows = db.prepare(`SELECT ${idCol} AS id FROM ${table} WHERE folder = ?`).all(folderName) as Array<{ id: string }>;
+    db.prepare(`DELETE FROM ${table} WHERE folder = ?`).run(folderName);
+    const deleteSearch = db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`);
+    const deleteDates = db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`);
+    for (const row of rows) {
+      deleteSearch.run(table, row.id, refFolder);
+      deleteDates.run(table, row.id, refFolder);
+      deleteChunks(db, table, row.id, refFolder);
+    }
+  })();
 }
 
 export function* walkMarkdownFiles(dir: string): Generator<string> {
@@ -413,7 +492,7 @@ export function* walkMarkdownFiles(dir: string): Generator<string> {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (isUnderAttachmentsDir(entry.name)) continue;
+      if (isUnderAttachmentsDir(entry.name) || entry.name === TRASH_DIRNAME) continue;
       yield* walkMarkdownFiles(full);
     } else if (entry.isFile() && entry.name.endsWith('.md')) {
       yield full;
@@ -465,7 +544,7 @@ export function* walkSkillSiblingFiles(skillDir: string): Generator<string> {
 export function watchSources<TFrontmatter>(db: Database.Database, spec: TableSyncSpec<TFrontmatter>): FSWatcher {
   const watcher = chokidar.watch(
     spec.sources.map((f) => f.path),
-    { ignoreInitial: true, persistent: true, depth: 10, ignored: (filePath) => isUnderAttachmentsDir(filePath) || isOsJunkFile(filePath) }
+    { ignoreInitial: true, persistent: true, depth: 10, ignored: (filePath) => isUnderAttachmentsDir(filePath) || isOsJunkFile(filePath) || isUnderTrashDir(filePath) }
   );
 
   watcher

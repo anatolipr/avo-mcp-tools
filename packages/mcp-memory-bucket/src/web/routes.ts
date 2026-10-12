@@ -17,7 +17,7 @@ import {
 import type { SkillRepository } from '../skills/repository.js';
 import { stripKey, type MemoryRepository } from '../memory/repository.js';
 import { pruneOrphanChunks } from '../store/chunks.js';
-import { initialScan, walkMarkdownFiles, type TableSyncSpec } from '../store/sync.js';
+import { initialScan, rebuildDocTables, walkMarkdownFiles, type TableSyncSpec } from '../store/sync.js';
 import { SEARCH_BM25, withOrFallback, hasExplicitSyntax, sanitizeFtsQuery } from '../store/search.js';
 import { semanticDocMatches } from '../store/recall.js';
 import type { EmbeddingIndexer } from '../store/embeddings.js';
@@ -623,11 +623,12 @@ export function buildWebRouter(
   router.post('/api/rebuild-cache', async (_req: Request, res: Response) => {
     try {
       await Promise.all([remotePollers?.skill?.resyncAll(), remotePollers?.memory?.resyncAll()]);
-      db.exec(`DELETE FROM skills; DELETE FROM memory_docs; DELETE FROM search_index; DELETE FROM doc_dates;`);
-      initialScan(db, skillSpec);
-      initialScan(db, memorySpec);
-      syncSharedItemsIndex(db, skillSpec, memorySpec, identity.current().username);
-      pruneOrphanChunks(db); // chunks survive the wipe so unchanged embeddings carry over — see pruneOrphanChunks
+      rebuildDocTables(db, () => {
+        initialScan(db, skillSpec);
+        initialScan(db, memorySpec);
+        syncSharedItemsIndex(db, skillSpec, memorySpec, identity.current().username);
+        pruneOrphanChunks(db); // chunks survive the wipe so unchanged embeddings carry over — see pruneOrphanChunks
+      });
       const skillCount = (db.prepare(`SELECT COUNT(*) AS n FROM skills`).get() as { n: number }).n;
       const memoryCount = (db.prepare(`SELECT COUNT(*) AS n FROM memory_docs`).get() as { n: number }).n;
       res.json({ skillCount, memoryCount });

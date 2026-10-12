@@ -7,7 +7,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { loadConfig, type RemoteFolder } from './config.js';
 import { openCache } from './store/db.js';
-import { initialScan, watchSources, skillSyncSpec, memorySyncSpec } from './store/sync.js';
+import { initialScan, pruneMissingFiles, watchSources, skillSyncSpec, memorySyncSpec } from './store/sync.js';
+import { pruneTrash } from './store/trash.js';
 import { SkillRepository, findSkillDirAncestor } from './skills/repository.js';
 import { MemoryRepository } from './memory/repository.js';
 import { registerSkillTools } from './skills/tools.js';
@@ -46,6 +47,18 @@ const packageRoot = __dirname.endsWith(`${path.sep}dist${path.sep}src`)
 const builtinSkillsDir = path.join(__dirname, 'skills', 'builtin');
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8767;
+
+// Reported to MCP clients as serverInfo.version — read from the package's own manifest (shipped in
+// every npm tarball) so it cannot drift from the published version.
+function readPackageVersion(): string {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf-8')) as { version?: unknown };
+    return typeof manifest.version === 'string' ? manifest.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+const SERVER_VERSION = readPackageVersion();
 
 const config = loadConfig();
 const db = openCache(config.cacheDbPath);
@@ -119,6 +132,15 @@ initialScan(db, memorySpec);
 // start and again whenever the login changes (see syncSharedItemsIndex).
 syncSharedItemsIndex(db, skillSpec, memorySpec, identity.current().username);
 identity.onIdentityChange((current) => syncSharedItemsIndex(db, skillSpec, memorySpec, current.username));
+// A file deleted while the server was down fired no watcher event — drop its row now. After the
+// scans above, so a file that merely moved is already indexed at its new path.
+try {
+  const pruned = pruneMissingFiles(db, skillSpec) + pruneMissingFiles(db, memorySpec);
+  if (pruned > 0) console.error(`[memory-bucket] removed ${pruned} cached doc(s) whose file no longer exists`);
+} catch (err) {
+  console.error('[memory-bucket] could not prune cached docs with missing files:', err);
+}
+pruneTrash(config.baseDir, true);
 const skillWatcher = watchSources(db, skillSpec);
 const memoryWatcher = watchSources(db, memorySpec);
 skillRepo.setWatcher(skillWatcher);
@@ -227,7 +249,7 @@ const SERVER_INSTRUCTIONS = `${SERVER_DESCRIPTION} Exposes skill_* (reusable cod
 
 function buildMcpServer(): McpServer {
   const server = new McpServer(
-    { name: 'memory-bucket', version: '0.1.0', description: SERVER_DESCRIPTION },
+    { name: 'memory-bucket', version: SERVER_VERSION, description: SERVER_DESCRIPTION },
     { capabilities: {}, instructions: SERVER_INSTRUCTIONS }
   );
   registerSkillTools(server, skillRepo);
@@ -276,7 +298,7 @@ const methodNotAllowed = (_req: express.Request, res: express.Response) => {
 app.get('/mcp', methodNotAllowed);
 app.delete('/mcp', methodNotAllowed);
 
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.error(`[memory-bucket] MCP server listening on http://localhost:${PORT}/mcp`);
   console.error(`[memory-bucket] UI available at http://localhost:${PORT}`);
   console.error(
@@ -305,9 +327,30 @@ app.listen(PORT, () => {
   }
 });
 
-process.on('SIGINT', () => {
-  remoteSkillPoller?.stop();
-  remoteMemoryPoller?.stop();
-  db.close();
+// SIGTERM is what a process manager, `kill`, or a closing MCP client sends — without a handler the
+// process died with the WAL unflushed and watchers open. Each step is independent: one failing
+// (a poller already stopped, the db already closed) must not keep the rest from running.
+let shuttingDown = false;
+function shutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const steps: Array<() => unknown> = [
+    () => remoteSkillPoller?.stop(),
+    () => remoteMemoryPoller?.stop(),
+    () => embeddingIndexer?.stop(),
+    () => void skillWatcher.close().catch(() => {}),
+    () => void memoryWatcher.close().catch(() => {}),
+    () => httpServer.close(),
+    () => db.close(),
+  ];
+  for (const step of steps) {
+    try {
+      step();
+    } catch (err) {
+      console.error('[memory-bucket] shutdown step failed:', (err as Error).message);
+    }
+  }
   process.exit(0);
-});
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

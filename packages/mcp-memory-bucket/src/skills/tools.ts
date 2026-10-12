@@ -82,12 +82,21 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
   mcp.tool(
     'skill_get',
     `Fetches a single skill by name, including its full markdown body.${multiFolder ? ` Names are unique per folder, not globally — if "${folderNames}" has more than one skill sharing this name, pass folder to disambiguate; omitting it errors out when the name is ambiguous instead of guessing.` : ''}`,
-    multiFolder ? { name: z.string(), folder: z.string().optional().describe(`disambiguates when the name exists in more than one folder: ${folderNames}`) } : { name: z.string() },
-    async ({ name, folder }: any) => {
+    {
+      name: z.string(),
+      ...(multiFolder ? { folder: z.string().optional().describe(`disambiguates when the name exists in more than one folder: ${folderNames}`) } : {}),
+      include_extends: z.boolean().optional().describe('also return the base skills this one builds on (its metadata.extends chain, nearest first) as `extends_chain`'),
+    },
+    async ({ name, folder, include_extends }: any) => {
       try {
         const doc = await repo.get(name, folder);
         if (!doc) {
           return { content: [{ type: 'text', text: `No skill found with name "${name}"` }], isError: true };
+        }
+        if (include_extends) {
+          // A base that cannot be read must not cost the caller the skill it asked for.
+          const extendsChain = await repo.getExtendsChain(doc).catch(() => []);
+          return { content: [{ type: 'text', text: JSON.stringify({ ...doc, extends_chain: extendsChain }, null, 2) }] };
         }
         return { content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }] };
       } catch (err) {
@@ -122,7 +131,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
       status: statusSchema(SKILL_STATUS_DEFAULTS).optional().describe('defaults to "unreviewed"; stored in frontmatter.metadata'),
       tags: z.array(z.string()).optional(),
       trigger_phrases: z.array(z.string()).optional(),
-      extends: z.string().optional().describe('reserved for a future overlay mechanism — stored in frontmatter.metadata'),
+      extends: z.string().optional().describe('name of a base skill this one builds on — stored in frontmatter.metadata; skill_get(include_extends) returns it'),
       group: z
         .string()
         .optional()
@@ -301,7 +310,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_delete',
-    `Hard-deletes a skill by name — removes the whole skill folder (SKILL.md plus any scripts/references/assets), no tombstone.${multiFolder ? ` If the name exists in more than one folder, pass folder to disambiguate which one to delete.` : ''}`,
+    `Deletes a skill by name — removes the whole skill folder (SKILL.md plus any scripts/references/assets). A copy stays in the server base directory's .memory-bucket-trash for 30 days, as does the previous SKILL.md of any updated skill.${multiFolder ? ` If the name exists in more than one folder, pass folder to disambiguate which one to delete.` : ''}`,
     multiFolder
       ? { name: z.string(), folder: z.string().optional().describe(`disambiguates when the name exists in more than one folder: ${folderNames}`) }
       : { name: z.string() },
@@ -317,7 +326,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_bulk_delete',
-    'Hard-deletes many skills by name in one call — e.g. cleaning up a batch found via skill_search/skill_list. No tombstone. Returns per-name success/failure so one bad name doesn\'t abort the rest of the batch.',
+    'Deletes many skills by name in one call — e.g. cleaning up a batch found via skill_search/skill_list. Returns per-name success/failure so one bad name doesn\'t abort the rest of the batch.',
     { names: z.array(z.string()).min(1) },
     async ({ names }) => {
       const results = await repo.bulkDelete(names);

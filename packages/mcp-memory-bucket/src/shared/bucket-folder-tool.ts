@@ -13,7 +13,7 @@ import {
   type RemoteFolder,
 } from '../config.js';
 import { pruneOrphanChunks } from '../store/chunks.js';
-import { initialScan, type TableSyncSpec } from '../store/sync.js';
+import { initialScan, rebuildDocTables, type TableSyncSpec } from '../store/sync.js';
 import type { SkillRepository } from '../skills/repository.js';
 import type { MemoryRepository } from '../memory/repository.js';
 import { listFolders as listFolderfooFolders } from '../remote/folderfoo-client.js';
@@ -190,11 +190,12 @@ export function registerBucketFolderTools(
     {},
     async () => {
       try {
-        db.exec(`DELETE FROM skills; DELETE FROM memory_docs; DELETE FROM search_index; DELETE FROM doc_dates;`);
-        initialScan(db, skillSpec);
-        initialScan(db, memorySpec);
-        syncSharedItemsIndex(db, skillSpec, memorySpec, identity.current().username);
-        pruneOrphanChunks(db); // chunks survive the wipe so unchanged embeddings carry over — see pruneOrphanChunks
+        rebuildDocTables(db, () => {
+          initialScan(db, skillSpec);
+          initialScan(db, memorySpec);
+          syncSharedItemsIndex(db, skillSpec, memorySpec, identity.current().username);
+          pruneOrphanChunks(db); // chunks survive the wipe so unchanged embeddings carry over — see pruneOrphanChunks
+        });
         const skillCount = (db.prepare(`SELECT COUNT(*) AS n FROM skills`).get() as { n: number }).n;
         const memoryCount = (db.prepare(`SELECT COUNT(*) AS n FROM memory_docs`).get() as { n: number }).n;
         return {

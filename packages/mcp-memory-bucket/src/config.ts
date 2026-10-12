@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { writeFileAtomic } from './store/atomic-write.js';
 
 export interface NamedFolder {
   name: string;
@@ -227,7 +228,7 @@ export function saveFolder(config: BucketConfig, kind: 'skill' | 'memory', folde
     ...current,
     [key]: [...existing, { name: folder.name, path: storedPath }],
   };
-  fs.writeFileSync(config.configPath, JSON.stringify(next, null, 2) + '\n');
+  writeFileAtomic(config.configPath, JSON.stringify(next, null, 2) + '\n');
 }
 
 /**
@@ -261,7 +262,7 @@ export function saveRemoteFolder(
       },
     ],
   };
-  fs.writeFileSync(config.configPath, JSON.stringify(next, null, 2) + '\n');
+  writeFileAtomic(config.configPath, JSON.stringify(next, null, 2) + '\n');
 }
 
 /** Lowercase-hyphenate a folder-derived name, same shape as skill names. */
@@ -309,7 +310,7 @@ export function updateRemoteFolderPath(
   });
   if (!changed) return;
 
-  fs.writeFileSync(config.configPath, JSON.stringify({ ...current, [key]: next }, null, 2) + '\n');
+  writeFileAtomic(config.configPath, JSON.stringify({ ...current, [key]: next }, null, 2) + '\n');
 }
 
 /**
@@ -341,7 +342,7 @@ export function removeFolder(config: BucketConfig, kind: 'skill' | 'memory', nam
   if (filtered.length === existing.length) return; // nothing matched, don't rewrite the file
 
   const next: ConfigFile = { ...current, [key]: filtered };
-  fs.writeFileSync(config.configPath, JSON.stringify(next, null, 2) + '\n');
+  writeFileAtomic(config.configPath, JSON.stringify(next, null, 2) + '\n');
 }
 
 export const ATTACHMENT_MAX_BYTES = process.env.ATTACHMENT_MAX_BYTES
