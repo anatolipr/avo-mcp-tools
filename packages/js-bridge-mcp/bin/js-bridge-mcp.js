@@ -37,4 +37,8 @@ Environment:
   process.exit(0);
 }
 
+if (process.stderr.isTTY) {
+  process.stderr.write('\x1b]0;js-bridge-mcp\x07');
+}
+
 await import('../dist/src/server.js');

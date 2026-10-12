@@ -17,4 +17,8 @@ if (process.argv[2] === 'stop') {
   process.exit(0);
 }
 
+if (process.stderr.isTTY && !process.argv.includes('--help') && !process.argv.includes('-h')) {
+  process.stderr.write('\x1b]0;mcp-memory-bucket\x07');
+}
+
 await import('../dist/src/server.js');
