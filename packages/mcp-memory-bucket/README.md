@@ -96,7 +96,7 @@ query, also lists docs that match by meaning alone.
 
 ### Via npx
 
-No install needed — runs the published package directly:
+No install needed — runs the published package directly (requires Node 22 or newer):
 
 ```sh
 npx mcp-memory-bucket
