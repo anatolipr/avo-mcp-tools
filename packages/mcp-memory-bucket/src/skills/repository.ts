@@ -7,7 +7,7 @@ import { writeMarkdownFile, formatMarkdownFile } from '../store/markdown-file.js
 import { assertValidSkillName } from '../store/skill-name.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, skillSyncSpec, walkSkillSiblingFiles, type TableSyncSpec } from '../store/sync.js';
-import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
+import { SearchQueryError, SEARCH_BM25, SEARCH_SNIPPET, withOrFallback } from '../store/search.js';
 import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
 import { rebaseFolderPath } from '../config.js';
@@ -93,7 +93,7 @@ export class SkillRepository {
   }
 
   /** Names of every remote folder NOT matching the current identity — used to exclude their rows from list/search SQL. */
-  private hiddenFolderNames(): string[] {
+  hiddenFolderNames(): string[] {
     if (!this.identity) return this.remoteFolders.map((f) => f.name);
     const identity = this.identity.current();
     return this.remoteFolders.filter((f) => !isFolderVisible(f, identity)).map((f) => f.name);
@@ -410,7 +410,7 @@ export class SkillRepository {
   }> {
     const { folder, status, owner, tag, group, limit = 20, offset = 0, includePaused = false } = opts;
     const conditions: string[] = [];
-    const params: unknown[] = [sanitizeFtsQuery(query)];
+    const params: unknown[] = [];
     if (folder) {
       conditions.push('s.folder = ?');
       params.push(folder);
@@ -439,26 +439,24 @@ export class SkillRepository {
       conditions.push(`s.folder NOT IN (${hidden.map(() => '?').join(', ')})`);
       params.push(...hidden);
     }
-    params.push(limit, offset);
 
     try {
       // shared_items is LEFT JOINed on s.source_path (== mirror_path for an item-level share — see
       // remote/shared-items.ts) — same reasoning as MemoryRepository.search's identical join.
-      const rows = this.db
-        .prepare(
+      const statement = this.db.prepare(
           `SELECT s.id AS name, s.description, s.folder,
-                  snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
-                  -bm25(search_index) AS score,
+                  ${SEARCH_SNIPPET} AS snippet,
+                  -${SEARCH_BM25} AS score,
                   si.owner AS shared_owner,
                   si.role AS shared_role
            FROM search_index
            JOIN skills s ON s.id = search_index.ref_id AND s.folder = search_index.ref_folder
            LEFT JOIN shared_items si ON si.status = 'active' AND si.mirror_path = s.source_path
            WHERE search_index.ref_table = 'skills' AND search_index MATCH ? ${conditions.map((c) => `AND ${c}`).join(' ')}
-           ORDER BY bm25(search_index)
+           ORDER BY ${SEARCH_BM25}
            LIMIT ? OFFSET ?`
-        )
-        .all(...params) as Array<{
+      );
+      type Row = {
         name: string;
         description: string;
         folder: string;
@@ -466,7 +464,8 @@ export class SkillRepository {
         score: number;
         shared_owner: string | null;
         shared_role: string | null;
-      }>;
+      };
+      const rows = withOrFallback(this.db, query, offset, (ftsQuery, probe) => statement.all(ftsQuery, ...params, ...(probe ? [1, 0] : [limit, offset])) as Row[]);
       return rows.map(({ shared_owner, shared_role, ...rest }) => ({
         ...rest,
         shared_owner: shared_owner ?? undefined,

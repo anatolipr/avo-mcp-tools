@@ -38,7 +38,7 @@ export function registerSkillTools(mcp: McpServer, repo: SkillRepository): void 
 
   mcp.tool(
     'skill_search',
-    'Full-text search over skill description/body/tags (grep/find-like, ranked by relevance) — unlike skill_list\'s substring metadata filter, this searches the full markdown body. `query` is raw SQLite FTS5 MATCH syntax: bare words, "exact phrases", prefix* wildcards, AND/OR/NOT boolean operators; hyphenated/punctuated terms must be quoted, e.g. "blue-green". Can be combined with status/owner/tag filters. Returns ranked hits with a highlighted snippet, not the full body — call skill_get on a hit\'s name for that. Paused skills are hidden by default — pass include_paused to see them.',
+    'Full-text search over skill description/body/tags (grep/find-like, ranked by relevance) — unlike skill_list\'s substring metadata filter, this searches the full markdown body. `query` is SQLite FTS5 MATCH syntax: bare words (all must match; falls back to any-word when nothing matches all), "exact phrases", prefix* wildcards, AND/OR/NOT. Can be combined with status/owner/tag filters. Returns ranked hits with a highlighted snippet, not the full body — call skill_get on a hit\'s name for that. Paused skills are hidden by default — pass include_paused to see them.',
     {
       query: z.string().describe('FTS5 match expression, e.g. `deploy AND rollback` or `"blue green"`'),
       status: statusSchema(SKILL_STATUS_DEFAULTS).optional(),

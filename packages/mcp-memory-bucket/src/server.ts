@@ -14,6 +14,7 @@ import { registerSkillTools } from './skills/tools.js';
 import { registerMemoryTools } from './memory/tools.js';
 import { registerRelocateTool } from './shared/relocate-tool.js';
 import { registerSearchTool } from './shared/search-tool.js';
+import { EmbeddingIndexer, createTransformersEmbedder } from './store/embeddings.js';
 import { registerBucketFolderTools } from './shared/bucket-folder-tool.js';
 import { registerBucketShareTools } from './shared/bucket-share-tool.js';
 import { syncSharedItemsIndex } from './remote/shared-items.js';
@@ -125,6 +126,19 @@ memoryRepo.setWatcher(memoryWatcher);
 
 const attachmentRepo = new AttachmentRepository(memoryRepo, skillRepo, db);
 
+// Semantic half of bucket_recall: a local embedding model (no LLM, no network after its one-time
+// download into baseDir) fills in chunk vectors in the background. Started after the scans above so
+// its first pass sees every chunk; anything indexed later wakes it through the chunk-write listener.
+// MEMORY_BUCKET_EMBEDDINGS=off keeps retrieval purely lexical.
+const embeddingIndexer =
+  process.env.MEMORY_BUCKET_EMBEDDINGS === 'off'
+    ? undefined
+    : new EmbeddingIndexer(
+        db,
+        createTransformersEmbedder({ cacheDir: path.join(config.baseDir, '.memory-bucket-models'), model: process.env.MEMORY_BUCKET_EMBED_MODEL })
+      );
+embeddingIndexer?.start();
+
 // Remote sources have no filesystem to watch (chokidar doesn't apply) - a
 // fixed-interval poller stands in for watchSources above, pulling changes
 // into each remote source's local mirror directory and reusing the exact
@@ -209,7 +223,7 @@ if (config.skillFolders.length === 0 && config.memoryFolders.length === 0) {
 // clients that expose either to the model can make that association.
 const SERVER_DESCRIPTION =
   'Also known as "memory bucket", "mem bucket", or "skill bucket" — if the user refers to this server by any of those names, they mean this one.';
-const SERVER_INSTRUCTIONS = `${SERVER_DESCRIPTION} Exposes skill_* (reusable coding patterns, stored as agentskills.io-standard SKILL.md folders) and memory_* (point-in-time working context — plans, specs, SQL, session summaries — looked up by key) tools, plus shared relocate/bucket_search/bucket_*_folder tools. Use skill_search/memory_search/bucket_search for full-text search over body content (not just metadata) — bucket_search when you don't know which bucket something landed in. Use bucket_list_folders to see what named source directories (folders) are configured before passing a folder argument elsewhere, and bucket_create_folder/bucket_delete_folder to register or unregister one (bucket_delete_folder works for both local and remote folders). bucket_list_remote_folders/bucket_connect_remote_folder connect a folderfoo folder as a new source, once the user is logged in via the web UI. Most operations have a _bulk_ variant (bulk_get/bulk_create/bulk_update/bulk_delete/bulk_rename, relocate_bulk) that take a list and return per-item success/failure — prefer these over looping single calls when acting on more than one item. A memory doc's key can be changed in place via memory_update(id, key: ...) — no separate rename tool needed. Before calling any *_create/*_update/relocate tool, call skill_get("memory-bucket-authoring") first to learn the exact frontmatter schema — don't guess the shape. Also exposes memory_channel_read/memory_channel_post/list_memory_channels — a SEPARATE, ephemeral in-memory layer for live cross-agent coordination (a shared scratchpad/discussion channel by name), never written to disk and never indexed by memory_search/bucket_search; do not confuse these with the persisted memory_* docs above.`;
+const SERVER_INSTRUCTIONS = `${SERVER_DESCRIPTION} Exposes skill_* (reusable coding patterns, stored as agentskills.io-standard SKILL.md folders) and memory_* (point-in-time working context — plans, specs, SQL, session summaries — looked up by key) tools, plus shared relocate/bucket_search/bucket_*_folder tools. Use bucket_recall to retrieve relevant passages for a natural-language question (hybrid keyword + semantic, token-budgeted) — the default way to look something up. Use skill_search/memory_search/bucket_search for keyword search returning a list of docs — the first two when filtering by metadata, bucket_search when you don't know which bucket something landed in. Use bucket_list_folders to see what named source directories (folders) are configured before passing a folder argument elsewhere, and bucket_create_folder/bucket_delete_folder to register or unregister one (bucket_delete_folder works for both local and remote folders). bucket_list_remote_folders/bucket_connect_remote_folder connect a folderfoo folder as a new source, once the user is logged in via the web UI. Most operations have a _bulk_ variant (bulk_get/bulk_create/bulk_update/bulk_delete/bulk_rename, relocate_bulk) that take a list and return per-item success/failure — prefer these over looping single calls when acting on more than one item. A memory doc's key can be changed in place via memory_update(id, key: ...) — no separate rename tool needed. Before calling any *_create/*_update/relocate tool, call skill_get("memory-bucket-authoring") first to learn the exact frontmatter schema — don't guess the shape. Also exposes memory_channel_read/memory_channel_post/list_memory_channels — a SEPARATE, ephemeral in-memory layer for live cross-agent coordination (a shared scratchpad/discussion channel by name), never written to disk and never indexed by memory_search/bucket_search; do not confuse these with the persisted memory_* docs above.`;
 
 function buildMcpServer(): McpServer {
   const server = new McpServer(
@@ -219,7 +233,10 @@ function buildMcpServer(): McpServer {
   registerSkillTools(server, skillRepo);
   registerMemoryTools(server, memoryRepo);
   registerRelocateTool(server, skillRepo, memoryRepo);
-  registerSearchTool(server, db);
+  registerSearchTool(server, db, {
+    hiddenFolders: () => ({ skills: skillRepo.hiddenFolderNames(), memory_docs: memoryRepo.hiddenFolderNames() }),
+    indexer: embeddingIndexer,
+  });
   registerBucketFolderTools(server, config, skillRepo, memoryRepo, db, skillSpec, memorySpec, identity);
   registerBucketShareTools(server, config, skillRepo, memoryRepo, db, identity);
   registerAttachmentTools(server, attachmentRepo);
@@ -232,7 +249,7 @@ startChannelSweep((name) => console.error(`[memory-bucket] sweeping idle memory 
 
 const app = express();
 app.use(express.json());
-app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, identity, { skill: remoteSkillPoller, memory: remoteMemoryPoller }, attachmentRepo));
+app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, identity, { skill: remoteSkillPoller, memory: remoteMemoryPoller }, attachmentRepo, embeddingIndexer));
 app.use(express.static(path.join(packageRoot, 'dist', 'client')));
 
 app.post('/mcp', async (req, res) => {
@@ -262,6 +279,9 @@ app.delete('/mcp', methodNotAllowed);
 app.listen(PORT, () => {
   console.error(`[memory-bucket] MCP server listening on http://localhost:${PORT}/mcp`);
   console.error(`[memory-bucket] UI available at http://localhost:${PORT}`);
+  console.error(
+    `[memory-bucket] semantic search: ${embeddingIndexer ? embeddingIndexer.embedder.model : 'off (MEMORY_BUCKET_EMBEDDINGS=off)'}`
+  );
   console.error(
     `[memory-bucket] folderfoo integration: ${config.folderfooMode}${config.folderfooHost ? ` (${config.folderfooHost})` : ''}` +
       (config.folderfooMode === 'off' ? ' — pass --folderfoo-mode dev|cloud (or set FOLDERFOO_MODE) to enable' : '')

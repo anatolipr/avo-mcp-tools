@@ -45,6 +45,53 @@ the outdated ones deprecated" becomes `skill_search("deploy")` to find
 candidates, then `skill_bulk_update(names, { deprecated: true })` to flag
 the stale ones in one call — no need to touch each file individually.
 
+## Retrieval
+
+`bucket_recall` is the retrieval entry point: it takes a plain-language
+question and returns the most relevant *passages* — heading-level sections,
+with their text — packed into a `max_tokens` budget, so an agent gets the
+one section it needs instead of searching, then loading a whole document.
+No LLM is involved anywhere in indexing or retrieval:
+
+- **Chunking.** Each doc body is split along its markdown headings (code
+  fences kept intact, oversized sections cut at paragraph boundaries) and
+  every chunk remembers its heading path.
+- **Keyword ranking.** SQLite FTS5 with BM25, at two levels: per chunk, and
+  per doc with column weights so a hit in a skill's name, a memory doc's
+  key or filename, tags, or trigger phrases outranks the same word deep in
+  a body.
+- **Semantic ranking.** A small sentence-embedding model
+  (`Xenova/bge-small-en-v1.5`, ~33 MB) runs locally on CPU via
+  transformers.js and embeds each chunk in the background, so a paraphrase
+  with no shared keyword ("step back after a mistake" → an undo/redo skill)
+  still matches. Only chunks whose text changed are re-embedded.
+- **Fusion.** The three ranked lists are merged by reciprocal rank fusion.
+- **Typo correction.** A query word found nowhere in the corpus is matched
+  to the closest word that is (edit distance 1–2, by word length), so
+  "tooltp" finds the tooltip skill. `bucket_recall` reports the correction
+  in its first line.
+
+The model downloads once, on first start, into
+`<base dir>/.memory-bucket-models`; until it has finished (or if the machine
+is offline, or the optional `@huggingface/transformers` dependency failed to
+install) `bucket_recall` answers from keyword ranking alone and says so in
+its first line. Environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `MEMORY_BUCKET_EMBEDDINGS=off` | Never load a model; keyword ranking only. |
+| `MEMORY_BUCKET_EMBED_MODEL` | A different transformers.js feature-extraction model, e.g. `Xenova/multilingual-e5-small` for non-English content. Changing it re-embeds every chunk. |
+| `MEMORY_BUCKET_SEMANTIC_MIN_SIMILARITY` | Cosine similarity a doc needs to appear in the web UI's results on meaning alone (default `0.6`, tuned for the default model — other models score on a different scale). |
+
+`skill_search` / `memory_search` / `bucket_search` remain the keyword tools
+that return a list of *docs* (and take metadata filters). Bare words must all
+match; if no doc contains all of them, the query is retried matching any,
+then with typo correction. Explicit syntax (quotes, `AND`/`OR`/`NOT`,
+`prefix*`) is always taken literally.
+
+The web UI's search box uses the same keyword search and, for a plain-words
+query, also lists docs that match by meaning alone.
+
 ## Run
 
 ### Via npx

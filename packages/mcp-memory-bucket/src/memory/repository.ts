@@ -7,7 +7,7 @@ import { writeMarkdownFile, formatMarkdownFile } from '../store/markdown-file.js
 import { resolveWithinBase } from '../store/safe-path.js';
 import { uniqueFilename } from '../attachments/storage.js';
 import { upsertFile, removeFile, scanSingleFolder, unregisterFolder, memorySyncSpec, type TableSyncSpec } from '../store/sync.js';
-import { SearchQueryError, sanitizeFtsQuery } from '../store/search.js';
+import { SearchQueryError, SEARCH_BM25, SEARCH_SNIPPET, withOrFallback } from '../store/search.js';
 import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import { attachmentsDirFor } from '../attachments/storage.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
@@ -89,7 +89,7 @@ export class MemoryRepository {
   }
 
   /** Names of every remote folder NOT matching the current identity — used to exclude their rows from list/search SQL. */
-  private hiddenFolderNames(): string[] {
+  hiddenFolderNames(): string[] {
     if (!this.identity) return this.remoteFolders.map((f) => f.name);
     const identity = this.identity.current();
     return this.remoteFolders.filter((f) => !isFolderVisible(f, identity)).map((f) => f.name);
@@ -459,7 +459,7 @@ export class MemoryRepository {
   }> {
     const { docType, status, folder, tag, limit = 20, offset = 0, includePaused = false } = opts;
     const conditions: string[] = [];
-    const params: unknown[] = [sanitizeFtsQuery(query)];
+    const params: unknown[] = [];
     if (docType) {
       conditions.push('m.doc_type = ?');
       params.push(docType);
@@ -485,26 +485,24 @@ export class MemoryRepository {
       conditions.push(`m.folder NOT IN (${hidden.map(() => '?').join(', ')})`);
       params.push(...hidden);
     }
-    params.push(limit, offset);
 
     try {
       // shared_items is LEFT JOINed on m.source_path (== mirror_path for an item-level share —
       // see remote/shared-items.ts) to surface owner/role on any hit that came from a share.
-      const rows = this.db
-        .prepare(
+      const statement = this.db.prepare(
           `SELECT m.source_path, m.key, m.description, m.doc_type, m.folder,
-                  snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
-                  -bm25(search_index) AS score,
+                  ${SEARCH_SNIPPET} AS snippet,
+                  -${SEARCH_BM25} AS score,
                   si.owner AS shared_owner,
                   si.role AS shared_role
            FROM search_index
            JOIN memory_docs m ON m.source_path = search_index.ref_id
            LEFT JOIN shared_items si ON si.status = 'active' AND si.mirror_path = m.source_path
            WHERE search_index.ref_table = 'memory_docs' AND search_index MATCH ? ${conditions.map((c) => `AND ${c}`).join(' ')}
-           ORDER BY bm25(search_index)
+           ORDER BY ${SEARCH_BM25}
            LIMIT ? OFFSET ?`
-        )
-        .all(...params) as Array<{
+      );
+      type Row = {
         source_path: string;
         key: string;
         description: string;
@@ -514,7 +512,8 @@ export class MemoryRepository {
         score: number;
         shared_owner: string | null;
         shared_role: string | null;
-      }>;
+      };
+      const rows = withOrFallback(this.db, query, offset, (ftsQuery, probe) => statement.all(ftsQuery, ...params, ...(probe ? [1, 0] : [limit, offset])) as Row[]);
       return rows.map(({ source_path, shared_owner, shared_role, ...rest }) => ({
         ...rest,
         filename: path.basename(source_path),

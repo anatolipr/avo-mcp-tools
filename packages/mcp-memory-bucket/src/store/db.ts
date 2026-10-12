@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { backfillChunks, backfillTermIndex } from './chunks.js';
 
 export function openCache(dbPath: string): Database.Database {
   const db = new Database(dbPath);
@@ -56,9 +57,38 @@ export function openCache(dbPath: string): Database.Database {
       body,
       tags,
       key,             -- memory docs' key; also holds a skill's group (skills never had a key, so this is safe to share)
-      filename,
+      filename,        -- memory docs' on-disk filename; for a skill, its name (its file is always SKILL.md)
+      triggers,        -- a skill's trigger_phrases; '' for memory docs
       tokenize = 'porter unicode61'
     );
+
+    -- Heading-level pieces of each doc's body (see chunker.ts) — the retrieval unit for bucket_recall.
+    -- embedding is a unit-length Float32 vector, NULL until the background indexer reaches the row
+    -- (or forever, when embeddings are off); embed_model records which model produced it.
+    CREATE TABLE IF NOT EXISTS chunks (
+      id INTEGER PRIMARY KEY,
+      ref_table TEXT NOT NULL,
+      ref_id TEXT NOT NULL,
+      ref_folder TEXT NOT NULL DEFAULT '',
+      ord INTEGER NOT NULL,
+      context TEXT NOT NULL,
+      heading TEXT NOT NULL,
+      text TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      embedding BLOB,
+      embed_model TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chunks_ref ON chunks(ref_table, ref_id, ref_folder);
+
+    -- rowid == chunks.id
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(heading, body, tokenize = 'porter unicode61');
+
+    -- Unstemmed words per chunk (rowid == chunks.id), kept only so term_vocab can list the corpus
+    -- vocabulary for typo correction (see spelling.ts) — the stemmed indexes above hold word stems
+    -- ("migrat"), which a misspelling cannot be compared against. Stores no text and no positions.
+    CREATE VIRTUAL TABLE IF NOT EXISTS term_index USING fts5(text, content = '', contentless_delete = 1, detail = none, tokenize = 'unicode61');
+    CREATE VIRTUAL TABLE IF NOT EXISTS term_vocab USING fts5vocab(term_index, 'row');
 
     CREATE TABLE IF NOT EXISTS doc_dates (
       ref_table TEXT NOT NULL,
@@ -119,6 +149,8 @@ export function openCache(dbPath: string): Database.Database {
   ]);
   ensureSearchIndexHasKeyColumn(db);
   backfillSearchIndex(db);
+  backfillChunks(db);
+  backfillTermIndex(db);
 
   return db;
 }
@@ -139,7 +171,7 @@ export function openCache(dbPath: string): Database.Database {
  */
 function ensureSearchIndexHasKeyColumn(db: Database.Database): void {
   const cols = db.prepare(`PRAGMA table_info(search_index)`).all() as Array<{ name: string }>;
-  if (cols.length === 0 || (cols.some((c) => c.name === 'key') && cols.some((c) => c.name === 'ref_folder') && cols.some((c) => c.name === 'filename'))) return; // fresh table, or already migrated
+  if (cols.length === 0 || ['key', 'ref_folder', 'filename', 'triggers'].every((name) => cols.some((c) => c.name === name))) return; // fresh table, or already migrated
   db.exec(`DROP TABLE search_index`);
   db.exec(`
     CREATE VIRTUAL TABLE search_index USING fts5(
@@ -151,6 +183,7 @@ function ensureSearchIndexHasKeyColumn(db: Database.Database): void {
       tags,
       key,
       filename,
+      triggers,
       tokenize = 'porter unicode61'
     );
   `);
@@ -219,13 +252,14 @@ function backfillSearchIndex(db: Database.Database): void {
   const { count: indexed } = db.prepare(`SELECT COUNT(*) as count FROM search_index`).get() as { count: number };
   if (indexed > 0) return;
 
-  const skillRows = db.prepare(`SELECT id, folder, description, body, tags, skill_group FROM skills`).all() as Array<{
+  const skillRows = db.prepare(`SELECT id, folder, description, body, tags, skill_group, trigger_phrases FROM skills`).all() as Array<{
     id: string;
     folder: string;
     description: string;
     body: string;
     tags: string;
     skill_group: string | null;
+    trigger_phrases: string;
   }>;
   const memoryRows = db.prepare(`SELECT source_path AS id, key, description, body, tags FROM memory_docs`).all() as Array<{
     id: string;
@@ -237,15 +271,15 @@ function backfillSearchIndex(db: Database.Database): void {
   if (skillRows.length === 0 && memoryRows.length === 0) return;
 
   const insert = db.prepare(
-    `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key, filename) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key, filename, triggers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const insertAll = db.transaction(() => {
     for (const row of skillRows) {
-      insert.run('skills', row.id, row.folder, row.description, row.body, flattenTags(row.tags), row.skill_group ?? '', '');
+      insert.run('skills', row.id, row.folder, row.description, row.body, flattenTags(row.tags), row.skill_group ?? '', row.id, flattenTags(row.trigger_phrases));
     }
     for (const row of memoryRows) {
       // row.id is source_path (see the SELECT above) — filename is its basename.
-      insert.run('memory_docs', row.id, '', row.description, row.body, flattenTags(row.tags), row.key, row.id.split('/').pop() ?? row.id);
+      insert.run('memory_docs', row.id, '', row.description, row.body, flattenTags(row.tags), row.key, row.id.split('/').pop() ?? row.id, '');
     }
   });
   insertAll();

@@ -4,6 +4,7 @@ import chokidar, { type FSWatcher } from 'chokidar';
 import type Database from 'better-sqlite3';
 import { readMarkdownFile } from './markdown-file.js';
 import { flattenTags } from './db.js';
+import { writeChunks, deleteChunks, chunkContext } from './chunks.js';
 import { extractDates, toLocalDate } from './date-extract.js';
 import { slugify } from './slug.js';
 import { normalizeKey } from '../types.js';
@@ -311,7 +312,7 @@ export function upsertFile<TFrontmatter>(
   const refFolder = scopedById ? folder : '';
   db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(spec.table, id, refFolder);
   db.prepare(
-    `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key, filename) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO search_index (ref_table, ref_id, ref_folder, description, body, tags, key, filename, triggers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     spec.table,
     id,
@@ -320,8 +321,12 @@ export function upsertFile<TFrontmatter>(
     parsed.body,
     flattenTags(String(row.tags ?? '[]')),
     String(row.key ?? row.skill_group ?? ''),
-    path.basename(filePath)
+    // A skill's file is always SKILL.md, so its name goes here instead — otherwise the name is
+    // only searchable when the description or body happens to repeat it.
+    scopedById ? id : path.basename(filePath),
+    flattenTags(String(row.trigger_phrases ?? '[]'))
   );
+  writeChunks(db, spec.table, id, refFolder, chunkContext(spec.table, row), String(row.description ?? ''), parsed.body);
 
   db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(spec.table, id, refFolder);
   const dates = new Set(extractDates(parsed.body));
@@ -351,6 +356,7 @@ export function removeFile(db: Database.Database, table: 'skills' | 'memory_docs
     const refFolder = table === 'skills' ? existing.folder : '';
     db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(table, existing.id, refFolder);
     db.prepare(`DELETE FROM doc_dates WHERE ref_table = ? AND ref_id = ? AND ref_folder = ?`).run(table, existing.id, refFolder);
+    deleteChunks(db, table, existing.id, refFolder);
   }
 }
 
@@ -393,6 +399,7 @@ export function unregisterFolder(db: Database.Database, table: 'skills' | 'memor
   db.prepare(`DELETE FROM ${table} WHERE folder = ?`).run(folderName);
   for (const row of rows) {
     db.prepare(`DELETE FROM search_index WHERE ref_table = ? AND ref_id = ?`).run(table, row.id);
+    deleteChunks(db, table, row.id, table === 'skills' ? folderName : '');
   }
 }
 

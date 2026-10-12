@@ -16,8 +16,11 @@ import {
 } from '../config.js';
 import type { SkillRepository } from '../skills/repository.js';
 import { stripKey, type MemoryRepository } from '../memory/repository.js';
+import { pruneOrphanChunks } from '../store/chunks.js';
 import { initialScan, walkMarkdownFiles, type TableSyncSpec } from '../store/sync.js';
-import { sanitizeFtsQuery } from '../store/search.js';
+import { SEARCH_BM25, withOrFallback, hasExplicitSyntax } from '../store/search.js';
+import { semanticDocMatches } from '../store/recall.js';
+import type { EmbeddingIndexer } from '../store/embeddings.js';
 import { resolveWithinBase } from '../store/safe-path.js';
 import { attachmentsDirFor, guessMimeType, ATTACHMENT_MAX_BYTES, listSkillSourceFiles } from '../attachments/storage.js';
 import type { AttachmentRepository } from '../attachments/repository.js';
@@ -125,7 +128,16 @@ function hiddenRemoteFolderNames(repo: { listRemoteFolders(): RemoteFolder[] }, 
     .map((f) => f.name);
 }
 
-function queryEntries(db: Database.Database, skillRepo: SkillRepository, memoryRepo: MemoryRepository, identity: IdentityTracker, req: Request): EntryRow[] {
+type SemanticDocs = Awaited<ReturnType<typeof semanticDocMatches>>;
+
+function queryEntries(
+  db: Database.Database,
+  skillRepo: SkillRepository,
+  memoryRepo: MemoryRepository,
+  identity: IdentityTracker,
+  req: Request,
+  semantic: SemanticDocs = []
+): EntryRow[] {
   const type = (req.query.type as EntryType) ?? 'all';
   const tags = asArray(req.query.tag);
   const statuses = asArray(req.query.status);
@@ -151,7 +163,7 @@ function queryEntries(db: Database.Database, skillRepo: SkillRepository, memoryR
   // Always compute FTS matches when q is set, even on a keyMatch — skills still need this to stay
   // filtered by q (they have no key concept, so keyMatch only bypasses filtering for memory_docs below).
   const matchedIds: { skills: Set<string>; memory_docs: Set<string>; rank: Map<string, number> } | null = q
-    ? matchSearch(db, q)
+    ? matchSearch(db, q, semantic)
     : null;
   if (q && !keyMatch && matchedIds && matchedIds.skills.size === 0 && matchedIds.memory_docs.size === 0) {
     return [];
@@ -426,24 +438,39 @@ function matchDateRange(
  * Runs the FTS5 query once, buckets matching ids by source table, and records each match's bm25
  * rank (lower = more relevant) keyed the same way restrictToIds is (skillKey for skills, plain id
  * for memory_docs) — used to sort search results by relevance instead of mtime by default.
+ * `semantic` (docs close to the query by embedding similarity, best first) is merged in by
+ * reciprocal rank fusion, so a doc matching in meaning but sharing no keyword still appears; the
+ * stored rank is then the negated fused score, keeping "lower is better".
  */
 function matchSearch(
   db: Database.Database,
-  q: string
+  q: string,
+  semantic: SemanticDocs = []
 ): { skills: Set<string>; memory_docs: Set<string>; rank: Map<string, number> } {
   const skills = new Set<string>();
   const memory_docs = new Set<string>();
   const rank = new Map<string, number>();
   let rows: Array<{ ref_table: 'skills' | 'memory_docs'; ref_id: string; ref_folder: string; score: number }>;
   try {
-    rows = db
-      .prepare(
-        `SELECT ref_table, ref_id, ref_folder, bm25(search_index) AS score FROM search_index WHERE search_index MATCH ? ORDER BY rank`
-      )
-      .all(sanitizeFtsQuery(q)) as typeof rows;
+    const statement = db.prepare(
+      `SELECT ref_table, ref_id, ref_folder, ${SEARCH_BM25} AS score FROM search_index WHERE search_index MATCH ? ORDER BY score`
+    );
+    rows = withOrFallback(db, q, 0, (ftsQuery) => statement.all(ftsQuery) as typeof rows);
   } catch {
     // Bad FTS5 query syntax (e.g. a bare quote) — treat as no matches rather than 500ing.
     return { skills, memory_docs, rank };
+  }
+  if (semantic.length > 0) {
+    const fused = new Map<string, { row: (typeof rows)[number]; score: number }>();
+    const add = (row: (typeof rows)[number], position: number) => {
+      const key = `${row.ref_table}\0${row.ref_folder}\0${row.ref_id}`;
+      const entry = fused.get(key) ?? { row, score: 0 };
+      entry.score += 1 / (60 + position);
+      fused.set(key, entry);
+    };
+    rows.forEach((row, i) => add(row, i + 1));
+    semantic.forEach((doc, i) => add({ ...doc, score: 0 }, i + 1));
+    rows = [...fused.values()].map(({ row, score }) => ({ ...row, score: -score }));
   }
   for (const row of rows) {
     const key = row.ref_table === 'skills' ? skillKey(row.ref_folder, row.ref_id) : row.ref_id;
@@ -558,7 +585,8 @@ export function buildWebRouter(
   memorySpec: TableSyncSpec<any>,
   identity: IdentityTracker,
   remotePollers?: { skill?: RemotePollerHandle; memory?: RemotePollerHandle },
-  attachRepo?: AttachmentRepository
+  attachRepo?: AttachmentRepository,
+  embeddingIndexer?: EmbeddingIndexer
 ): Router {
   const router = express.Router();
 
@@ -589,6 +617,7 @@ export function buildWebRouter(
       initialScan(db, skillSpec);
       initialScan(db, memorySpec);
       syncSharedItemsIndex(db, skillSpec, memorySpec, identity.current().username);
+      pruneOrphanChunks(db); // chunks survive the wipe so unchanged embeddings carry over — see pruneOrphanChunks
       const skillCount = (db.prepare(`SELECT COUNT(*) AS n FROM skills`).get() as { n: number }).n;
       const memoryCount = (db.prepare(`SELECT COUNT(*) AS n FROM memory_docs`).get() as { n: number }).n;
       res.json({ skillCount, memoryCount });
@@ -597,8 +626,13 @@ export function buildWebRouter(
     }
   });
 
-  router.get('/api/entries', (req: Request, res: Response) => {
-    res.json(queryEntries(db, skillRepo, memoryRepo, identity, req));
+  router.get('/api/entries', async (req: Request, res: Response) => {
+    // Semantic matches join the keyword ones for a plain-words query; explicit FTS5 syntax asks for
+    // exactly what it says. A model that is still loading, or failing, just means keyword results.
+    const q = (req.query.q as string | undefined)?.trim();
+    const semantic =
+      q && embeddingIndexer?.isReady() && !hasExplicitSyntax(q) ? await semanticDocMatches(db, embeddingIndexer.embedder, q).catch(() => []) : [];
+    res.json(queryEntries(db, skillRepo, memoryRepo, identity, req, semantic));
   });
 
   router.get('/api/entries/:table/:id', (req: Request, res: Response) => {

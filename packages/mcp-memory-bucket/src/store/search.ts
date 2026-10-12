@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { correctWords } from './spelling.js';
 
 export interface SearchHit {
   ref_table: 'skills' | 'memory_docs';
@@ -40,10 +41,48 @@ export function sanitizeFtsQuery(query: string): string {
 }
 
 /**
+ * bm25() over search_index with per-column weights, in column order (ref_table, ref_id, ref_folder,
+ * description, body, tags, key, filename, triggers) — a hit in a doc's name/key/trigger phrases
+ * says far more about what the doc IS than the same word appearing somewhere in a long body.
+ */
+export const SEARCH_BM25 = 'bm25(search_index, 0, 0, 0, 4.0, 1.0, 3.0, 6.0, 8.0, 6.0)';
+/** Best-matching column's excerpt (-1), not a fixed column — a hit in tags/key alone still shows why it matched. */
+export const SEARCH_SNIPPET = `snippet(search_index, -1, '<<', '>>', '…', 20)`;
+
+/** True when the caller used FTS5 syntax (quotes, AND/OR/NOT, prefix*, parentheses, column filters) and so meant the query literally. */
+export function hasExplicitSyntax(query: string): boolean {
+  const tokens = query.match(/\S+/g) ?? [];
+  return tokens.some((t) => FTS_BOOLEAN_KEYWORDS.has(t.toUpperCase()) || /["*():^]/.test(t));
+}
+
+/**
+ * Runs `run` with the sanitized query and, only when that matches nothing and the query is plain
+ * bare words, loosens it in two steps: first the words OR'd instead of FTS5's implicit AND (bm25
+ * ranks docs matching more of them first), then with misspelled words replaced by the closest word
+ * in the corpus (see spelling.ts). A query using explicit syntax is never loosened.
+ */
+export function withOrFallback<T>(db: Database.Database, query: string, offset: number, run: (ftsQuery: string, probe: boolean) => T[]): T[] {
+  const strict = sanitizeFtsQuery(query);
+  const rows = run(strict, false);
+  if (rows.length > 0 || hasExplicitSyntax(query)) return rows;
+  // An empty page past the first is not "no AND matches" — don't start serving looser rows mid-pagination.
+  if (offset > 0 && run(strict, true).length > 0) return rows;
+  const tokens = query.match(/\S+/g) ?? [];
+  if (tokens.length > 1) {
+    const relaxed = run(tokens.map((t) => sanitizeFtsQuery(t)).join(' OR '), false);
+    if (relaxed.length > 0) return relaxed;
+  }
+  const corrections = correctWords(db, tokens);
+  if (corrections.size === 0) return rows;
+  return run(tokens.map((t) => sanitizeFtsQuery(corrections.get(t) ?? t)).join(' OR '), false);
+}
+
+/**
  * Full-text search over the shared FTS5 index, optionally scoped to one ref_table.
  * `query` is passed through as raw FTS5 MATCH syntax — supports `AND`/`OR`/`NOT`,
  * `"exact phrases"`, and `prefix*` — so callers get grep-like power for free.
- * Ranked by bm25() (lower is better, so we negate for a "higher is better" score).
+ * Ranked by weighted bm25() (lower is better, so we negate for a "higher is better" score); bare
+ * words that match nothing together fall back to OR, then to typo correction (see withOrFallback).
  * Throws SearchQueryError on malformed FTS5 syntax instead of a raw SQLite error.
  */
 export function searchIndex(
@@ -52,20 +91,20 @@ export function searchIndex(
   opts: { table?: 'skills' | 'memory_docs'; limit?: number; offset?: number } = {}
 ): SearchHit[] {
   const { table, limit = 20, offset = 0 } = opts;
-  const sanitized = sanitizeFtsQuery(query);
   try {
-    const rows = db
-      .prepare(
-        `SELECT ref_table, ref_id,
-                snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
-                -bm25(search_index) AS score
-         FROM search_index
-         WHERE search_index MATCH ? ${table ? 'AND ref_table = ?' : ''}
-         ORDER BY bm25(search_index)
-         LIMIT ? OFFSET ?`
-      )
-      .all(...(table ? [sanitized, table, limit, offset] : [sanitized, limit, offset])) as SearchHit[];
-    return rows;
+    const statement = db.prepare(
+      `SELECT ref_table, ref_id,
+              ${SEARCH_SNIPPET} AS snippet,
+              -${SEARCH_BM25} AS score
+       FROM search_index
+       WHERE search_index MATCH ? ${table ? 'AND ref_table = ?' : ''}
+       ORDER BY ${SEARCH_BM25}
+       LIMIT ? OFFSET ?`
+    );
+    return withOrFallback(db, query, offset, (ftsQuery, probe) => {
+      const page = probe ? [1, 0] : [limit, offset];
+      return statement.all(...(table ? [ftsQuery, table, ...page] : [ftsQuery, ...page])) as SearchHit[];
+    });
   } catch (err) {
     throw new SearchQueryError(query, err);
   }
@@ -174,26 +213,30 @@ export interface CombinedSearchHit {
  * per table); use skill_search/memory_search directly when filtering by those.
  */
 export function searchCombined(db: Database.Database, query: string, limit = 20, offset = 0): CombinedSearchHit[] {
-  const sanitized = sanitizeFtsQuery(query);
   try {
-    const rows = db
-      .prepare(
-        `SELECT ref_table, ref_id AS id,
-                COALESCE(s.description, m.description) AS description,
-                COALESCE(s.folder, m.folder) AS folder,
-                snippet(search_index, 3, '<<', '>>', '…', 20) AS snippet,
-                -bm25(search_index) AS score,
-                si.owner AS shared_owner,
-                si.role AS shared_role
-         FROM search_index
-         LEFT JOIN skills s ON search_index.ref_table = 'skills' AND s.id = search_index.ref_id AND s.folder = search_index.ref_folder
-         LEFT JOIN memory_docs m ON search_index.ref_table = 'memory_docs' AND m.source_path = search_index.ref_id
-         LEFT JOIN shared_items si ON si.status = 'active' AND si.mirror_path = COALESCE(s.source_path, m.source_path)
-         WHERE search_index MATCH ?
-         ORDER BY bm25(search_index)
-         LIMIT ? OFFSET ?`
-      )
-      .all(sanitized, limit, offset) as Array<CombinedSearchHit & { shared_owner: string | null; shared_role: string | null }>;
+    const statement = db.prepare(
+      `SELECT ref_table, ref_id AS id,
+              COALESCE(s.description, m.description) AS description,
+              COALESCE(s.folder, m.folder) AS folder,
+              ${SEARCH_SNIPPET} AS snippet,
+              -${SEARCH_BM25} AS score,
+              si.owner AS shared_owner,
+              si.role AS shared_role
+       FROM search_index
+       LEFT JOIN skills s ON search_index.ref_table = 'skills' AND s.id = search_index.ref_id AND s.folder = search_index.ref_folder
+       LEFT JOIN memory_docs m ON search_index.ref_table = 'memory_docs' AND m.source_path = search_index.ref_id
+       LEFT JOIN shared_items si ON si.status = 'active' AND si.mirror_path = COALESCE(s.source_path, m.source_path)
+       WHERE search_index MATCH ?
+       ORDER BY ${SEARCH_BM25}
+       LIMIT ? OFFSET ?`
+    );
+    const rows = withOrFallback(
+      db,
+      query,
+      offset,
+      (ftsQuery, probe) =>
+        statement.all(ftsQuery, ...(probe ? [1, 0] : [limit, offset])) as Array<CombinedSearchHit & { shared_owner: string | null; shared_role: string | null }>
+    );
     return rows.map((row) => ({
       ...row,
       shared_owner: row.shared_owner ?? undefined,

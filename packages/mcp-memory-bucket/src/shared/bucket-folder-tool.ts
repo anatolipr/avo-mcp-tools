@@ -12,6 +12,7 @@ import {
   type BucketConfig,
   type RemoteFolder,
 } from '../config.js';
+import { pruneOrphanChunks } from '../store/chunks.js';
 import { initialScan, type TableSyncSpec } from '../store/sync.js';
 import type { SkillRepository } from '../skills/repository.js';
 import type { MemoryRepository } from '../memory/repository.js';
@@ -193,6 +194,7 @@ export function registerBucketFolderTools(
         initialScan(db, skillSpec);
         initialScan(db, memorySpec);
         syncSharedItemsIndex(db, skillSpec, memorySpec, identity.current().username);
+        pruneOrphanChunks(db); // chunks survive the wipe so unchanged embeddings carry over — see pruneOrphanChunks
         const skillCount = (db.prepare(`SELECT COUNT(*) AS n FROM skills`).get() as { n: number }).n;
         const memoryCount = (db.prepare(`SELECT COUNT(*) AS n FROM memory_docs`).get() as { n: number }).n;
         return {

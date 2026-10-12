@@ -1,8 +1,8 @@
 {
   "name": "mcp-memory-bucket",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "type": "module",
-  "description": "MCP server exposing skill_* (reusable coding patterns) and memory_* (point-in-time working context) tools over a markdown+frontmatter source, cached into SQLite at runtime.",
+  "description": "MCP server exposing skill_* (reusable coding patterns) and memory_* (point-in-time working context) tools over a markdown+frontmatter source, cached into SQLite at runtime, with hybrid keyword + local-embedding passage retrieval.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/anatolipr/avo-mcp-tools.git",
@@ -55,5 +55,8 @@
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vite": "^6.0.0"
+  },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^4.3.1"
   }
 }

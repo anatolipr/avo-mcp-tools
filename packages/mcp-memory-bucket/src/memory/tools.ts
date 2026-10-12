@@ -59,7 +59,7 @@ export function registerMemoryTools(mcp: McpServer, repo: MemoryRepository): voi
 
   mcp.tool(
     'memory_search',
-    'Full-text search over memory doc description/body/tags (grep/find-like, ranked by relevance) — unlike memory_get\'s exact-key lookup, this searches by content across all keys. `query` is raw SQLite FTS5 MATCH syntax: bare words, "exact phrases", prefix* wildcards, AND/OR/NOT boolean operators; hyphenated/punctuated terms must be quoted, e.g. "blue-green". Can be combined with doc_type/status/tag filters. Returns ranked hits with a highlighted snippet, not the full body — call memory_get(key) or fetch by id for that. Paused docs are hidden by default — pass include_paused to see them.',
+    'Full-text search over memory doc description/body/tags (grep/find-like, ranked by relevance) — unlike memory_get\'s exact-key lookup, this searches by content across all keys. `query` is SQLite FTS5 MATCH syntax: bare words (all must match; falls back to any-word when nothing matches all), "exact phrases", prefix* wildcards, AND/OR/NOT. Can be combined with doc_type/status/tag filters. Returns ranked hits with a highlighted snippet, not the full body — call memory_get(key) or fetch by id for that. Paused docs are hidden by default — pass include_paused to see them.',
     {
       query: z.string().describe('FTS5 match expression, e.g. `migration AND rollback` or `"blue green"`'),
       doc_type: z.enum(MEMORY_DOC_TYPES).optional(),
