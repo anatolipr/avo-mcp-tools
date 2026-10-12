@@ -1107,14 +1107,13 @@ test('suggestKeys finds a punctuation-drifted match (RMXS15 vs RMXS-15)', async 
   fs.rmSync(memDir, { recursive: true, force: true });
 });
 
-test('upsertFile refuses to silently overwrite a name collision across two configured folders', () => {
-  // id/name is the table's real PRIMARY KEY and the sole addressing handle
-  // across the whole public API (skill_get(name), memory_get(id)) - two
-  // different files claiming the same id would otherwise silently
-  // ON-CONFLICT-overwrite each other via upsertFile, with no error and no
-  // way to recover the shadowed one. This is a regression guard for that
-  // fix: the second-synced colliding file must be skipped, not silently
-  // clobber the first.
+test('the same skill name in two configured folders is kept as two rows, one per folder', () => {
+  // A skill name is unique PER FOLDER, not globally: `skills` has a compound
+  // (folder, id) PRIMARY KEY (see db.ts) and skill_get takes a folder to
+  // pick between them. Two folders holding the same name must therefore
+  // both be indexed, neither clobbering nor shadowing the other. (This test
+  // used to assert the older global-uniqueness rule, where the
+  // second-scanned file was skipped.)
   const dirA = makeTmpDir();
   const dirB = makeTmpDir();
   const db = openCache(':memory:');
@@ -1139,13 +1138,10 @@ test('upsertFile refuses to silently overwrite a name collision across two confi
     description: string;
     folder: string;
   }>;
-  // Exactly one row (the schema's PRIMARY KEY makes two impossible), and it
-  // must be the FIRST one scanned (folderA, since initialScan walks
-  // spec.sources in order) - the collision guard skips B's write entirely
-  // rather than letting it clobber A's.
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0]!.description, 'From A');
-  assert.equal(rows[0]!.folder, 'folderA');
+  assert.deepEqual(
+    rows.map((r) => [r.folder, r.description]).sort(),
+    [['folderA', 'From A'], ['folderB', 'From B']],
+  );
 
   db.close();
   fs.rmSync(dirA, { recursive: true, force: true });

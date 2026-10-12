@@ -69,7 +69,7 @@ function mockFolderfoo(calls: string[], folders: string[] = ['memz', 'work/qa'])
       return { ok: true, status: 200, json: async () => ({ message: 'trashed folder' }) } as Response;
     }
     if (url.includes('/data/')) {
-      return { ok: true, status: 200, text: async () => 'live body' } as Response;
+      return { ok: true, status: 200, text: async () => 'live body', arrayBuffer: async () => new TextEncoder().encode('live body').buffer } as Response;
     }
     throw new Error(`unexpected mocked fetch call: ${url} ${JSON.stringify(init)}`);
   };
@@ -263,7 +263,7 @@ function mockFolderfooWithFrontmatteredContent(calls: string[], fileContent: { c
       return { ok: true, status: 200, json: async () => ({ message: 'saved' }) } as Response;
     }
     if (url.includes('/data/')) {
-      return { ok: true, status: 200, text: async () => fileContent.current } as Response;
+      return { ok: true, status: 200, text: async () => fileContent.current, arrayBuffer: async () => new TextEncoder().encode(fileContent.current).buffer } as Response;
     }
     throw new Error(`unexpected mocked fetch call: ${url} ${JSON.stringify(init)}`);
   };
@@ -647,7 +647,15 @@ function statefulFolderfoo(backend: FakeFolderfoo) {
     }
     if (u.pathname.startsWith('/data/')) {
       const { folderPath, name } = parseFilenameParam(decodeURIComponent(u.pathname.slice('/data/'.length)));
-      return { ok: true, status: 200, text: async () => backend.data(folderPath, name).toString('utf-8') } as Response;
+      // arrayBuffer too: remote-sync's pullFile reads every file as bytes
+      // (readBinaryFile) so binary attachments survive the pull intact.
+      const data = backend.data(folderPath, name);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => data.toString('utf-8'),
+        arrayBuffer: async () => data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+      } as Response;
     }
     throw new Error(`unexpected mocked fetch call: ${url}`);
   };
