@@ -91,6 +91,8 @@
   <label>Args</label><input name="args" placeholder="space-separated (stdio only)">
   <label>Env vars</label><textarea name="env" rows="3" placeholder="stdio only — one KEY=VALUE per line for multiple vars, e.g.&#10;DSN=mysql://root:@127.0.0.1:3306/iram&#10;LOG_LEVEL=debug"></textarea>
   <label>URL</label><input name="url" placeholder="http(s)://... (sse/streamableHttp only)">
+  <label>OAuth</label><span><input type="checkbox" name="oauth" id="oauth-input"> <label for="oauth-input" class="hint">authorize with OAuth (sse/streamableHttp only) — an "Authorize" link appears in the status column</label></span>
+  <label>Lazy</label><span><input type="checkbox" name="lazy" id="lazy-input"> <label for="lazy-input" class="hint">expose only <code>list_tools</code> + <code>call_tool</code> instead of one tool per upstream tool</label></span>
   <label></label>
   <div>
     <button type="submit" id="submit-btn">Add proxy</button>
@@ -99,7 +101,7 @@
 </form>
 <form id="proxy-json-form" style="display: none;">
   <input type="hidden" name="editId">
-  <p class="hint">Paste or type a proxy config as JSON — same fields as <code>add_mcp_proxy</code>/<code>edit_mcp_proxy</code> (<code>slug</code>, <code>transport</code>, and <code>command</code>/<code>args</code>/<code>env</code> for stdio or <code>url</code> for sse/streamableHttp), except <code>args</code>/<code>env</code> here are a real array/object, not the space-separated/newline-separated strings the text form uses.</p>
+  <p class="hint">Paste or type a proxy config as JSON — same fields as <code>add_mcp_proxy</code>/<code>edit_mcp_proxy</code> (<code>slug</code>, <code>transport</code>, and <code>command</code>/<code>args</code>/<code>env</code> for stdio or <code>url</code>/<code>headers</code>/<code>oauth</code> for sse/streamableHttp, plus optional <code>lazy</code>), except <code>args</code>/<code>env</code> here are a real array/object, not the space-separated/newline-separated strings the text form uses.</p>
   <textarea id="json-input" rows="10" spellcheck="false" style="display: block; width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; margin-bottom: 0.5rem;" placeholder='{&#10;  "slug": "atlassian",&#10;  "transport": "stdio",&#10;  "command": "npx",&#10;  "args": ["-y", "some-mcp-server"],&#10;  "env": { "API_KEY": "..." }&#10;}'></textarea>
   <p class="err" id="json-err"></p>
   <button type="submit" id="json-submit-btn">Add proxy</button>
@@ -219,14 +221,15 @@ function configToJson(config) {
   // Same field set add_mcp_proxy/edit_mcp_proxy accept, minus id/paused
   // (not user-editable here) — args/env stay real JSON array/object rather
   // than the text-form's space/newline-separated string encoding.
-  const { slug, description, transport, command, args, env, url, headers, callTimeoutMs } = config;
-  const fields = { slug, description, transport, command, args, env, url, headers, callTimeoutMs };
+  const { slug, description, transport, command, args, env, url, headers, callTimeoutMs, oauth, lazy } = config;
+  const fields = { slug, description, transport, command, args, env, url, headers, callTimeoutMs, oauth, lazy };
   for (const key of Object.keys(fields)) if (fields[key] === undefined) delete fields[key];
   return JSON.stringify(fields, null, 2);
 }
 
 function exitEditMode() {
   form.reset();
+  form.oauth.dataset.options = '';
   form.editId.value = '';
   jsonForm.editId.value = '';
   jsonInput.value = '';
@@ -247,6 +250,11 @@ function enterEditMode(config) {
   form.args.value = formatArgs(config.args);
   form.env.value = formatEnv(config.env);
   form.url.value = config.url ?? '';
+  form.oauth.checked = !!config.oauth;
+  // The checkbox cannot show a pre-registered client ({clientId, ...}); kept
+  // here so saving the form does not flatten it to plain `true`.
+  form.oauth.dataset.options = config.oauth && typeof config.oauth === 'object' ? JSON.stringify(config.oauth) : '';
+  form.lazy.checked = !!config.lazy;
   jsonForm.editId.value = config.id;
   jsonInput.value = configToJson(config);
   jsonErr.textContent = '';
@@ -264,7 +272,7 @@ async function refresh() {
   for (const p of proxies) {
     const tr = document.createElement('tr');
     const statusClass = p.paused ? 'status-paused' : p.connected ? 'status-ok' : 'status-err';
-    const statusText = p.paused ? 'paused' : p.connected ? 'connected' : (p.lastError ? `error: ${p.lastError}` : 'not connected');
+    const statusText = p.paused ? 'paused' : p.connected ? 'connected' : (p.authUrl ? 'authorization required' : p.lastError ? `error: ${p.lastError}` : 'not connected');
     // A proxy can be fully "connected" (no lastError) yet still have some
     // upstream tools silently dropped (unsupported param schema — see
     // proxy-manager.ts's translateTools) — surface that here so
@@ -277,8 +285,8 @@ async function refresh() {
       <td>🔌</td>
       <td>${p.slug}</td>
       <td>${p.transport}</td>
-      <td class="${statusClass}">${statusText}${skippedNote}</td>
-      <td>${p.toolCount}</td>
+      <td class="${statusClass}">${statusText}${skippedNote}<span class="auth-slot"></span></td>
+      <td>${p.toolCount}${p.lazy ? ' <span class="hint" title="Lazy: exposed as list_tools + call_tool">(lazy)</span>' : ''}</td>
       <td>
         <button data-action="view">View</button>
         <button data-action="edit">Edit</button>
@@ -286,6 +294,16 @@ async function refresh() {
         <button data-action="restart">Restart</button>
         <button data-action="remove">Remove</button>
       </td>`;
+    // Built with DOM calls, not the template above: authUrl comes from the
+    // upstream's authorization server.
+    if (p.authUrl && /^https?:\/\//i.test(p.authUrl)) {
+      const link = document.createElement('a');
+      link.href = p.authUrl;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.textContent = 'Authorize…';
+      tr.querySelector('.auth-slot').append(' ', link);
+    }
     tr.querySelectorAll('button').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const action = btn.dataset.action;
@@ -328,8 +346,9 @@ form.addEventListener('submit', async (e) => {
     description: data.get('description') || undefined,
     transport,
     ...(transport === 'stdio'
-      ? { command: data.get('command'), args: parseArgs(data.get('args') || ''), env: parseEnv(data.get('env') || '') }
-      : { url: data.get('url') }),
+      ? { command: data.get('command'), args: parseArgs(data.get('args') || ''), env: parseEnv(data.get('env') || ''), oauth: false }
+      : { url: data.get('url'), oauth: form.oauth.checked ? (form.oauth.dataset.options ? JSON.parse(form.oauth.dataset.options) : true) : false }),
+    lazy: form.lazy.checked,
   };
   const result = await saveProxy(editId, body);
   document.querySelector('#add-err').textContent = result.ok ? '' : (result.error ?? 'failed to save proxy');

@@ -312,6 +312,7 @@ export class DashboardApp extends LitElement {
         <div class="header-actions">
           <a class="nav-link" href="/admin">Proxies (admin)</a>
           <a class="nav-link" href="/hub">Hub</a>
+          <a class="nav-link" href="/calls" target="js-bridge-mcp-calls" title="Recent tool calls, per MCP session — opens in its own window">Tool calls</a>
           <button class="copy-snippet-btn" @click=${() => this.#copyEmbedSnippet()}>Copy embed snippet…</button>
           <button
             class="theme-toggle"

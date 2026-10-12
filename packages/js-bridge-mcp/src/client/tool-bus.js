@@ -74,6 +74,11 @@ window.__mcpToolBus ??= (() => {
         params: opts.params ?? {},
         example: opts.example,
         origin: opts.origin,
+        // Optional MCP hints (e.g. { readOnlyHint: true }) and the opt-in
+        // (args, { signal, progress }) call signature - both omitted from
+        // the tool when not given, so an existing caller's tool is unchanged.
+        ...(opts.annotations ? { annotations: opts.annotations } : {}),
+        ...(opts.context ? { context: true } : {}),
         fn,
       };
       return this.registerProvider(`tool:${name}`, [tool]);

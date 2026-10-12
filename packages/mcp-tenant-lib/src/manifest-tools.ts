@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Tenant, TenantConnection } from './tenant.js';
+import type { Tenant, TenantConnection, CallContext } from './tenant.js';
 import { listRootTenants, dashboardEvents } from './tenant.js';
-import type { ToolManifestEntry, ToolParamSpec } from './types.js';
+import type { ToolManifestEntry, ToolParamSpec, ToolAnnotationsSpec } from './types.js';
+import { recordToolCall } from './call-log.js';
 import {
   REMOTE_REGISTER_BY_PATH_CALL,
   REMOTE_REGISTER_BY_CODE_CALL,
@@ -114,6 +115,103 @@ const REGISTER_TOOL_PARAMS_SHAPE = z
 
 function paramsArgToRecord(params: Record<string, ToolParamSpec> | undefined): Record<string, ToolParamSpec> {
   return params ?? {};
+}
+
+const CONTENT_BLOCK_TYPES = new Set(['text', 'image', 'audio', 'resource', 'resource_link']);
+const TOOL_RESULT_KEYS = new Set(['content', 'isError', 'structuredContent', '_meta']);
+
+function isContentBlock(block: unknown): boolean {
+  if (!block || typeof block !== 'object') return false;
+  const b = block as Record<string, unknown>;
+  if (typeof b.type !== 'string' || !CONTENT_BLOCK_TYPES.has(b.type)) return false;
+  if (b.type === 'text') return typeof b.text === 'string';
+  if (b.type === 'image' || b.type === 'audio') return typeof b.data === 'string' && typeof b.mimeType === 'string';
+  if (b.type === 'resource') return !!b.resource && typeof b.resource === 'object';
+  return typeof b.uri === 'string'; // resource_link
+}
+
+/**
+ * Turns whatever a connection answered a call with into an MCP tool result.
+ * A value that already IS one — what a proxied upstream MCP server returns,
+ * or a page tool that builds one to return an image — passes through whole,
+ * keeping its content blocks and `isError` instead of being flattened into
+ * one JSON string. The test is strict on purpose (no key beyond a tool
+ * result's own, a non-empty `content` of well-formed blocks) so ordinary
+ * page data that merely has a `content` field is still returned as JSON
+ * text, as before.
+ */
+export function toToolResult(result: unknown): { content: any[]; isError?: boolean; structuredContent?: Record<string, unknown>; _meta?: Record<string, unknown> } {
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    const r = result as Record<string, unknown>;
+    const { content } = r;
+    if (
+      Array.isArray(content) && content.length > 0 && content.every(isContentBlock) &&
+      Object.keys(r).every((key) => TOOL_RESULT_KEYS.has(key))
+    ) {
+      return {
+        content,
+        ...(r.isError === true ? { isError: true } : {}),
+        ...(r.structuredContent && typeof r.structuredContent === 'object' ? { structuredContent: r.structuredContent as Record<string, unknown> } : {}),
+        ...(r._meta && typeof r._meta === 'object' ? { _meta: r._meta as Record<string, unknown> } : {}),
+      };
+    }
+  }
+  let text: string;
+  try {
+    // JSON.stringify(undefined) is undefined, not a string — a tool with no return value still needs text.
+    text = typeof result === 'string' ? result : (JSON.stringify(result) ?? '');
+  } catch (err) {
+    return { content: [{ type: 'text', text: `result could not be serialized: ${(err as Error).message}` }], isError: true };
+  }
+  return { content: [{ type: 'text', text }] };
+}
+
+/** Text of a tool result for the call log: text blocks as-is, anything else as a short placeholder. */
+function resultTextOf(result: { content: any[] }): string {
+  return result.content
+    .map((block) => (block.type === 'text' ? block.text : `[${block.type}${block.mimeType ? ` ${block.mimeType}` : ''}]`))
+    .join('\n');
+}
+
+const ANNOTATION_BOOLEANS = ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'] as const;
+
+/** Keeps only well-typed MCP annotation fields — a manifest entry is page- or upstream-supplied JSON, and tools/list must never carry a malformed one. */
+function cleanAnnotations(raw: unknown): ToolAnnotationsSpec | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const source = raw as Record<string, unknown>;
+  const out: ToolAnnotationsSpec = {};
+  if (typeof source.title === 'string') out.title = source.title;
+  for (const key of ANNOTATION_BOOLEANS) {
+    if (typeof source[key] === 'boolean') out[key] = source[key] as boolean;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Builds Tenant.call's context from the MCP request behind a tool call:
+ * the request's abort signal (set when the client sends
+ * notifications/cancelled), and a progress forwarder when the client sent a
+ * progressToken. `extra` is absent when a handler is invoked outside a real
+ * MCP request (unit tests).
+ */
+function callContextFrom(extra: any): CallContext | undefined {
+  if (!extra) return undefined;
+  const progressToken = extra._meta?.progressToken;
+  const canReport = progressToken !== undefined && typeof extra.sendNotification === 'function';
+  return {
+    signal: extra.signal,
+    sessionId: extra.sessionId,
+    onProgress: canReport
+      ? (progress) => {
+          try {
+            // Rejects once the client is gone; a lost progress report is not an error.
+            Promise.resolve(extra.sendNotification({ method: 'notifications/progress', params: { progressToken, ...progress } })).catch(() => {});
+          } catch {
+            // same: never let reporting progress fail the call
+          }
+        }
+      : undefined,
+  };
 }
 
 export interface ManifestToolRegistry {
@@ -505,7 +603,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
     // come and go, which is what lets "use dbhub-local" resolve directly to
     // a name already visible in tools/list with zero join_channel/
     // describe_channel round-trip.
-    const registeredNow = new Map<string, { owner: Tenant<any, any>; connectionId: string; entry: ToolManifestEntry }>();
+    const registeredNow = new Map<string, { owner: Tenant<any, any>; connectionId: string; entry: ToolManifestEntry; slug: string; kind: TenantConnection['kind'] }>();
     const RESERVED_NAMES = new Set([
       DESCRIBE_TOOLS_NAME,
       IDENTIFY_CONNECTION_NAME,
@@ -518,7 +616,8 @@ export function createManifestToolRegistry<TSchema, TValues>(
     for (const { conn, owner } of merged) {
       for (const entry of conn.manifest) {
         if (RESERVED_NAMES.has(entry.name)) continue;
-        registeredNow.set(`${slugFor.get(conn.id)}__${entry.name}`, { owner, connectionId: conn.id, entry });
+        const slug = slugFor.get(conn.id)!;
+        registeredNow.set(`${slug}__${entry.name}`, { owner, connectionId: conn.id, entry, slug, kind: conn.kind });
       }
     }
 
@@ -541,7 +640,7 @@ export function createManifestToolRegistry<TSchema, TValues>(
     if (!handles.has(UNREGISTER_TOOL_NAME)) registerUnregisterTool();
     if (!handles.has(REQUEST_RECONNECT_NAME)) registerRequestReconnect();
 
-    for (const [registeredName, { owner, connectionId, entry }] of registeredNow) {
+    for (const [registeredName, { owner, connectionId, entry, slug, kind }] of registeredNow) {
       if (handles.has(registeredName)) continue;
       let inputSchema: Record<string, z.ZodTypeAny>;
       try {
@@ -557,19 +656,45 @@ export function createManifestToolRegistry<TSchema, TValues>(
         }
         throw err;
       }
+      const annotations = cleanAnnotations(entry.annotations);
       const handle = mcp.registerTool(
         registeredName,
-        { description: entry.description, inputSchema },
-        async (args: any) => {
+        { description: entry.description, inputSchema, ...(annotations ? { annotations } : {}) },
+        async (args: any, extra: any) => {
+          const startedAt = Date.now();
+          let outcome: ReturnType<typeof toToolResult>;
           try {
             // Dispatches against the connection's OWNING tenant, not the
             // session's ambient tenant() — for a merged-in root tool, owner
             // is a different Tenant instance than tenant() resolves to.
-            const result = await owner.call(connectionId, entry.name, args, entry.timeoutMs);
-            return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result) }] };
+            const result = await owner.call(connectionId, entry.name, args, entry.timeoutMs, undefined, callContextFrom(extra));
+            outcome = toToolResult(result);
           } catch (err) {
-            return { content: [{ type: 'text', text: String((err as Error).message) }], isError: true };
+            outcome = { content: [{ type: 'text', text: String((err as Error)?.message ?? err) }], isError: true };
           }
+          // A dispatcher tool (entry.innerToolParam) is logged under the tool it dispatched to.
+          const inner = entry.innerToolParam ? args?.[entry.innerToolParam] : undefined;
+          let client: string | undefined;
+          try {
+            const info = mcp.server.getClientVersion();
+            if (info?.name) client = `${info.name}${info.version ? ` ${info.version}` : ''}`;
+          } catch {
+            // client info is a label only
+          }
+          recordToolCall({
+            at: startedAt,
+            durationMs: Date.now() - startedAt,
+            sessionId: extra?.sessionId,
+            client,
+            tenantId: owner.id,
+            connection: slug,
+            kind,
+            tool: typeof inner === 'string' && inner ? inner : entry.name,
+            args,
+            ok: !outcome.isError,
+            resultText: resultTextOf(outcome),
+          });
+          return outcome;
         }
       );
       handles.set(registeredName, handle);

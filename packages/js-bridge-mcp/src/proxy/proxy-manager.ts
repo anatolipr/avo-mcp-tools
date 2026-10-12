@@ -5,9 +5,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
-import { getOrCreateRootTenant, isValidConnectionName, type Tenant, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
+import { getOrCreateRootTenant, isValidConnectionName, type CallContext, type Tenant, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
 import type { ProxyConfig, ProxyStatus, ProxyTransport } from './types.js';
+import { OAuthStore, ProxyOAuthProvider } from './oauth.js';
+
+type ProxyTransportInstance = StdioClientTransport | SSEClientTransport | StreamableHTTPClientTransport;
+type UpstreamTool = Awaited<ReturnType<Client['listTools']>>['tools'][number];
 
 /**
  * One running proxy's live handles — never persisted, rebuilt fresh from
@@ -29,6 +34,12 @@ interface RunningProxy {
    * proxy's tenant and remove nothing.
    */
   tenant?: Tenant<any, any>;
+  /** The upstream's own tool list as last read — what a lazy proxy's list_tools/call_tool answer from. */
+  upstreamTools: UpstreamTool[];
+  /** Kept after a failed connect so an OAuth proxy's callback can finish the flow on the transport that started it (see completeProxyAuth). */
+  transport?: ProxyTransportInstance;
+  /** Set while an OAuth proxy waits for a human to approve it. */
+  authUrl?: string;
   toolCount: number;
   /**
    * Names of upstream tools that connected but couldn't be registered.
@@ -49,6 +60,11 @@ let configPath: string;
 /** Reported to upstream servers as this proxy client's own version — set from package.json by initProxyManager. */
 let packageVersion = '0.0.0';
 let configs: ProxyConfig[] = [];
+/** This server's own port — an OAuth proxy's redirect URL points back at it. Unset means OAuth proxies cannot start. */
+let serverPort: number | undefined;
+let oauthStore: OAuthStore | undefined;
+/** OAuth `state` value -> ProxyConfig.id, for /oauth/callback to find which proxy an authorization belongs to. In-memory: a restart invalidates a pending authorization, and restarting the proxy issues a new link. */
+const pendingAuth = new Map<string, string>();
 
 /**
  * Tolerates a hand-edited or truncated file: anything that isn't an array is
@@ -171,6 +187,13 @@ export function validateProxyInput(input: Omit<ProxyConfig, 'id' | 'paused'>): v
   if (input.callTimeoutMs != null && !(typeof input.callTimeoutMs === 'number' && Number.isFinite(input.callTimeoutMs) && input.callTimeoutMs > 0)) {
     throw new Error('"callTimeoutMs" must be a positive number');
   }
+  if (input.lazy != null && typeof input.lazy !== 'boolean') throw new Error('"lazy" must be true or false');
+  if (input.oauth != null && input.oauth !== false) {
+    if (input.transport === 'stdio') throw new Error('"oauth" applies to sse and streamableHttp proxies only');
+    if (input.oauth !== true && !(typeof input.oauth === 'object' && !Array.isArray(input.oauth) && isStringRecord(input.oauth))) {
+      throw new Error('"oauth" must be true, or an object with string "clientId" / "clientSecret" / "scope"');
+    }
+  }
 }
 
 /**
@@ -188,7 +211,7 @@ const STDERR_CAPTURE_LIMIT = 4000;
  * "Connection closed" report this was added for) with no way for
  * proxy-manager.ts to read it back and surface it in ProxyStatus.lastError.
  */
-function buildTransport(config: ProxyConfig): { transport: StdioClientTransport | SSEClientTransport | StreamableHTTPClientTransport; readStderr: () => string | undefined } {
+function buildTransport(config: ProxyConfig, authProvider?: ProxyOAuthProvider): { transport: ProxyTransportInstance; readStderr: () => string | undefined } {
   if (config.transport === 'stdio') {
     if (!config.command) throw new Error('stdio proxy requires "command"');
     const transport = new StdioClientTransport({ command: config.command, args: config.args, env: config.env, stderr: 'pipe' });
@@ -200,7 +223,9 @@ function buildTransport(config: ProxyConfig): { transport: StdioClientTransport 
   }
   if (!config.url) throw new Error(`${config.transport} proxy requires "url"`);
   const url = new URL(config.url);
-  const opts = config.headers ? { requestInit: { headers: config.headers } } : undefined;
+  const opts = config.headers || authProvider
+    ? { ...(config.headers ? { requestInit: { headers: config.headers } } : {}), ...(authProvider ? { authProvider } : {}) }
+    : undefined;
   const transport = config.transport === 'sse' ? new SSEClientTransport(url, opts) : new StreamableHTTPClientTransport(url, opts);
   return { transport, readStderr: () => undefined };
 }
@@ -325,11 +350,103 @@ export function translateSchemaProperties(schema: unknown): { params: Record<str
  * applies the `${slug}__` prefix, so pre-baking it here would double-prefix
  * (e.g. "db__db__query").
  */
-function translateTools(config: ProxyConfig, upstreamTools: { name: string; description?: string; inputSchema?: unknown }[]): { entries: ToolManifestEntry[]; skipped: string[] } {
+const LAZY_LIST_TOOL = 'list_tools';
+const LAZY_CALL_TOOL = 'call_tool';
+/** Cap on the tool-name list baked into a lazy proxy's list_tools description — it is resent on every tools/list. */
+const LAZY_NAMES_LIMIT = 500;
+
+/**
+ * A lazy proxy's whole manifest: two fixed tools in place of one per
+ * upstream tool. The upstream's tool names go into list_tools' description
+ * so a caller can tell at a glance whether this connection has what it
+ * needs; descriptions and schemas are fetched on demand through list_tools.
+ */
+function lazyManifest(config: ProxyConfig, upstreamTools: UpstreamTool[]): ToolManifestEntry[] {
+  let names = upstreamTools.map((t) => t.name).join(', ');
+  if (names.length > LAZY_NAMES_LIMIT) names = `${names.slice(0, LAZY_NAMES_LIMIT)}…`;
+  const origin = { kind: 'path' as const, path: `${config.slug}:(lazy)` };
+  return [
+    {
+      name: LAZY_LIST_TOOL,
+      description:
+        `Lists the ${upstreamTools.length} tool(s) of the "${config.slug}" MCP server with one-line descriptions: ${names || '(none)'}. ` +
+        'Pass "tool" for one tool\'s full description and input JSON Schema.',
+      params: { tool: { type: 'string', description: 'Exact tool name.', optional: true } },
+      source: 'dynamic',
+      origin,
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: LAZY_CALL_TOOL,
+      description: `Calls one tool of the "${config.slug}" MCP server by name. Get names and argument schemas from this connection's ${LAZY_LIST_TOOL} first.`,
+      params: {
+        tool: { type: 'string', description: 'Exact tool name.' },
+        args: { type: 'any', description: 'Arguments object for that tool.', optional: true },
+      },
+      source: 'dynamic',
+      origin,
+      timeoutMs: proxyCallTimeoutMs(config) + 1000,
+      innerToolParam: 'tool',
+    },
+  ];
+}
+
+function describeUpstreamTools(entry: RunningProxy, toolName: unknown): unknown {
+  if (typeof toolName === 'string' && toolName) {
+    const tool = entry.upstreamTools.find((t) => t.name === toolName);
+    if (!tool) throw new Error(`"${toolName}" is not a tool of "${entry.config.slug}" — call ${LAZY_LIST_TOOL} with no arguments for the names`);
+    return { name: tool.name, description: tool.description ?? '', inputSchema: tool.inputSchema, annotations: tool.annotations };
+  }
+  return {
+    tools: entry.upstreamTools.map((t) => ({ name: t.name, description: (t.description ?? '').split('\n')[0]!.slice(0, 200) })),
+  };
+}
+
+/**
+ * Answers one Tenant.call against a proxy: the upstream tool itself, or —
+ * for a lazy proxy — its list_tools/call_tool pair. The MCP client's cancel
+ * (context.signal) and progress request (context.onProgress) are forwarded
+ * upstream; `onprogress` is only passed when the client asked for progress,
+ * since passing it is what makes the SDK request progress from the upstream.
+ */
+async function callUpstream(entry: RunningProxy, name: string, args: unknown, context?: CallContext): Promise<unknown> {
+  let toolName = name;
+  let toolArgs = args;
+  if (entry.config.lazy) {
+    if (name === LAZY_LIST_TOOL) return describeUpstreamTools(entry, (args as { tool?: unknown } | undefined)?.tool);
+    if (name === LAZY_CALL_TOOL) {
+      const request = (args ?? {}) as { tool?: unknown; args?: unknown };
+      if (typeof request.tool !== 'string' || !request.tool) throw new Error(`"tool" is required — call ${LAZY_LIST_TOOL} for the names`);
+      if (!entry.upstreamTools.some((t) => t.name === request.tool)) {
+        throw new Error(`"${request.tool}" is not a tool of "${entry.config.slug}" — call ${LAZY_LIST_TOOL} for the names`);
+      }
+      toolArgs = request.args ?? {};
+      // Some models send a nested object as a JSON string.
+      if (typeof toolArgs === 'string') {
+        try { toolArgs = JSON.parse(toolArgs); } catch { throw new Error('"args" must be an object (or a JSON string of one)'); }
+      }
+      if (!toolArgs || typeof toolArgs !== 'object' || Array.isArray(toolArgs)) throw new Error('"args" must be an object');
+      toolName = request.tool;
+    }
+  }
+  const onProgress = context?.onProgress;
+  return entry.client.callTool(
+    { name: toolName, arguments: toolArgs as Record<string, unknown> | undefined },
+    undefined,
+    {
+      timeout: proxyCallTimeoutMs(entry.config),
+      ...(context?.signal ? { signal: context.signal } : {}),
+      ...(onProgress ? { onprogress: (p: { progress: number; total?: number; message?: string }) => onProgress({ progress: p.progress, total: p.total, message: p.message }) } : {}),
+    },
+  );
+}
+
+function translateTools(config: ProxyConfig, upstreamTools: UpstreamTool[]): { entries: ToolManifestEntry[]; skipped: string[] } {
+  if (config.lazy) return { entries: lazyManifest(config, upstreamTools), skipped: [] };
   const entries: ToolManifestEntry[] = [];
   const skipped: string[] = [];
   // +1s so the upstream client's own timeout (set to the same budget in
-  // startProxy's directCall) fires first: its error names the request and it
+  // callUpstream) fires first: its error names the request and it
   // sends the upstream a cancellation, where Tenant.call's timer does neither.
   const timeoutMs = proxyCallTimeoutMs(config) + 1000;
   for (const tool of upstreamTools) {
@@ -346,6 +463,7 @@ function translateTools(config: ProxyConfig, upstreamTools: { name: string; desc
       source: 'dynamic',
       origin: { kind: 'path', path: `${config.slug}:${tool.name}` },
       timeoutMs,
+      ...(tool.annotations ? { annotations: tool.annotations } : {}),
     });
   }
   return { entries, skipped };
@@ -433,8 +551,9 @@ async function refreshTools(entry: RunningProxy) {
     const tools = await listAllTools(entry.client);
     if (running.get(entry.config.id) !== entry || !entry.connected) return;
     const { entries: manifest, skipped } = translateTools(entry.config, tools);
+    entry.upstreamTools = tools;
     entry.tenant?.updateConnectionManifest(entry.connectionId, manifest, entry.config.description, entry.config.slug);
-    entry.toolCount = manifest.length;
+    entry.toolCount = entry.config.lazy ? tools.length : manifest.length;
     entry.skippedTools = skipped;
   } catch (err: any) {
     console.error(`[proxy-manager] failed to refresh tools for proxy "${entry.config.slug}": ${err?.message ?? String(err)}`);
@@ -449,7 +568,7 @@ async function startProxy(config: ProxyConfig): Promise<boolean> {
 
   const client = new Client({ name: `js-bridge-mcp-proxy-${config.slug}`, version: packageVersion });
   const connectionId = randomUUID();
-  const entry: RunningProxy = { config, connectionId, client, toolCount: 0, skippedTools: [], connected: false, connectedAt: 0 };
+  const entry: RunningProxy = { config, connectionId, client, upstreamTools: [], toolCount: 0, skippedTools: [], connected: false, connectedAt: 0 };
   running.set(config.id, entry);
   // Superseded = stopProxy (or a newer startProxy) replaced this entry while
   // an await below was pending; whatever this call connected is orphaned.
@@ -469,21 +588,34 @@ async function startProxy(config: ProxyConfig): Promise<boolean> {
     // config missing its command/url, which otherwise left this entry in
     // `running` with no lastError — reported as connected — and, from
     // initProxyManager's un-awaited call, was an unhandled rejection.
-    const built = buildTransport(config);
+    let authProvider: ProxyOAuthProvider | undefined;
+    if (config.oauth && config.transport !== 'stdio') {
+      if (!oauthStore || serverPort === undefined) throw new Error('OAuth is not available: this server was started without a port for the redirect URL');
+      authProvider = new ProxyOAuthProvider(
+        config.id,
+        `http://localhost:${serverPort}/oauth/callback`,
+        oauthStore,
+        typeof config.oauth === 'object' ? config.oauth : {},
+        // Called by the SDK when a human must approve: on the first connect,
+        // or later when a refresh token stops working mid-session.
+        (url, state) => {
+          entry.authUrl = url.href;
+          if (state) pendingAuth.set(state, config.id);
+        },
+      );
+    }
+    const built = buildTransport(config, authProvider);
     readStderr = built.readStderr;
+    entry.transport = built.transport;
     await client.connect(built.transport);
     if (superseded()) { await client.close().catch(() => {}); return false; }
     const tools = await listAllTools(client);
     if (superseded()) { await client.close().catch(() => {}); return false; }
     const { entries: manifest, skipped } = translateTools(config, tools);
-    const timeout = proxyCallTimeoutMs(config);
-    tenant.registerDirectConnection(
-      connectionId,
-      (name, args) => client.callTool({ name, arguments: args as Record<string, unknown> | undefined }, undefined, { timeout }),
-      config.slug,
-    );
+    entry.upstreamTools = tools;
+    tenant.registerDirectConnection(connectionId, (name, args, context) => callUpstream(entry, name, args, context), config.slug);
     tenant.updateConnectionManifest(connectionId, manifest, config.description, config.slug);
-    entry.toolCount = manifest.length;
+    entry.toolCount = config.lazy ? tools.length : manifest.length;
     entry.skippedTools = skipped;
     entry.connected = true;
     entry.connectedAt = Date.now();
@@ -499,6 +631,11 @@ async function startProxy(config: ProxyConfig): Promise<boolean> {
     // buildTransport's 'pipe' comment) and never the admin UI at all.
     const stderr = readStderr();
     entry.lastError = stderr ? `${err?.message ?? String(err)}\n${stderr}` : (err?.message ?? String(err));
+    // Not a failure to fix in the config: the upstream is waiting for a
+    // human to approve this proxy at entry.authUrl.
+    if (entry.authUrl && err instanceof UnauthorizedError) {
+      entry.lastError = 'Authorization required — open this proxy\'s authorization link (authUrl) in a browser to approve it.';
+    }
     console.error(`[proxy-manager] failed to start proxy "${config.slug}": ${entry.lastError}`);
     // A half-started stdio child (spawned, then failed initialize) would
     // otherwise keep running with nothing holding a reference to it.
@@ -517,6 +654,7 @@ async function startProxy(config: ProxyConfig): Promise<boolean> {
  */
 async function stopProxy(configId: string): Promise<void> {
   cancelReconnect(configId);
+  for (const [state, id] of pendingAuth) if (id === configId) pendingAuth.delete(state);
   const entry = running.get(configId);
   if (!entry) return;
   running.delete(configId);
@@ -541,9 +679,47 @@ export async function shutdownProxyManager(timeoutMs = 2_000): Promise<void> {
   await Promise.race([stopAll, new Promise((resolve) => setTimeout(resolve, timeoutMs).unref())]);
 }
 
-export function initProxyManager(filePath: string, version?: string) {
+/**
+ * Finishes an OAuth proxy's authorization: called by /oauth/callback with
+ * the `state` and `code` the authorization server redirected back with.
+ * Exchanges the code for tokens on the transport that started the flow,
+ * then restarts the proxy so it connects with them. Never rejects — the
+ * caller renders `error` to the human who just clicked "approve".
+ */
+export async function completeProxyAuth(state: string, code: string): Promise<{ ok: boolean; slug?: string; error?: string }> {
+  const configId = pendingAuth.get(state);
+  const config = configs.find((c) => c.id === configId);
+  const entry = configId ? running.get(configId) : undefined;
+  const transport = entry?.transport;
+  if (!configId || !config || !transport || !('finishAuth' in transport)) {
+    return { ok: false, error: 'Unknown or expired authorization request — restart the proxy and use its new authorization link.' };
+  }
+  try {
+    await transport.finishAuth(code);
+  } catch (err: any) {
+    return { ok: false, slug: config.slug, error: `Could not exchange the authorization code: ${err?.message ?? String(err)}` };
+  }
+  try {
+    await stopProxy(configId);
+    if (config.paused) return { ok: true, slug: config.slug };
+    const ok = await startProxy(config);
+    return ok ? { ok: true, slug: config.slug } : { ok: false, slug: config.slug, error: running.get(configId)?.lastError ?? 'the proxy did not connect' };
+  } catch (err: any) {
+    return { ok: false, slug: config.slug, error: err?.message ?? String(err) };
+  }
+}
+
+/** Sibling of the proxy config file, e.g. ~/.js-bridge-mcp-proxies.json -> ~/.js-bridge-mcp-proxies-oauth.json — so a test's private config path gets a private OAuth store too. */
+function oauthStorePathFor(filePath: string): string {
+  return filePath.endsWith('.json') ? `${filePath.slice(0, -'.json'.length)}-oauth.json` : `${filePath}-oauth.json`;
+}
+
+export function initProxyManager(filePath: string, version?: string, options: { port?: number } = {}) {
   configPath = filePath;
   if (version) packageVersion = version;
+  serverPort = options.port;
+  oauthStore = new OAuthStore(oauthStorePathFor(filePath));
+  pendingAuth.clear();
   shuttingDown = false;
   configs = loadConfigs();
   for (const config of configs) {
@@ -574,6 +750,8 @@ export function listProxies(): ProxyStatus[] {
       toolCount: entry?.toolCount ?? 0,
       skippedTools: entry?.skippedTools ?? [],
       lastError: entry?.lastError ?? invalidSlugErrors.get(config.id),
+      ...(config.lazy ? { lazy: true } : {}),
+      ...(entry?.authUrl ? { authUrl: entry.authUrl } : {}),
     };
   });
 }
@@ -597,10 +775,11 @@ export async function addProxy(input: Omit<ProxyConfig, 'id' | 'paused'>): Promi
  * whichever paused state the proxy was already in rather than silently
  * resuming a proxy the user deliberately paused.
  *
- * `headers` and `callTimeoutMs` are kept from the existing config when the
- * key is absent from `input` (pass null to clear): neither the admin form
- * nor the admin MCP tools sent them at all before, so treating "absent" as
- * "clear" silently wiped a proxy's auth headers on every unrelated edit.
+ * `headers`, `callTimeoutMs`, `oauth` and `lazy` are kept from the existing
+ * config when the key is absent from `input` (pass null/false to clear):
+ * callers written before a field existed do not send it, so treating
+ * "absent" as "clear" silently wiped a proxy's auth headers on every
+ * unrelated edit.
  */
 export async function updateProxy(id: string, input: Omit<ProxyConfig, 'id' | 'paused'>): Promise<ProxyConfig | undefined> {
   const index = configs.findIndex((c) => c.id === id);
@@ -609,7 +788,11 @@ export async function updateProxy(id: string, input: Omit<ProxyConfig, 'id' | 'p
   const merged = { ...input };
   if (!('headers' in input) && existing.headers !== undefined) merged.headers = existing.headers;
   if (!('callTimeoutMs' in input) && existing.callTimeoutMs !== undefined) merged.callTimeoutMs = existing.callTimeoutMs;
+  if (!('oauth' in input) && existing.oauth !== undefined) merged.oauth = existing.oauth;
+  if (!('lazy' in input) && existing.lazy !== undefined) merged.lazy = existing.lazy;
   validateProxyInput(merged);
+  // Tokens belong to one upstream: a different URL, or OAuth switched off, must not reuse them.
+  if (!merged.oauth || merged.url !== existing.url) oauthStore?.delete(id);
   await stopProxy(id);
   const config: ProxyConfig = { ...merged, id, paused: existing.paused };
   configs[index] = config;
@@ -625,6 +808,7 @@ export async function removeProxy(id: string): Promise<boolean> {
   await stopProxy(id);
   configs.splice(index, 1);
   invalidSlugErrors.delete(id);
+  oauthStore?.delete(id);
   saveConfigs();
   return true;
 }

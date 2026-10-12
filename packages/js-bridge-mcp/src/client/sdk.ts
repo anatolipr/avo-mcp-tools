@@ -32,7 +32,7 @@ export interface McpToolBus {
   registerProvider(providerName: string, tools: unknown[]): () => void;
   registerTool(
     name: string,
-    fn: (args: any) => unknown | Promise<unknown>,
+    fn: (args: any, context?: ToolCallContext) => unknown | Promise<unknown>,
     opts?: DefineToolOptions
   ): () => void;
   getTools(): unknown[];
@@ -43,6 +43,18 @@ export interface DefineToolOptions {
   description?: string;
   params?: Record<string, { type: string; description?: string; optional?: boolean }>;
   example?: Record<string, unknown>;
+  /** MCP tool hints shown to the client, e.g. `{ readOnlyHint: true }` lets it call the tool without asking. */
+  annotations?: { title?: string; readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean };
+  /** When true, `fn` is called as `fn(args, { signal, progress })` — see ToolCallContext. */
+  context?: boolean;
+}
+
+/** Second argument of a tool function registered with `context: true`. */
+export interface ToolCallContext {
+  /** Aborts when the MCP client cancels the call. */
+  signal: AbortSignal;
+  /** Reports progress to the MCP client; does nothing when the client did not ask for progress. */
+  progress(progress: number, total?: number, message?: string): void;
 }
 
 // tool-bus.js is normally fetched by URL (`<server>/tool-bus.js`, or a
@@ -79,7 +91,7 @@ function ensureToolBusLoaded(host: string = JSBRIDGE_HOST): Promise<McpToolBus |
  */
 export async function defineTool(
   name: string,
-  fn: (args: any) => unknown | Promise<unknown>,
+  fn: (args: any, context?: ToolCallContext) => unknown | Promise<unknown>,
   opts: DefineToolOptions = {}
 ): Promise<(() => void) | undefined> {
   const bus = await ensureToolBusLoaded();

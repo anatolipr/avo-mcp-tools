@@ -1,4 +1,4 @@
-import type { ServerMessage, ClientMessage, ToolManifestEntry, ToolParamSpec } from './types.js';
+import type { ServerMessage, ClientMessage, ToolManifestEntry, ToolParamSpec, ToolAnnotationsSpec } from './types.js';
 
 export interface ClientAction {
   name: string;
@@ -17,11 +17,28 @@ export interface PageToolDef {
   description: string;
   params: Record<string, ToolParamSpec>;
   example?: Record<string, unknown>;
-  fn: (args: any) => unknown | Promise<unknown>;
+  fn: (args: any, context?: PageToolContext) => unknown | Promise<unknown>;
+  /**
+   * Opt-in: when true, `fn` is called with a second argument (see
+   * PageToolContext) carrying a cancellation signal and a progress reporter.
+   * Off by default so a function with its own optional second parameter is
+   * never handed an unexpected value. Never sent over the wire.
+   */
+  context?: boolean;
+  /** See ToolManifestEntry's own doc comment (types.ts) - carried through splitPageTools unchanged. */
+  annotations?: ToolAnnotationsSpec;
   /** See ToolManifestEntry's own doc comment (types.ts) - carried through splitPageTools unchanged. */
   source?: 'dynamic' | 'host';
   /** See ToolManifestEntry's own doc comment (types.ts) - carried through splitPageTools unchanged. */
   origin?: { kind: 'code'; code: string } | { kind: 'path'; path: string };
+}
+
+/** Second argument given to a page tool's `fn` when its definition sets `context: true`. */
+export interface PageToolContext {
+  /** Aborts when the MCP client cancels this call. */
+  signal: AbortSignal;
+  /** Reports progress to the MCP client; a no-op when the client did not ask for progress. */
+  progress(progress: number, total?: number, message?: string): void;
 }
 
 /**
@@ -62,14 +79,17 @@ export const REMOTE_REQUEST_RECONNECT_CALL = '__request_reconnect__';
  * ToolManifestEntry[] for a RegisterToolsMessage, and returns a
  * name -> fn lookup for dispatching incoming CallMessages locally.
  */
-export function splitPageTools(defs: PageToolDef[]): { manifest: ToolManifestEntry[]; fnByName: Map<string, PageToolDef['fn']> } {
+export function splitPageTools(defs: PageToolDef[]): { manifest: ToolManifestEntry[]; fnByName: Map<string, PageToolDef['fn']>; contextNames: Set<string> } {
   const manifest: ToolManifestEntry[] = [];
   const fnByName = new Map<string, PageToolDef['fn']>();
-  for (const { fn, ...entry } of defs) {
+  // Names of tools that opted in to PageToolContext (`context: true`).
+  const contextNames = new Set<string>();
+  for (const { fn, context, ...entry } of defs) {
     manifest.push(entry);
     fnByName.set(entry.name, fn);
+    if (context) contextNames.add(entry.name);
   }
-  return { manifest, fnByName };
+  return { manifest, fnByName, contextNames };
 }
 
 export function createClientBridge(actions: ClientAction[]) {
@@ -96,6 +116,8 @@ export interface StateSocketHandlers<TSchema, TValues> {
   onReinit?(schema: TSchema, state: TValues): void;
   onUpdate?(field: string, value: unknown): void;
   onCall?(id: string, name: string, args: unknown): void;
+  /** The MCP client cancelled the call with this id (see CancelCallMessage). Optional: a caller that ignores it just lets the call finish. */
+  onCancel?(id: string): void;
   onConnect?(): void;
   onDisconnect?(): void;
   /**
@@ -223,6 +245,7 @@ export function connectStateSocket<TSchema, TValues>(
       if (msg.type === 'reinit') handlers.onReinit?.(msg.schema, msg.state);
       if (msg.type === 'update') handlers.onUpdate?.(msg.field, msg.value);
       if (msg.type === 'call') handlers.onCall?.(msg.id, msg.name, msg.args);
+      if (msg.type === 'cancel_call') handlers.onCancel?.(msg.id);
       if (msg.type === 'identify') {
         if (handlers.onIdentify) handlers.onIdentify(msg.label);
         else alert(`Identify: this is the "${msg.label ?? 'unlabeled'}" connection`);

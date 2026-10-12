@@ -32,6 +32,49 @@ const RECONNECT_GRACE_MS = 15_000;
 /** Cap on Tenant.recentToolRegistrations — a rolling log, not a full history. */
 const RECENT_REGISTRATIONS_LIMIT = 50;
 
+export interface CallProgress {
+  progress: number;
+  total?: number;
+  message?: string;
+}
+
+/**
+ * Optional per-call extras for Tenant.call, all sourced from the MCP request
+ * that triggered the call (see manifest-tools.ts). `signal` aborting rejects
+ * the call and tells the target to stop; `onProgress` receives the target's
+ * progress reports while the call is in flight; `sessionId` identifies the
+ * calling MCP session to a directCall target that wants it.
+ */
+export interface CallContext {
+  signal?: AbortSignal;
+  onProgress?: (progress: CallProgress) => void;
+  sessionId?: string;
+}
+
+/**
+ * Where dynamic (register_page_tool_by_path/_by_code) tools are kept across
+ * a server restart or a tenant being swept — see setDynamicToolStore. `key`
+ * is opaque to the store.
+ */
+export interface DynamicToolStore {
+  get(key: string): ToolManifestEntry[] | undefined;
+  set(key: string, tools: ToolManifestEntry[]): void;
+  delete(key: string): void;
+}
+
+let dynamicToolStore: DynamicToolStore | undefined;
+
+/**
+ * Opt-in: with a store set, a browser connection's dynamic tools are saved
+ * under its tenant id + label on every change, and replayed onto the next
+ * connection that registers under the same tenant id + label. Without one
+ * (the default) only the in-memory, same-process stash applies — see
+ * Tenant's #dynamicToolsByLabel. Pass undefined to turn it off again.
+ */
+export function setDynamicToolStore(store: DynamicToolStore | undefined) {
+  dynamicToolStore = store;
+}
+
 /**
  * One WS connection's own tool manifest/summary/label, addressable
  * independently of other connections sharing the same tenant (e.g. two
@@ -49,7 +92,11 @@ const RECENT_REGISTRATIONS_LIMIT = 50;
 export interface TenantConnection {
   id: string;
   socket?: WebSocket;
-  directCall?: (name: string, args: unknown) => Promise<unknown>;
+  directCall?: (name: string, args: unknown, context?: CallContext) => Promise<unknown>;
+  /** True once this connection's first labeled manifest has been checked against the persisted dynamic-tool store (see setDynamicToolStore) — the store is only ever read once per connection. */
+  dynamicStoreChecked?: boolean;
+  /** True while stashed/persisted dynamic tools are being replayed onto this connection — its manifest is incomplete until then, so it must not be written back to the store. */
+  replayingDynamicTools?: boolean;
   /**
    * Stable, collision-resolved identifier used as this connection's
    * tool-name prefix (see computeSlugs in manifest-tools.ts) — set once at
@@ -181,7 +228,7 @@ export class Tenant<TSchema, TValues> {
   #legacyManifest?: ToolManifestEntry[];
   #legacySummary?: string;
   lastActivityAt: number;
-  pendingCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  pendingCalls = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; onProgress?: (progress: CallProgress) => void }>();
   /**
    * Recent dynamic tool registrations (register_page_tool_by_path/_by_code),
    * newest last — a passive log for the dashboard to render as sticky
@@ -327,7 +374,7 @@ export class Tenant<TSchema, TValues> {
    * instead of being lumped in with real MCP proxies. Otherwise mirrors
    * registerConnection.
    */
-  registerDirectConnection(id: string, directCall: (name: string, args: unknown) => Promise<unknown>, desiredName: string, kind: 'proxy' | 'admin' = 'proxy'): string {
+  registerDirectConnection(id: string, directCall: (name: string, args: unknown, context?: CallContext) => Promise<unknown>, desiredName: string, kind: 'proxy' | 'admin' = 'proxy'): string {
     const name = this.reserveConnectionName(desiredName);
     // Always internal: a directCall connection has no socket and no page,
     // so identify/move (which push a WS message at a real browser tab)
@@ -360,6 +407,7 @@ export class Tenant<TSchema, TValues> {
     // triggers its own updateConnectionManifest re-send from the browser,
     // which re-enters here with the stash already cleared, so this can't loop.
     this.#replayDynamicTools(id, label);
+    this.#persistDynamicTools(conn);
   }
 
   /**
@@ -400,7 +448,10 @@ export class Tenant<TSchema, TValues> {
    */
   #stashDynamicTools(conn: TenantConnection) {
     const label = conn.label;
-    if (!label) return;
+    // A directCall connection (an MCP proxy) rebuilds its own manifest from
+    // its upstream on every start; replaying a register call at it would
+    // only reach the upstream server as an unknown tool name.
+    if (!label || conn.directCall) return;
     const dynamicTools = conn.manifest.filter((e) => e.source === 'dynamic' && e.origin);
     if (dynamicTools.length === 0) return;
     const stillLive = [...this.connections.values()].some((c) => c.id !== conn.id && c.label === label);
@@ -422,20 +473,73 @@ export class Tenant<TSchema, TValues> {
    */
   #replayDynamicTools(id: string, label: string | undefined) {
     if (!label) return;
-    const stashed = this.#dynamicToolsByLabel.get(label);
-    if (!stashed || stashed.length === 0) return;
+    const conn = this.connections.get(id);
+    if (!conn || conn.directCall) return;
     const sharedByOthers = [...this.connections.values()].some((c) => c.id !== id && c.label === label);
     if (sharedByOthers) return;
+    let stashed = this.#dynamicToolsByLabel.get(label);
+    // Persisted store (opt-in, see setDynamicToolStore): read once per
+    // connection, and only when the same-process stash has nothing — the
+    // stash is the fresher of the two.
+    if (!conn.dynamicStoreChecked) {
+      conn.dynamicStoreChecked = true;
+      if ((!stashed || stashed.length === 0) && dynamicToolStore) {
+        try {
+          stashed = dynamicToolStore.get(this.#dynamicStoreKey(label));
+        } catch (err) {
+          console.error(`[mcp-tenant-lib] failed to read persisted dynamic tools for "${label}": ${(err as Error).message}`);
+        }
+      }
+    }
+    if (!stashed || stashed.length === 0) return;
     this.#dynamicToolsByLabel.delete(label);
-    for (const entry of stashed) {
-      if (!entry.origin) continue;
-      const callName = entry.origin.kind === 'code' ? REMOTE_REGISTER_BY_CODE_CALL : REMOTE_REGISTER_BY_PATH_CALL;
-      const args = entry.origin.kind === 'code'
-        ? { name: entry.name, description: entry.description, code: entry.origin.code }
-        : { name: entry.name, description: entry.description, path: entry.origin.path };
-      this.call(id, callName, args).catch((err) => {
+    // A tab that outlived a server restart resends its dynamic tools itself;
+    // only what its manifest lacks needs replaying.
+    const present = new Set(conn.manifest.map((e) => e.name));
+    const missing = stashed.filter((entry) => entry.origin && !present.has(entry.name));
+    if (missing.length === 0) return;
+    conn.replayingDynamicTools = true;
+    const replays = missing.map((entry) => {
+      const origin = entry.origin!;
+      const callName = origin.kind === 'code' ? REMOTE_REGISTER_BY_CODE_CALL : REMOTE_REGISTER_BY_PATH_CALL;
+      // `params` must be replayed too: without it the re-registered tool has
+      // an empty input schema and MCP clients strip every argument.
+      const args = origin.kind === 'code'
+        ? { name: entry.name, description: entry.description, code: origin.code, params: entry.params }
+        : { name: entry.name, description: entry.description, path: origin.path, params: entry.params };
+      return this.call(id, callName, args).catch((err) => {
         console.error(`[mcp-tenant-lib] failed to replay dynamic tool "${entry.name}" onto reconnected connection "${id}" (label "${label}"): ${(err as Error).message}`);
       });
+    });
+    Promise.allSettled(replays).then(() => {
+      conn.replayingDynamicTools = false;
+      this.#persistDynamicTools(conn);
+    });
+  }
+
+  #dynamicStoreKey(label: string): string {
+    return `${this.id}|${label}`;
+  }
+
+  /**
+   * Writes this connection's current dynamic tools to the persisted store
+   * (a no-op unless setDynamicToolStore was called), replacing whatever was
+   * saved under its tenant id + label — so an unregister is persisted the
+   * same way a register is. Skipped under the same ambiguity rule as the
+   * in-memory stash, and while a replay is still filling the manifest in.
+   */
+  #persistDynamicTools(conn: TenantConnection) {
+    if (!dynamicToolStore || !conn.label || conn.directCall || conn.replayingDynamicTools || !conn.dynamicStoreChecked) return;
+    if (!this.connections.has(conn.id)) return;
+    const sharedByOthers = [...this.connections.values()].some((c) => c.id !== conn.id && c.label === conn.label);
+    if (sharedByOthers) return;
+    const tools = conn.manifest.filter((e) => e.source === 'dynamic' && e.origin);
+    try {
+      const key = this.#dynamicStoreKey(conn.label);
+      if (tools.length > 0) dynamicToolStore.set(key, tools);
+      else dynamicToolStore.delete(key);
+    } catch (err) {
+      console.error(`[mcp-tenant-lib] failed to persist dynamic tools for "${conn.label}": ${(err as Error).message}`);
     }
   }
 
@@ -472,26 +576,66 @@ export class Tenant<TSchema, TValues> {
    * specific one it wanted has already vanished, so re-targeting the sole
    * survivor (if there's exactly one) is still the best available guess.
    */
-  call(connectionId: string | undefined, name: string, args: unknown, timeoutMs = 10_000, reconnectGraceMs = RECONNECT_GRACE_MS): Promise<unknown> {
+  call(connectionId: string | undefined, name: string, args: unknown, timeoutMs = 10_000, reconnectGraceMs = RECONNECT_GRACE_MS, context?: CallContext): Promise<unknown> {
     const id = randomUUID();
     const promise = new Promise<unknown>((resolve, reject) => {
-      this.pendingCalls.set(id, { resolve, reject });
+      this.pendingCalls.set(id, { resolve, reject, onProgress: context?.onProgress });
       const timer = setTimeout(() => {
         if (this.pendingCalls.delete(id)) reject(new Error(`call to "${name}" timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       timer.unref();
     });
 
+    // Which socket connection the call was actually sent to — the only one
+    // worth telling about a cancel.
+    let sentToConnectionId: string | undefined;
+    const signal = context?.signal;
+    if (signal) {
+      const onAbort = () => {
+        const pending = this.pendingCalls.get(id);
+        if (!pending) return; // already resolved, rejected or timed out
+        this.pendingCalls.delete(id);
+        pending.reject(new Error(`call to "${name}" was cancelled`));
+        try {
+          const socket = sentToConnectionId ? this.connections.get(sentToConnectionId)?.socket : undefined;
+          if (socket && socket.readyState === socket.OPEN) socket.send(JSON.stringify({ type: 'cancel_call', id }));
+        } catch {
+          // best-effort: the page finishing work nobody waits for is harmless
+        }
+      };
+      if (signal.aborted) {
+        onAbort(); // cancelled before it was ever sent — nothing to send
+        return promise;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+      const detach = () => signal.removeEventListener('abort', onAbort);
+      promise.then(detach, detach);
+    }
+
     const send = (targetConnectionId: string | undefined) => {
       if (targetConnectionId) {
         const conn = this.connections.get(targetConnectionId);
         if (conn?.directCall) {
-          conn.directCall(name, args).then(
-            (result) => this.resolveCall(id, result),
+          // A directCall target gets the signal itself (it forwards the
+          // cancel upstream) and reports progress by calling onProgress.
+          const directContext: CallContext | undefined = context && {
+            signal: context.signal,
+            sessionId: context.sessionId,
+            onProgress: context.onProgress ? (progress) => this.progressCall(id, progress) : undefined,
+          };
+          let result: Promise<unknown>;
+          try {
+            result = Promise.resolve(conn.directCall(name, args, directContext));
+          } catch (err) {
+            result = Promise.reject(err); // a directCall that throws synchronously must not escape Tenant.call
+          }
+          result.then(
+            (value) => this.resolveCall(id, value),
             (err: unknown) => this.rejectCall(id, err instanceof Error ? err.message : String(err)),
           );
           return;
         }
+        sentToConnectionId = targetConnectionId;
         const payload: CallMessage = { type: 'call', id, name, args };
         const raw = JSON.stringify(payload);
         if (conn?.socket && conn.socket.readyState === conn.socket.OPEN) conn.socket.send(raw);
@@ -572,6 +716,17 @@ export class Tenant<TSchema, TValues> {
     if (!conn || !conn.socket || conn.socket.readyState !== conn.socket.OPEN) return false;
     conn.socket.send(JSON.stringify({ type: 'move_channel', channel: targetChannel }));
     return true;
+  }
+
+  /** Hands one progress report to whoever is waiting on call `id`; ignored once that call has finished. Never throws. */
+  progressCall(id: string, progress: CallProgress) {
+    const onProgress = this.pendingCalls.get(id)?.onProgress;
+    if (!onProgress) return;
+    try {
+      onProgress(progress);
+    } catch {
+      // a failing progress listener must not affect the call itself
+    }
   }
 
   resolveCall(id: string, result: unknown) {

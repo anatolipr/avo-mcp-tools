@@ -4,7 +4,10 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import open from 'open';
-import { getOrCreateTenant as getOrCreateTenantFor, tenants, startIdleSweep, startEmptySweep, createHttpServer, attachWebSocketServer } from 'mcp-tenant-lib';
+import {
+  getOrCreateTenant as getOrCreateTenantFor, tenants, startIdleSweep, startEmptySweep, createHttpServer, attachWebSocketServer,
+  setDynamicToolStore, createFileDynamicToolStore, setToolCallLogConfig, getToolCallLogConfig,
+} from 'mcp-tenant-lib';
 import { initialHelloState } from './types.js';
 import { registerHelloTools } from './tools/register.js';
 import { initProxyManager, shutdownProxyManager } from './proxy/proxy-manager.js';
@@ -32,6 +35,22 @@ const VERSION = readPackageVersion();
 const security = resolveSecurityOptions();
 const TRUTHY = new Set(['1', 'true', 'yes', 'on']);
 const forceKillPort = process.argv.includes('--force-kill-port') || TRUTHY.has((process.env.JS_BRIDGE_MCP_FORCE_KILL_PORT ?? '').toLowerCase());
+// Off by default: with it on, a tool an agent registered on a page
+// (register_page_tool_by_path/_by_code) is saved to disk and registered again
+// the next time that page connects under the same name, across page reloads
+// and server restarts. Its code still only runs when the tool is called.
+const persistPageTools = process.argv.includes('--persist-page-tools') || TRUTHY.has((process.env.JS_BRIDGE_MCP_PERSIST_PAGE_TOOLS ?? '').toLowerCase());
+const PAGE_TOOLS_PATH = process.env.PAGE_TOOLS_PATH ?? path.join(os.homedir(), '.js-bridge-mcp-page-tools.json');
+
+/** Starting values for the tool call log (the /calls window changes them at runtime); a missing or non-numeric variable leaves the built-in default. */
+function applyCallLogEnv() {
+  const limit = Number(process.env.JS_BRIDGE_MCP_CALL_LOG_LIMIT);
+  const ttlMinutes = Number(process.env.JS_BRIDGE_MCP_CALL_LOG_TTL_MINUTES);
+  setToolCallLogConfig({
+    limit: process.env.JS_BRIDGE_MCP_CALL_LOG_LIMIT && Number.isFinite(limit) ? limit : undefined,
+    ttlMs: process.env.JS_BRIDGE_MCP_CALL_LOG_TTL_MINUTES && Number.isFinite(ttlMinutes) ? ttlMinutes * 60_000 : undefined,
+  });
+}
 
 function pidsOnPort(port: number): number[] {
   try {
@@ -154,6 +173,7 @@ const DASHBOARD_DIR = path.join(packageRoot, 'dist', 'dashboard');
 const PROXY_UI_ROOT = path.join(packageRoot, __dirname.endsWith(`${path.sep}dist${path.sep}src`) ? 'dist/proxy-ui' : 'src/proxy-ui');
 const ADMIN_UI_DIR = path.join(PROXY_UI_ROOT, 'admin');
 const HUB_UI_DIR = path.join(PROXY_UI_ROOT, 'hub');
+const CALLS_UI_DIR = path.join(PROXY_UI_ROOT, 'calls');
 // Defaults to the home folder, not packageRoot: packageRoot varies with
 // however this instance happens to be installed/run (npx cache dir, a
 // reinstalled node_modules, a different checkout) and isn't guaranteed to
@@ -181,6 +201,7 @@ const httpServer = createHttpServer({
     '/connect.js': CLIENT_DIR,
     '/admin': ADMIN_UI_DIR,
     '/hub': HUB_UI_DIR,
+    '/calls': CALLS_UI_DIR,
   },
   // js-bridge-mcp typically bridges a single browser page per server; MCP
   // clients aren't expected to pin ?tenant= themselves (some, like VS Code
@@ -220,7 +241,9 @@ httpServer.on('connection', (socket) => {
 attachWebSocketServer(httpServer, PORT, undefined, initialHelloState);
 installProxyAdminRoutes(httpServer, PORT, security, { name: IDENTITY_NAME, version: VERSION });
 initAdminChannel();
-initProxyManager(PROXY_CONFIG_PATH, VERSION);
+applyCallLogEnv();
+if (persistPageTools) setDynamicToolStore(createFileDynamicToolStore(PAGE_TOOLS_PATH));
+initProxyManager(PROXY_CONFIG_PATH, VERSION, { port: PORT });
 
 // Closes upstream proxy clients before exiting, so stdio children (an `npx`
 // MCP server per proxy) stop with this process instead of outliving it.
@@ -239,6 +262,12 @@ httpServer.listen(PORT, () => {
   console.error(`[js-bridge-mcp] dashboard: ${url}`);
   console.error(`[js-bridge-mcp] proxy admin: ${url}/admin`);
   console.error(`[js-bridge-mcp] proxy hub: ${url}/hub`);
+  console.error(`[js-bridge-mcp] tool call log: ${url}/calls (keeps the last ${getToolCallLogConfig().limit} calls, ${Math.round(getToolCallLogConfig().ttlMs / 60_000)} min)`);
+  console.error(
+    persistPageTools
+      ? `[js-bridge-mcp] page tools: persisted to ${PAGE_TOOLS_PATH} and registered again when the same page reconnects`
+      : '[js-bridge-mcp] page tools: not persisted — pass --persist-page-tools (or set JS_BRIDGE_MCP_PERSIST_PAGE_TOOLS=1) to keep agent-registered page tools across reloads and restarts'
+  );
   console.error(`[js-bridge-mcp] serve legacy-page/hello-world.html separately: npm run start:static`);
   console.error(
     security.allowRemote

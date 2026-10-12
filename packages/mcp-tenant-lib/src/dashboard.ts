@@ -1,6 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tenants, dashboardEvents, isValidChannelName } from './tenant.js';
 import { REMOTE_REGISTER_BY_PATH_CALL, REMOTE_REGISTER_BY_CODE_CALL, REMOTE_UNREGISTER_CALL } from './client-bridge.js';
+import {
+  getToolCallLog, listToolCallSessions, clearToolCallLog, getToolCallLogConfig, setToolCallLogConfig,
+  buildToolCallReport, toolCallLogEvents, type ToolCallLogEntry, type ToolCallLogFilter, type ToolCallSpec,
+} from './call-log.js';
 
 export interface DashboardConnection {
   id: string;
@@ -195,6 +199,110 @@ async function handleRegisterRoute(
   return true;
 }
 
+function callLogFilterFrom(params: URLSearchParams): ToolCallLogFilter {
+  const status = params.get('status');
+  return {
+    sessionId: params.get('session') || undefined,
+    connection: params.get('connection') || undefined,
+    tool: params.get('tool') || undefined,
+    status: status === 'ok' || status === 'error' ? status : undefined,
+  };
+}
+
+/**
+ * A logged call's tool as it is defined right now, for buildToolCallReport.
+ * Looked up live rather than stored per entry: the definition is the thing
+ * the report's reader is about to change, so the current one is the one
+ * that matters. Undefined once the connection is gone.
+ */
+export function currentToolSpec(entry: ToolCallLogEntry): ToolCallSpec | undefined {
+  const connections = [...(tenants.get(entry.tenantId)?.connections.values() ?? [])];
+  for (const conn of connections) {
+    const tool = conn.manifest.find((t) => t.name === entry.tool);
+    if (tool) return { description: tool.description, params: tool.params };
+  }
+  return undefined;
+}
+
+/**
+ * The tool call log's HTTP surface (see call-log.ts), under
+ * /api/dashboard/calls: read (as JSON or as the Markdown report), change
+ * how much is kept, clear, and a change-notification stream.
+ */
+async function handleCallLogRoutes(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+  const configPayload = () => {
+    const { limit, ttlMs } = getToolCallLogConfig();
+    return { limit, ttlMinutes: Math.round(ttlMs / 60_000) };
+  };
+
+  if (url.pathname === '/api/dashboard/calls' && req.method === 'GET') {
+    const entries = getToolCallLog(callLogFilterFrom(url.searchParams));
+    const download = url.searchParams.get('download') === '1';
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    if (url.searchParams.get('format') === 'report') {
+      res.writeHead(200, {
+        'Content-Type': 'text/markdown; charset=utf-8',
+        ...(download ? { 'Content-Disposition': `attachment; filename="tool-call-report-${stamp}.md"` } : {}),
+      });
+      res.end(buildToolCallReport(entries, currentToolSpec));
+      return true;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      ...(download ? { 'Content-Disposition': `attachment; filename="tool-calls-${stamp}.json"` } : {}),
+    });
+    res.end(JSON.stringify({ config: configPayload(), sessions: listToolCallSessions(), entries }, null, download ? 2 : undefined));
+    return true;
+  }
+
+  if (url.pathname === '/api/dashboard/calls' && req.method === 'DELETE') {
+    const removed = clearToolCallLog(callLogFilterFrom(url.searchParams));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, removed }));
+    return true;
+  }
+
+  if (url.pathname === '/api/dashboard/calls/config' && req.method === 'POST') {
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'invalid JSON body' }));
+      return true;
+    }
+    setToolCallLogConfig({
+      limit: typeof body?.limit === 'number' ? body.limit : undefined,
+      ttlMs: typeof body?.ttlMinutes === 'number' ? body.ttlMinutes * 60_000 : undefined,
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, config: configPayload() }));
+    return true;
+  }
+
+  // Change pings only, no payload: the page re-reads /api/dashboard/calls
+  // with its own filters. Coalesced so a burst of calls is one ping.
+  if (url.pathname === '/api/dashboard/calls/stream' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.write('data: {}\n\n');
+    let timer: NodeJS.Timeout | undefined;
+    const ping = () => {
+      timer ??= setTimeout(() => {
+        timer = undefined;
+        try { res.write('data: {}\n\n'); } catch { /* client gone; 'close' below cleans up */ }
+      }, 250);
+    };
+    toolCallLogEvents.on('change', ping);
+    req.on('close', () => {
+      toolCallLogEvents.off('change', ping);
+      if (timer) clearTimeout(timer);
+    });
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Handles the dashboard HTTP routes against a raw node http.Server, the
  * same low-level style createHttpServer (http.ts) already uses (no
@@ -209,6 +317,8 @@ async function handleRegisterRoute(
  */
 export async function handleDashboardRoutes(req: IncomingMessage, res: ServerResponse, port: number): Promise<boolean> {
   const url = new URL(req.url ?? '/', `http://localhost:${port}`);
+
+  if (url.pathname.startsWith('/api/dashboard/calls')) return handleCallLogRoutes(req, res, url);
 
   if (url.pathname === '/api/dashboard' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });

@@ -194,6 +194,14 @@ export function attachWebSocketServer<TSchema, TValues>(httpServer: Server, port
         else t.resolveCall(msg.id, msg.result);
       }
 
+      if (msg.type === 'call_progress' && typeof msg.progress === 'number') {
+        t.progressCall(msg.id, {
+          progress: msg.progress,
+          total: typeof msg.total === 'number' ? msg.total : undefined,
+          message: typeof msg.message === 'string' ? msg.message : undefined,
+        });
+      }
+
       if (msg.type === 'resync') {
         const applied = t.restoreState(msg.schema as TSchema, msg.values as TValues, msg.submitted, msg.changedAt);
         console.error(applied

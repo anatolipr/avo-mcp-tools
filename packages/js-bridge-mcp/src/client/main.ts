@@ -34,7 +34,13 @@ function currentPageTools(): PageToolDef[] {
 // let, not const: reassigned wholesale (not mutated in place) on every bus
 // onChange below - onCall's closure reads fnByName live, so a reassignment
 // here is visible there without any extra plumbing.
-let { manifest, fnByName } = splitPageTools(currentPageTools());
+let { manifest, fnByName, contextNames } = splitPageTools(currentPageTools());
+
+// One AbortController per call still running, so a cancel_call from the
+// server (the MCP client cancelled) can abort the right one. Only a tool
+// that opted in with `context: true` ever sees the signal; for any other
+// tool a cancel just means its eventual result is ignored server-side.
+const runningCalls = new Map<string, AbortController>();
 
 // Optional page-authored manifest-level context (what kind of page this is,
 // cross-tool sequencing rules, shared domain concepts) - distinct from each
@@ -246,14 +252,28 @@ const socket = connectStateSocket<undefined, undefined>(
 
         const fn = fnByName.get(name);
         if (!fn) throw new Error(`no page tool named "${name}" — was it in window.__mcpTools when this script loaded?`);
+        const controller = new AbortController();
+        runningCalls.set(id, controller);
         // Page tools may be async (e.g. ones that fetch another document) —
         // await here so we send the resolved value, not a pending Promise
         // (which serializes to "{}" over the socket).
-        const result = await fn(args);
+        const result = contextNames.has(name)
+          ? await fn(args, {
+              signal: controller.signal,
+              progress: (progress, total, message) => {
+                if (typeof progress === 'number') socket.send({ type: 'call_progress', id, progress, total, message });
+              },
+            })
+          : await fn(args);
         socket.send({ type: 'call_result', id, result });
       } catch (err) {
-        socket.send({ type: 'call_result', id, error: String((err as Error).message) });
+        socket.send({ type: 'call_result', id, error: String((err as Error)?.message ?? err) });
+      } finally {
+        runningCalls.delete(id);
       }
+    },
+    onCancel(id) {
+      runningCalls.get(id)?.abort();
     },
     onDisconnect() {
       console.log('[js-bridge-mcp] disconnected, retrying...');
@@ -336,7 +356,7 @@ const socket = connectStateSocket<undefined, undefined>(
 // the server even though registerTool() itself succeeded with no error.
 toolBusReady.then(() => {
   (window as any).__mcpToolBus?.onChange(() => {
-    ({ manifest, fnByName } = splitPageTools(currentPageTools()));
+    ({ manifest, fnByName, contextNames } = splitPageTools(currentPageTools()));
     socket.send({ type: 'register_tools', tools: manifest, summary: pageSummary, appLabel });
     console.log(`[js-bridge-mcp] tool bus changed — re-sent ${manifest.length} tool(s)`);
   });

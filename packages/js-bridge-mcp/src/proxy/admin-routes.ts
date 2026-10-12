@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Server } from 'node:http';
 import { getRootTenant, isValidConnectionName, listRootTenants } from 'mcp-tenant-lib';
-import { addProxy, getProxyConfig, listProxies, pauseProxy, removeProxy, restartProxy, resumeProxy, updateProxy } from './proxy-manager.js';
+import { addProxy, completeProxyAuth, getProxyConfig, listProxies, pauseProxy, removeProxy, restartProxy, resumeProxy, updateProxy } from './proxy-manager.js';
 import type { ProxyConfig } from './types.js';
 import { checkRequest, isGuardedPath, type SecurityOptions } from '../security.js';
 
@@ -38,6 +38,20 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
+}
+
+/** The page a human lands on after approving (or refusing) an OAuth proxy. Every interpolated value comes from the query string or an upstream error, so all of it is escaped. */
+function sendAuthPage(res: ServerResponse, status: number, title: string, detail: string) {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(
+    `<!doctype html><meta charset="utf-8"><title>js-bridge-mcp — ${escapeHtml(title)}</title>` +
+    `<body style="font:15px/1.5 system-ui,sans-serif;max-width:520px;margin:4rem auto;padding:0 1rem">` +
+    `<h1 style="font-size:1.2rem">${escapeHtml(title)}</h1><p>${escapeHtml(detail)}</p><p><a href="/admin">Back to proxies</a></p></body>`,
+  );
+}
+
 /**
  * CRUD + pause/restart for proxy configs, mounted under /api/proxies. This
  * is js-bridge-mcp-specific (proxy-manager doesn't exist in mcp-tenant-lib's
@@ -53,6 +67,29 @@ export async function handleProxyAdminRoutes(req: IncomingMessage, res: ServerRe
   // freePortFromStaleInstance) — and anything else tell which version is up.
   if (url.pathname === '/api/identity' && req.method === 'GET') {
     sendJson(res, 200, { ...identity, pid: process.pid });
+    return true;
+  }
+
+  // Where an OAuth proxy's authorization server sends the human back (see
+  // proxy-manager.ts's completeProxyAuth). Outside /api on purpose: it is a
+  // top-level browser navigation arriving from another site, and it can only
+  // act on an authorization this server started — `state` is a random value
+  // minted for that one attempt.
+  if (url.pathname === '/oauth/callback' && req.method === 'GET') {
+    const state = url.searchParams.get('state') ?? '';
+    const code = url.searchParams.get('code') ?? '';
+    const upstreamError = url.searchParams.get('error');
+    if (upstreamError) {
+      sendAuthPage(res, 400, 'Authorization was not completed', `${upstreamError}${url.searchParams.get('error_description') ? `: ${url.searchParams.get('error_description')}` : ''}`);
+      return true;
+    }
+    if (!state || !code) {
+      sendAuthPage(res, 400, 'Authorization was not completed', 'The redirect is missing its "code" or "state" value.');
+      return true;
+    }
+    const result = await completeProxyAuth(state, code);
+    if (result.ok) sendAuthPage(res, 200, 'Proxy authorized', `"${result.slug}" is authorized and connecting. You can close this tab.`);
+    else sendAuthPage(res, 400, 'Authorization failed', result.error ?? 'unknown error');
     return true;
   }
 

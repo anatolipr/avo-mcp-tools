@@ -563,7 +563,7 @@ test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed 
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].name, '__register_tool_by_code__');
-  assert.deepEqual(calls[0].args, { name: 'save_note', description: 'dynamic by code', code: 'return 1;' });
+  assert.deepEqual(calls[0].args, { name: 'save_note', description: 'dynamic by code', code: 'return 1;', params: {} });
 });
 
 test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed via register_page_tool_by_path', () => {
@@ -581,7 +581,7 @@ test('a same-labeled reconnect gets its dynamic (origin-bearing) tools replayed 
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].name, '__register_tool_by_path__');
-  assert.deepEqual(calls[0].args, { name: 'save_note', description: 'dynamic by path', path: 'myApp.save' });
+  assert.deepEqual(calls[0].args, { name: 'save_note', description: 'dynamic by path', path: 'myApp.save', params: {} });
 });
 
 test('replay is skipped for an unlabeled connection, and for a label still shared by another live connection', () => {

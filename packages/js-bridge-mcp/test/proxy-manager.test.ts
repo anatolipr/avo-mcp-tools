@@ -307,8 +307,8 @@ test('a tool whose schema has an enum, a union and a free-form object is registe
       name: 'richfake__search',
       arguments: { mode: 'deep', filter: 7, meta: { nested: { ok: true } } },
     });
-    // A proxied result arrives as the upstream's whole tool result, JSON-encoded.
-    assert.equal(JSON.parse(result.content[0].text).content[0].text, 'search deep filter=7 meta={"nested":{"ok":true}}');
+    // A proxied result arrives as the upstream's own content blocks, not a JSON-encoded copy of them.
+    assert.equal(result.content[0].text, 'search deep filter=7 meta={"nested":{"ok":true}}');
 
     const rejected: any = await client.callTool({ name: 'richfake__search', arguments: { mode: 'sideways' } }).catch((err) => ({ isError: true, content: [{ text: String(err) }] }));
     assert.equal(rejected.isError, true, 'a value outside the enum must be rejected');

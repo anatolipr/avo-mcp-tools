@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { getOrCreateRootTenant, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
+import { buildToolCallReport, currentToolSpec, getOrCreateRootTenant, getToolCallLog, type CallContext, type ToolManifestEntry, type ToolParamSpec } from 'mcp-tenant-lib';
 import { addProxy, getProxyConfig, listProxies, pauseProxy, removeProxy, restartProxy, resumeProxy, updateProxy } from './proxy-manager.js';
 import type { ProxyConfig, ProxyTransport } from './types.js';
 
@@ -67,6 +67,8 @@ function configFromArgs(args: {
   headers?: string;
   timeoutSeconds?: number;
   description?: string;
+  oauth?: boolean;
+  lazy?: boolean;
 }): Omit<ProxyConfig, 'id' | 'paused' | 'slug'> {
   const config: Omit<ProxyConfig, 'id' | 'paused' | 'slug'> = {
     transport: args.transport,
@@ -78,6 +80,9 @@ function configFromArgs(args: {
   };
   if (typeof args.headers === 'string') config.headers = args.headers.trim() ? parseHeaders(args.headers) : undefined;
   if (typeof args.timeoutSeconds === 'number') config.callTimeoutMs = args.timeoutSeconds > 0 ? args.timeoutSeconds * 1000 : undefined;
+  // Same keep-when-absent rule: only a caller that names these changes them.
+  if (typeof args.oauth === 'boolean') config.oauth = args.oauth;
+  if (typeof args.lazy === 'boolean') config.lazy = args.lazy;
   return config;
 }
 
@@ -87,6 +92,8 @@ const commandParam: ToolParamSpec = { type: 'string', description: 'Executable t
 const urlParam: ToolParamSpec = { type: 'string', description: 'Upstream server URL (sse/streamableHttp only).', optional: true };
 const headersParam: ToolParamSpec = { type: 'string', description: 'HTTP headers sent to the upstream (sse/streamableHttp only), as "Name: Value" — one per line, e.g. "Authorization: Bearer abc".', optional: true };
 const timeoutParam: ToolParamSpec = { type: 'number', description: 'Per-call timeout for this proxy\'s tools, in seconds (default 60).', optional: true };
+const oauthParam: ToolParamSpec = { type: 'boolean', description: 'Authorize with OAuth (sse/streamableHttp only). The proxy then reports an authUrl a human must open once.', optional: true };
+const lazyParam: ToolParamSpec = { type: 'boolean', description: 'Expose only list_tools and call_tool instead of one tool per upstream tool — use for a large server.', optional: true };
 const descriptionParam: ToolParamSpec = { type: 'string', description: 'Optional human-readable note about this proxy.', optional: true };
 const slugParam: ToolParamSpec = { type: 'string', description: 'The proxy\'s slug.' };
 const transportParam: ToolParamSpec = { type: 'string', description: '"stdio", "sse", or "streamableHttp".' };
@@ -117,6 +124,8 @@ const manifest: ToolManifestEntry[] = [
       url: urlParam,
       headers: headersParam,
       timeoutSeconds: timeoutParam,
+      oauth: oauthParam,
+      lazy: lazyParam,
       description: descriptionParam,
     },
     source: 'host',
@@ -124,7 +133,7 @@ const manifest: ToolManifestEntry[] = [
   {
     name: 'edit_mcp_proxy',
     description:
-      'Replaces an existing proxy\'s config (same fields and quoting rules as add_mcp_proxy) and restarts it under the new config. Its current paused/running state is preserved. Fields not given fall back to empty, so pass the full desired config (view_mcp_proxy returns it), not just what changed — except headers and timeoutSeconds, which keep their current value when omitted (pass "" or 0 to clear).',
+      'Replaces an existing proxy\'s config (same fields and quoting rules as add_mcp_proxy) and restarts it under the new config. Its current paused/running state is preserved. Fields not given fall back to empty, so pass the full desired config (view_mcp_proxy returns it), not just what changed — except headers, timeoutSeconds, oauth and lazy, which keep their current value when omitted (pass "", 0 or false to clear).',
     params: {
       slug: { type: 'string', description: 'The EXISTING proxy\'s current slug, to find it.' },
       newSlug: { type: 'string', description: 'The slug to rename it to — same as slug if not renaming.' },
@@ -135,6 +144,8 @@ const manifest: ToolManifestEntry[] = [
       url: urlParam,
       headers: headersParam,
       timeoutSeconds: timeoutParam,
+      oauth: oauthParam,
+      lazy: lazyParam,
       description: descriptionParam,
     },
     source: 'host',
@@ -163,9 +174,21 @@ const manifest: ToolManifestEntry[] = [
     params: { slug: slugParam },
     source: 'host',
   },
+  {
+    name: 'tool_call_report',
+    description:
+      'Returns a Markdown report of the recent tool calls made through this server — per tool: call and error counts, the error messages with the arguments that caused them, which parameters callers passed against which are declared, retries after an error, durations and result sizes. Use it to find tools whose description or parameters need improving. Covers only calls still in the rolling log.',
+    params: {
+      session: { type: 'string', description: 'Limit to one MCP session id, or "current" for this session. Omit for all sessions.', optional: true },
+      tool: { type: 'string', description: 'Limit to tool names containing this text.', optional: true },
+      connection: { type: 'string', description: 'Limit to one connection prefix, e.g. "htmlpaint".', optional: true },
+    },
+    source: 'host',
+    annotations: { readOnlyHint: true },
+  },
 ];
 
-async function dispatchAdminCall(name: string, args: unknown): Promise<unknown> {
+async function dispatchAdminCall(name: string, args: unknown, context?: CallContext): Promise<unknown> {
   const a = (args ?? {}) as Record<string, any>;
   switch (name) {
     case 'list_mcp_proxies':
@@ -191,12 +214,16 @@ async function dispatchAdminCall(name: string, args: unknown): Promise<unknown> 
       return { ok: await restartProxy(resolveIdBySlug(a.slug)) };
     case 'remove_mcp_proxy':
       return { ok: await removeProxy(resolveIdBySlug(a.slug)) };
+    case 'tool_call_report': {
+      const sessionId = a.session === 'current' ? (context?.sessionId ?? 'no-session') : (a.session || undefined);
+      return buildToolCallReport(getToolCallLog({ sessionId, tool: a.tool || undefined, connection: a.connection || undefined }), currentToolSpec);
+    }
     default:
       throw new Error(`unknown admin tool "${name}"`);
   }
 }
 
-/** Registers the "admin" root connection's server-owned direct connection so its tools (admin__add_mcp_proxy etc.) are always visible in tools/list, independent of any browser tab and with no join_channel needed. Tool set is static (always these 8 ops), so unlike a proxy's own manifest there's no resync hook needed here. */
+/** Registers the "admin" root connection's server-owned direct connection so its tools (admin__add_mcp_proxy etc.) are always visible in tools/list, independent of any browser tab and with no join_channel needed. Tool set is static (the proxy ops plus tool_call_report), so unlike a proxy's own manifest there's no resync hook needed here. */
 export function initAdminChannel(): void {
   const connectionId = randomUUID();
   const { tenant } = getOrCreateRootTenant(ADMIN_ROOT_NAME, undefined, {});
@@ -204,6 +231,6 @@ export function initAdminChannel(): void {
   tenant.updateConnectionManifest(
     connectionId,
     manifest,
-    'Manage MCP-server proxies for js-bridge-mcp: add/view/edit/pause/resume/restart/remove. See the hub page separately to actually USE a proxy\'s tools once it\'s added here.',
+    'Manage MCP-server proxies for js-bridge-mcp: add/view/edit/pause/resume/restart/remove, and read the tool call report. See the hub page separately to actually USE a proxy\'s tools once it\'s added here.',
   );
 }

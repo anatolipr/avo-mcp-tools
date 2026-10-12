@@ -1,0 +1,287 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>js-bridge-mcp — Tool calls</title>
+<style>
+  /* Same token set as the dashboard and /admin — kept in sync by hand, these
+     are static pages with no shared build step. */
+  :root {
+    color-scheme: light dark;
+    --border: light-dark(#0000001f, #ffffff2e);
+    --border-strong: light-dark(#00000038, #ffffff4a);
+    --hover: light-dark(#00000010, #ffffff14);
+    --bg: light-dark(#ffffff, #1a1a1a);
+    --bg-subtle: light-dark(#00000008, #ffffff0d);
+    --fg: light-dark(#111111, #f0f0f0);
+    --accent: light-dark(#2563eb, #3b82f6);
+    --danger: light-dark(#dc2626, #fca5a5);
+    --success: light-dark(#16a34a, #4ade80);
+  }
+  :root[data-theme='light'] { color-scheme: light; }
+  :root[data-theme='dark']  { color-scheme: dark; }
+
+  body { font: 13px/1.4 system-ui, sans-serif; max-width: 1280px; margin: 1.2rem auto; padding: 0 1rem; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 1.15rem; margin: 0; }
+  .header-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .back-link { color: inherit; text-decoration: none; opacity: 0.6; margin-right: 4px; }
+  .back-link:hover { opacity: 1; color: var(--accent); }
+  .hint { opacity: 0.7; font-size: 12px; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 0.6rem 0; }
+  .bar label { display: inline-flex; align-items: center; gap: 4px; }
+  input, select, button { font: inherit; font-size: 12px; padding: 2px 6px; background: var(--bg); color: inherit; border: 1px solid var(--border-strong); border-radius: 6px; }
+  input[type='number'] { width: 5.5em; }
+  button { cursor: pointer; }
+  button:hover { background: var(--hover); border-color: var(--accent); }
+  .spacer { flex: 1 1 auto; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  th { font-weight: 600; opacity: 0.7; font-size: 12px; }
+  tr.call { cursor: pointer; }
+  tr.call:hover { background: var(--hover); }
+  td.mono, .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  .ok { color: var(--success); }
+  .err { color: var(--danger); }
+  .chip { display: inline-block; padding: 0 6px; border-radius: 999px; font-size: 11px; color: #fff; }
+  tr.detail td { background: var(--bg-subtle); white-space: normal; }
+  tr.detail pre { margin: 4px 0 8px; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
+  tr.group td { background: var(--bg-subtle); font-weight: 600; padding-top: 8px; }
+  .empty { padding: 2rem 0; text-align: center; opacity: 0.6; }
+  col.c-time { width: 78px; } col.c-session { width: 150px; } col.c-conn { width: 130px; } col.c-tool { width: 210px; } col.c-ms { width: 60px; } col.c-status { width: 52px; }
+</style>
+<script>
+  (function () {
+    var stored = localStorage.getItem('js-bridge-mcp-theme');
+    if (stored === 'light' || stored === 'dark') document.documentElement.setAttribute('data-theme', stored);
+  })();
+</script>
+</head>
+<body>
+<div class="header-row">
+  <h1><a href="/" class="back-link" title="Back to dashboard">←</a> Tool calls</h1>
+  <span class="hint" id="summary"></span>
+</div>
+<p class="hint">Every tool call made through this server's MCP endpoint, newest first. Kept in memory only. Filter by MCP session when several agents work at once. <strong>Export report</strong> produces a Markdown summary (errors, parameter usage, retries) to give an LLM that should improve the tools; an agent can get the same through <code>admin__tool_call_report</code>.</p>
+
+<div class="bar">
+  <label>Session <select id="f-session"></select></label>
+  <label>Connection <select id="f-connection"></select></label>
+  <label>Tool <input id="f-tool" placeholder="name contains…" size="16"></label>
+  <label><input type="checkbox" id="f-errors"> errors only</label>
+  <label><input type="checkbox" id="f-group"> group by session</label>
+  <label><input type="checkbox" id="f-live" checked> live</label>
+</div>
+<div class="bar">
+  <label>Keep last <input type="number" id="c-limit" min="0" max="5000" step="10"> calls</label>
+  <label>for <input type="number" id="c-ttl" min="1" max="10080" step="5"> min</label>
+  <span class="hint">(0 calls = logging off)</span>
+  <span class="spacer"></span>
+  <button id="b-json" title="Download the calls shown, as JSON">Export JSON</button>
+  <button id="b-report" title="Download a Markdown report of the calls shown">Export report</button>
+  <button id="b-copy" title="Copy that report to the clipboard">Copy report</button>
+  <button id="b-clear" title="Remove the calls shown from the log">Clear</button>
+</div>
+
+<table>
+  <colgroup><col class="c-time"><col class="c-session"><col class="c-conn"><col class="c-tool"><col class="c-ms"><col class="c-status"><col></colgroup>
+  <thead><tr><th>Time</th><th>Session</th><th>Connection</th><th>Tool</th><th>ms</th><th>Status</th><th>Arguments</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<div class="empty" id="empty" hidden>No tool calls in the log for this filter.</div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const rows = $('rows');
+const expanded = new Set(); // ids of calls whose detail row is open — survives a refresh
+let lastData = { config: { limit: 0, ttlMinutes: 0 }, sessions: [], entries: [] };
+
+// Everything shown here (arguments, results, errors, client names) is
+// whatever an agent or a tool produced: DOM nodes and textContent only,
+// never innerHTML.
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === 'class') node.className = value;
+    else if (key === 'text') node.textContent = value;
+    else if (key === 'style') node.style.cssText = value;
+    else node.setAttribute(key, value);
+  }
+  node.append(...children);
+  return node;
+}
+
+function shortId(id) {
+  return id.length > 8 ? id.slice(0, 8) : id;
+}
+
+// Stable color per session, so one agent's calls are recognizable at a glance.
+function sessionColor(id) {
+  let hash = 0;
+  for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return `hsl(${hash % 360} 55% 42%)`;
+}
+
+function sessionLabel(sessionId, client) {
+  return `${client ? `${client} · ` : ''}${shortId(sessionId)}`;
+}
+
+function filterParams() {
+  const params = new URLSearchParams();
+  if ($('f-session').value) params.set('session', $('f-session').value);
+  if ($('f-connection').value) params.set('connection', $('f-connection').value);
+  if ($('f-tool').value.trim()) params.set('tool', $('f-tool').value.trim());
+  if ($('f-errors').checked) params.set('status', 'error');
+  return params;
+}
+
+function pretty(json) {
+  try { return JSON.stringify(JSON.parse(json), null, 2); } catch { return json; } // cut-off JSON does not parse; show it as it is
+}
+
+// Rebuilds a <select>'s options while keeping the current choice, even when
+// that choice has just aged out of the log.
+function fillSelect(select, options, allLabel) {
+  const current = select.value;
+  select.replaceChildren(el('option', { value: '', text: allLabel }));
+  for (const { value, label } of options) select.append(el('option', { value, text: label }));
+  if (current && !options.some((o) => o.value === current)) select.append(el('option', { value: current, text: `${shortId(current)} (no calls left)` }));
+  select.value = current;
+}
+
+function detailRow(e) {
+  const cell = el('td', { colspan: '7' });
+  cell.append(
+    el('div', { class: 'hint', text: `${new Date(e.at).toLocaleString()} · session ${e.sessionId}${e.client ? ` (${e.client})` : ''} · ${e.kind} connection "${e.connection}" · ${e.durationMs} ms · result ${e.resultChars} chars` }),
+    el('div', { class: 'hint', text: `Arguments${e.argsTruncated ? ' (cut short)' : ''}:` }),
+    el('pre', { class: 'mono', text: pretty(e.args) }),
+    el('div', { class: `hint ${e.ok ? '' : 'err'}`, text: e.ok ? `Result${e.resultChars > (e.result ?? '').length ? ' (start only)' : ''}:` : 'Error:' }),
+    el('pre', { class: 'mono', text: e.ok ? (e.result ?? '') : (e.error ?? '') }),
+  );
+  return el('tr', { class: 'detail' }, cell);
+}
+
+function callRow(e) {
+  const chip = el('span', { class: 'chip', style: `background:${sessionColor(e.sessionId)}`, text: sessionLabel(e.sessionId, e.client), title: e.sessionId });
+  const tr = el('tr', { class: 'call' },
+    el('td', { class: 'mono', text: new Date(e.at).toLocaleTimeString() }),
+    el('td', {}, chip),
+    el('td', { text: e.connection, title: e.connection }),
+    el('td', { class: 'mono', text: e.tool, title: e.tool }),
+    el('td', { class: 'mono', text: String(e.durationMs) }),
+    el('td', { class: e.ok ? 'ok' : 'err', text: e.ok ? 'ok' : 'error' }),
+    el('td', { class: 'mono', text: e.ok ? e.args : `${e.args}  →  ${e.error ?? ''}` }),
+  );
+  tr.addEventListener('click', () => {
+    if (expanded.has(e.id)) expanded.delete(e.id); else expanded.add(e.id);
+    render();
+  });
+  return tr;
+}
+
+function render() {
+  const { config, sessions, entries } = lastData;
+  // Never overwrite a number the human is in the middle of typing.
+  if (document.activeElement !== $('c-limit')) $('c-limit').value = config.limit;
+  if (document.activeElement !== $('c-ttl')) $('c-ttl').value = config.ttlMinutes;
+
+  fillSelect($('f-session'), sessions.map((s) => ({
+    value: s.sessionId,
+    label: `${sessionLabel(s.sessionId, s.client)} — ${s.calls} call(s)${s.errors ? `, ${s.errors} error(s)` : ''}`,
+  })), `All sessions (${sessions.length})`);
+  const connections = [...new Set([...entries.map((e) => e.connection), $('f-connection').value].filter(Boolean))].sort();
+  fillSelect($('f-connection'), connections.map((c) => ({ value: c, label: c })), 'All connections');
+
+  const newestFirst = [...entries].sort((a, b) => b.at - a.at);
+  const errors = newestFirst.filter((e) => !e.ok).length;
+  $('summary').textContent = `${newestFirst.length} call(s) shown, ${errors} error(s)`;
+  $('empty').hidden = newestFirst.length > 0;
+
+  const fragment = document.createDocumentFragment();
+  const append = (e) => {
+    fragment.append(callRow(e));
+    if (expanded.has(e.id)) fragment.append(detailRow(e));
+  };
+  if ($('f-group').checked) {
+    const bySession = new Map();
+    for (const e of newestFirst) bySession.set(e.sessionId, [...(bySession.get(e.sessionId) ?? []), e]);
+    for (const [sessionId, calls] of bySession) {
+      const failed = calls.filter((e) => !e.ok).length;
+      fragment.append(el('tr', { class: 'group' }, el('td', { colspan: '7', text: `${sessionLabel(sessionId, calls[0].client)} — ${calls.length} call(s), ${failed} error(s) — ${sessionId}` })));
+      calls.forEach(append);
+    }
+  } else {
+    newestFirst.forEach(append);
+  }
+  rows.replaceChildren(fragment);
+}
+
+async function refresh() {
+  try {
+    const res = await fetch(`/api/dashboard/calls?${filterParams()}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    lastData = await res.json();
+    render();
+  } catch (err) {
+    $('summary').textContent = `could not load the log: ${err.message}`;
+  }
+}
+
+for (const id of ['f-session', 'f-connection', 'f-errors']) $(id).addEventListener('change', refresh);
+$('f-group').addEventListener('change', render);
+let toolTimer;
+$('f-tool').addEventListener('input', () => { clearTimeout(toolTimer); toolTimer = setTimeout(refresh, 200); });
+
+// How much the server keeps. Sent on change (blur / Enter), not per keystroke,
+// so typing "50" never briefly sets the limit to 5 and drops the log.
+async function saveConfig() {
+  const limit = Number($('c-limit').value);
+  const ttlMinutes = Number($('c-ttl').value);
+  if (!Number.isFinite(limit) || !Number.isFinite(ttlMinutes) || $('c-limit').value === '' || $('c-ttl').value === '') return;
+  try {
+    await fetch('/api/dashboard/calls/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ limit, ttlMinutes }) });
+  } catch { /* the next refresh shows what the server really has */ }
+  refresh();
+}
+$('c-limit').addEventListener('change', saveConfig);
+$('c-ttl').addEventListener('change', saveConfig);
+
+function download(format) {
+  const params = filterParams();
+  params.set('download', '1');
+  if (format === 'report') params.set('format', 'report');
+  // A plain navigation to a Content-Disposition: attachment response saves the file and leaves this page as it is.
+  window.location.href = `/api/dashboard/calls?${params}`;
+}
+$('b-json').addEventListener('click', () => download('json'));
+$('b-report').addEventListener('click', () => download('report'));
+$('b-copy').addEventListener('click', async () => {
+  const button = $('b-copy');
+  try {
+    const params = filterParams();
+    params.set('format', 'report');
+    const text = await fetch(`/api/dashboard/calls?${params}`).then((r) => r.text());
+    await navigator.clipboard.writeText(text);
+    button.textContent = 'Copied ✓';
+  } catch {
+    button.textContent = 'Copy failed';
+  }
+  setTimeout(() => { button.textContent = 'Copy report'; }, 1500);
+});
+$('b-clear').addEventListener('click', async () => {
+  const params = filterParams();
+  const scope = [...params.keys()].length ? 'the calls matching the current filter' : 'the whole log';
+  if (!confirm(`Remove ${scope}?`)) return;
+  try { await fetch(`/api/dashboard/calls?${params}`, { method: 'DELETE' }); } catch { /* refresh below shows the truth */ }
+  expanded.clear();
+  refresh();
+});
+
+// The server only pings on change; the page re-reads with its own filters.
+// EventSource reconnects by itself after a server restart.
+const stream = new EventSource('/api/dashboard/calls/stream');
+stream.onmessage = () => { if ($('f-live').checked) refresh(); };
+$('f-live').addEventListener('change', () => { if ($('f-live').checked) refresh(); });
+refresh();
+</script>
+</body>
+</html>

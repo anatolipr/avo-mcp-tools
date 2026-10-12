@@ -61,11 +61,15 @@ connected to anything.
 | `--allow-remote` | `JS_BRIDGE_MCP_ALLOW_REMOTE=1` | Accept connections from other devices. Default: this machine only. |
 | `--allow-origin <url>` (repeatable) | `JS_BRIDGE_MCP_ALLOWED_ORIGINS=<url>,<url>` | Let page JavaScript on that web origin call `/mcp` and `/api/*`. |
 | `--force-kill-port` | `JS_BRIDGE_MCP_FORCE_KILL_PORT=1` | Kill whatever holds the port, even if it is not js-bridge-mcp. |
+| `--persist-page-tools` | `JS_BRIDGE_MCP_PERSIST_PAGE_TOOLS=1` | Save agent-registered page tools and register them again when the same page reconnects. Default: off. See "Keeping registered page tools". |
 | | `PORT` | Port to listen on. Default 8766. |
 | | `PROXY_CONFIG_PATH` | Proxy config file. Default `~/.js-bridge-mcp-proxies.json`. |
 | | `PROXY_CALL_TIMEOUT_MS` | Default timeout for a proxied tool call. Default 60000. |
 | | `JS_BRIDGE_MCP_PROXY_RECONNECT=0` | Do not auto-reconnect a proxy whose upstream dropped. |
 | | `JS_BRIDGE_MCP_NO_OPEN=1` | Do not open the dashboard in a browser on start. |
+| | `PAGE_TOOLS_PATH` | File for `--persist-page-tools`. Default `~/.js-bridge-mcp-page-tools.json`. |
+| | `JS_BRIDGE_MCP_CALL_LOG_LIMIT` | How many tool calls the call log keeps. Default 200, maximum 5000, 0 turns the log off. |
+| | `JS_BRIDGE_MCP_CALL_LOG_TTL_MINUTES` | How long the call log keeps a call. Default 60. |
 
 On start, the server replaces an older js-bridge-mcp instance that still
 holds its port. A process that is not js-bridge-mcp is left running and the
@@ -114,6 +118,76 @@ then appear in every session, prefixed `<slug>__`.
 - HTTP `headers` (for `sse` / `streamableHttp` proxies) can be set from the
   JSON form in `/admin` or with the `headers` parameter of the admin tools.
   An edit that does not mention `headers` keeps the existing ones.
+- A proxied tool's result reaches the MCP client as the upstream sent it:
+  its content blocks (text, image, audio, resource) and its `isError` flag.
+  Tool `annotations` (`readOnlyHint`, `destructiveHint`, ...) are passed
+  through to `tools/list`.
+- When the MCP client cancels a call, the cancel is sent to the upstream.
+  When the client asks for progress, the upstream's progress notifications
+  are sent back to it. Neither changes a call's timeout.
+
+#### OAuth
+
+Set `oauth` on an `sse` / `streamableHttp` proxy (the checkbox in `/admin`,
+`"oauth": true` in the JSON form, or the `oauth` parameter of the admin
+tools) for an upstream that uses the MCP authorization flow. The proxy then
+shows **authorization required** with an **Authorize…** link in `/admin`
+(`authUrl` in `admin__list_mcp_proxies`). Open the link, approve, and the
+upstream redirects to `http://localhost:<port>/oauth/callback`, which
+finishes the flow and connects the proxy. The link is never opened for you.
+
+- Tokens are stored next to the proxy config, in
+  `~/.js-bridge-mcp-proxies-oauth.json` (owner-only, `0600`), and refreshed
+  automatically. A restart does not ask for approval again.
+- Removing a proxy, changing its `url`, or turning `oauth` off deletes its
+  tokens.
+- For an upstream without dynamic client registration, use the JSON form:
+  `"oauth": { "clientId": "...", "clientSecret": "...", "scope": "..." }`
+  (all three optional). Register `http://localhost:<port>/oauth/callback`
+  as the redirect URI there.
+
+#### Lazy proxies
+
+A proxy normally adds one tool per upstream tool to every session's
+`tools/list`. Set `lazy` (the checkbox in `/admin`, `"lazy": true`, or the
+`lazy` parameter of the admin tools) and it adds two instead:
+
+- `<slug>__list_tools` — the upstream's tool names and one-line
+  descriptions; pass `tool` for one tool's full description and input
+  JSON Schema.
+- `<slug>__call_tool` — calls one upstream tool: `{ "tool": "<name>",
+  "args": { ... } }`.
+
+Use it for a large upstream server that is needed only now and then. The
+upstream validates the arguments; the call log records the upstream tool's
+own name.
+
+## Tool call log
+
+`/calls` (the **Tool calls** link on the dashboard, in its own window) lists
+the recent tool calls made through `/mcp`: time, MCP session, connection,
+tool, duration, result or error, and the arguments. Click a row for the full
+arguments and the start of the result.
+
+- **Sessions.** Each call carries the id of the MCP session that made it and
+  that client's name. Filter by session, or tick **group by session**, when
+  more than one agent uses the server at once. Connection, tool name and
+  errors-only filters are also there.
+- **How much is kept.** The last N calls, for M minutes — both set in the
+  window (or with the environment variables above). The log is in memory
+  only and is gone on restart. Arguments longer than 4000 characters and
+  results longer than 600 are cut.
+- **Export.** **Export JSON** saves the calls shown. **Export report** saves
+  a Markdown report of them, written for an LLM that should improve the
+  tools: per tool, call and error counts, each distinct error with the
+  arguments that caused it, which parameters callers passed against which
+  the tool declares, calls repeated straight after an error, durations and
+  result sizes. An agent gets the same report with
+  `admin__tool_call_report` (`session: "current"` limits it to its own
+  calls).
+
+The log holds tool arguments, so its routes (`/api/dashboard/calls`) are
+guarded like the rest of `/api/*`.
 
 ## Connect an agent
 
@@ -346,16 +420,26 @@ Schema per entry:
   it does, preconditions ("call X first"), and side effects. See
   `get_embed_snippet`'s description in `src/tools/hello-tools.ts` for the bar
   to hit.
-- **`params`** — flat object only, values are `{ type, description?, optional? }`
-  with `type` one of `"string"` / `"number"` / `"boolean"`. No nested objects
-  or arrays — the server's JSON→zod converter only supports these three
-  primitives and throws a registration error otherwise. Need structured data?
-  Encode it as a JSON string param and `JSON.parse` inside `fn`.
+- **`params`** — an object of `{ type, description?, optional? }` values.
+  `type` is `"string"` (optionally with `enum: [...]`), `"number"`,
+  `"boolean"`, `"array"` (with an `items` spec of this same shape),
+  `"object"` (with a `properties` map of this same shape), or `"any"`.
 - **`example`** — a realistic call, useful both as page-source documentation
   and as something you should actually try once connected.
+- **`annotations`** — optional MCP hints for the client, e.g.
+  `{ readOnlyHint: true }` (the client may call it without asking) or
+  `{ destructiveHint: true }`.
+- **`context`** — optional. Set `true` and `fn` is called as
+  `fn(args, { signal, progress })`: `signal` aborts when the MCP client
+  cancels the call, and `progress(done, total?, message?)` reports progress
+  to it.
 - **`fn`** — called with a single args object matching `params` (never
   positional args). Its return value, or a thrown `Error`'s message, becomes
-  the tool call's result. `fn` never leaves the browser — the bridge strips
+  the tool call's result. To return an image, return an MCP tool result:
+  `{ content: [{ type: 'image', data: '<base64>', mimeType: 'image/png' }] }`
+  (an object with only `content` / `isError`, whose `content` is a non-empty
+  list of MCP content blocks, is passed to the client as it is; any other
+  value is returned as JSON text). `fn` never leaves the browser — the bridge strips
   it before talking to the server, which only ever sees
   `name`/`description`/`params`/`example` and dispatches calls back by
   `name` against its local copy of `window.__mcpTools`.
@@ -604,6 +688,22 @@ specific):
   (one the page itself defined in `window.__mcpTools`) — errors clearly
   instead of silently no-op'ing if the name isn't a currently-tracked
   dynamic registration.
+
+#### Keeping registered page tools
+
+By default a tool registered this way lasts until its page reloads (a quick
+reload under the same name gets it back from memory; a server restart or a
+closed tab loses it). Start the server with `--persist-page-tools` to keep
+such tools: each is saved, with its code or path and its `params`, to
+`~/.js-bridge-mcp-page-tools.json` (owner-only, `0600`) under the page's
+connection name, and registered again the next time a page connects under
+that name. `unregister_page_tool` removes it from the file. A tool that
+fails to register again (its `window.*` path is gone) is dropped. Entries
+not used for 90 days are dropped.
+
+This is off by default because it makes agent-written code outlive the
+session that wrote it. The code is compiled on reconnect and runs only when
+the tool is called.
 
 All three accept an optional connection `id` (from `describe_tools`'
 `connections` array — omit when only one connection is live, same

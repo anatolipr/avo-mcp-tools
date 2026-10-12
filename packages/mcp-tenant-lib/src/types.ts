@@ -11,7 +11,8 @@ export type ServerMessage<TSchema = unknown, TValues = unknown> =
   | { type: 'waiting'; waiting: boolean }
   | { type: 'identify'; label?: string }
   | MoveChannelMessage
-  | CallMessage;
+  | CallMessage
+  | CancelCallMessage;
 
 export interface SetMessage {
   type: 'set';
@@ -132,6 +133,30 @@ export interface ToolManifestEntry {
    * routinely run longer than a page tool does.
    */
   timeoutMs?: number;
+  /**
+   * MCP tool annotations, passed through to tools/list unchanged — lets a
+   * client auto-approve a tool marked read-only, or warn before a
+   * destructive one. Set by a page on its own tool definition, or copied
+   * from an upstream MCP server's tool by js-bridge-mcp's proxy-manager.
+   * Hints only: nothing here is enforced.
+   */
+  annotations?: ToolAnnotationsSpec;
+  /**
+   * For a dispatcher tool that calls another tool by name (js-bridge-mcp's
+   * lazy proxy `call_tool`): the param that holds the real tool name. Only
+   * read by the tool call log, so a lazy proxy's calls are grouped per
+   * upstream tool instead of all under the dispatcher's own name.
+   */
+  innerToolParam?: string;
+}
+
+/** Same fields as the MCP spec's ToolAnnotations. */
+export interface ToolAnnotationsSpec {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
 }
 
 export interface RegisterToolsMessage {
@@ -178,6 +203,30 @@ export interface CallMessage {
   args: unknown;
 }
 
+/**
+ * Server push telling a page that the MCP client cancelled the call with
+ * this `id`. Sent only for an explicit cancel, not for a server-side
+ * timeout. The page may abort the work; any call_result it still sends is
+ * ignored. A page bridge that predates this message ignores it.
+ */
+export interface CancelCallMessage {
+  type: 'cancel_call';
+  id: string;
+}
+
+/**
+ * Optional progress report for a call still in flight, forwarded to the MCP
+ * client as a notifications/progress when that client asked for progress.
+ * Fire-and-forget; ignored once the call has resolved.
+ */
+export interface CallProgressMessage {
+  type: 'call_progress';
+  id: string;
+  progress: number;
+  total?: number;
+  message?: string;
+}
+
 export interface CallResultMessage {
   type: 'call_result';
   id: string;
@@ -211,4 +260,4 @@ export interface MoveChannelMessage {
   channel: string;
 }
 
-export type ClientMessage = SetMessage | SubmitMessage | InterruptMessage | RegisterToolsMessage | CallResultMessage | RenameConnectionMessage | ResyncMessage | LeaveChannelMessage;
+export type ClientMessage = SetMessage | SubmitMessage | InterruptMessage | RegisterToolsMessage | CallResultMessage | CallProgressMessage | RenameConnectionMessage | ResyncMessage | LeaveChannelMessage;
