@@ -59,6 +59,14 @@ function mockFolderfoo(calls: string[], folders: string[] = ['memz', 'work/qa'])
     if (url.includes('/save/')) {
       return { ok: true, status: 200, json: async () => ({ message: 'saved' }) } as Response;
     }
+    // Folder rename: succeeds only for a folder this mock knows about (see `folders`), else 404 the
+    // way folderfoo answers a folder that doesn't exist.
+    if (url.endsWith('/folders/rename')) {
+      const { folderPath } = JSON.parse(String(init?.body));
+      return folders.includes(folderPath)
+        ? ({ ok: true, status: 200, json: async () => ({ path: 'renamed' }) } as Response)
+        : ({ ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'Folder not found' }) } as Response);
+    }
     if (url.includes('/rename/')) {
       return { ok: true, status: 200, json: async () => ({ name: 'renamed' }) } as Response;
     }
@@ -358,6 +366,35 @@ test('MemoryRepository.rename against a remote folder uses folderfoo\'s real ren
   assert.ok(renameCall, `expected a /rename/ call, got: ${calls.join(', ')}`);
   assert.ok(renameCall!.endsWith(`:${filename}`), `expected the rename URL to address the OLD filename, got: ${renameCall}`);
   assert.ok(!calls.some((c) => c.includes('/save/')), `must not write under the new name via /save/ (that's what left the stale duplicate) — calls: ${calls.join(', ')}`);
+});
+
+test('MemoryRepository.rename also renames the doc\'s <stem>/attachments/ folder on folderfoo, before the doc itself', async (t) => {
+  const credsDir = tmpDir('mb-remote-path-creds-');
+  setCredential(credsDir, 'https://folderfoo.example.com', 'jwt-1');
+  const db = openCache(':memory:');
+  const repo = new MemoryRepository(db, [], [], credsDir, loggedInIdentity());
+  const mirrorDir = mirrorDirFor(credsDir, 'dev', 'testuser', 'memz');
+  repo.registerRemoteFolder({ name: 'memz', server: 'https://folderfoo.example.com', tenantId: 't1', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'testuser' });
+
+  t.mock.method(globalThis, 'fetch', mockFolderfoo([]));
+  const doc = await repo.create({ filename: 'plan', key: 'K1', key_type: 'freeform', doc_type: 'plan', description: 'd', body: 'b', folder: 'memz' });
+  fs.mkdirSync(path.join(mirrorDir, 'plan', 'attachments'), { recursive: true });
+  fs.writeFileSync(path.join(mirrorDir, 'plan', 'attachments', 'a.txt'), 'x');
+
+  const calls: string[] = [];
+  const bodies: string[] = [];
+  const fetchImpl = mockFolderfoo(calls, ['memz', 'memz/plan']);
+  t.mock.method(globalThis, 'fetch', async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/folders/rename')) bodies.push(String(init?.body));
+    return fetchImpl(url, init);
+  });
+  await repo.rename('memz', path.basename(doc.source_path), 'plan2.md');
+
+  assert.deepEqual(bodies.map((b) => JSON.parse(b)), [{ folderPath: 'memz/plan', newFolderPath: 'memz/plan2' }]);
+  const folderRename = calls.findIndex((c) => c.endsWith('/folders/rename'));
+  const fileRename = calls.findIndex((c) => c.includes('/rename/'));
+  assert.ok(folderRename !== -1 && folderRename < fileRename, `attachments folder must be renamed first — calls: ${calls.join(', ')}`);
+  assert.ok(fs.existsSync(path.join(mirrorDir, 'plan2', 'attachments', 'a.txt')));
 });
 
 // Regression coverage for a real bug reported live: MemoryRepository.delete() never touched the

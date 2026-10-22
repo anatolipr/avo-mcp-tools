@@ -51,8 +51,13 @@ function mockFolderfoo(state: { shared: SharedFile[]; publicLinks?: Record<strin
       const body = state.shared.map(({ content: _content, ...entry }) => ({ type: 'file', size: 1, createdAt: entry.modifiedAt, role: 'member', ...entry }));
       return { ok: true, status: 200, json: async () => body } as Response;
     }
+    if (url.includes('/folders/changed-since')) {
+      // No memory doc here has attachments — folderfoo answers an attachments listing of a
+      // directory that doesn't exist with an empty list.
+      return { ok: true, status: 200, json: async () => ({ files: [], serverTime: 0 }) } as Response;
+    }
     if (url.includes('/public/')) {
-      const token = decodeURIComponent(url.split('/public/')[1]!);
+      const token = decodeURIComponent(url.split('/public/')[1]!.split('?')[0]!);
       const content = state.publicLinks?.[token];
       if (content === undefined) return { ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'Invalid or expired link' }) } as Response;
       return { ok: true, status: 200, json: async () => ({ content, owner: 'pat', path: 'memz/pub.md', type: 'file', originId: ORIGIN_PUBLIC, kind: 'memory' }) } as Response;
@@ -268,8 +273,9 @@ test('resolveShareTarget is folder-scoped for skills and refuses items the calle
   };
 
   assert.match((resolveShareTarget(db, repos, 'skills', 'deploy') as { error: string }).error, /more than one folder/);
+  // A skill is shared as its whole directory.
   assert.deepEqual(resolveShareTarget(db, repos, 'skills', 'deploy', 'b'), {
-    server: SERVER, tenantId: TENANT, folderPath: 'skills-b/deploy', name: 'SKILL', kind: 'skill',
+    server: SERVER, tenantId: TENANT, path: 'skills-b/deploy', type: 'folder', kind: 'skill',
   });
   assert.match((resolveShareTarget(db, repos, 'skills', 'deploy', 'theirs') as { error: string }).error, /only bob can share it/);
 });

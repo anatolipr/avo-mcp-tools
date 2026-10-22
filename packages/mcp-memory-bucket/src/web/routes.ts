@@ -8,16 +8,14 @@ import type Database from 'better-sqlite3';
 import type { BucketConfig, RemoteFolder } from '../config.js';
 import {
   saveFolder,
-  saveRemoteFolder,
   removeFolder as removeFolderFromConfig,
   updateRemoteFolderPath as updateRemoteFolderPathInConfig,
   sanitizeFolderName,
-  mirrorDirFor,
 } from '../config.js';
 import type { SkillRepository } from '../skills/repository.js';
 import { stripKey, type MemoryRepository } from '../memory/repository.js';
 import { pruneOrphanChunks } from '../store/chunks.js';
-import { initialScan, rebuildDocTables, walkMarkdownFiles, type TableSyncSpec } from '../store/sync.js';
+import { initialScan, rebuildDocTables, type TableSyncSpec } from '../store/sync.js';
 import { SEARCH_BM25, withOrFallback, hasExplicitSyntax, sanitizeFtsQuery } from '../store/search.js';
 import { semanticDocMatches } from '../store/recall.js';
 import type { EmbeddingIndexer } from '../store/embeddings.js';
@@ -26,21 +24,23 @@ import { attachmentsDirFor, guessMimeType, ATTACHMENT_MAX_BYTES, listSkillSource
 import type { AttachmentRepository } from '../attachments/repository.js';
 import { listFolders as listFolderfooFolders } from '../remote/folderfoo-client.js';
 import { setCredential } from '../remote/credentials.js';
-import { pollOne, type RemotePollerHandle } from '../remote/remote-sync.js';
+import type { RemotePollerHandle } from '../remote/remote-sync.js';
 import { decodeUsername, isFolderVisible, type IdentityTracker } from '../remote/identity.js';
+import { listSharedItems, dismissRevokedSharedItem, leaveSharedItem, syncSharedItemsIndex, isSharedFolderName } from '../remote/shared-items.js';
+import { getSharedWithMe, FolderfooRequestError, type ShareRole } from '../remote/folderfoo-client.js';
+import { connectRemoteFolder, refreshSharedFolderRoles, SharingError, type RemoteDeps } from '../remote/connect.js';
 import {
-  refreshSharedItems,
-  listSharedItems,
-  dismissRevokedSharedItem,
-  addSharedItem,
-  getForkableSharedItem,
-  resolveShareTarget,
-  syncSharedItemsIndex,
-} from '../remote/shared-items.js';
-import { TENANT_ID } from '../shared/folderfoo-tenant.js';
-import { shareWithUser, unshareWithUser, createShareLink, createPublicLink, joinRemoteFolderPath, getSharedWithMe, FolderfooRequestError } from '../remote/folderfoo-client.js';
-import { readMarkdownFile } from '../store/markdown-file.js';
-import type { MemoryFrontmatter, SkillFrontmatter } from '../types.js';
+  acceptShare,
+  createLink,
+  forkSharedItem,
+  refreshShares,
+  revokeShareLink,
+  shareLinkJoins,
+  shareStatus,
+  shareWith,
+  unshareWith,
+  type ShareSubject,
+} from '../remote/sharing.js';
 import { getChannel, listChannels } from '../channels/store.js';
 
 type EntryType = 'skill' | 'memory' | 'all';
@@ -596,9 +596,19 @@ export function buildWebRouter(
   identity: IdentityTracker,
   remotePollers?: { skill?: RemotePollerHandle; memory?: RemotePollerHandle },
   attachRepo?: AttachmentRepository,
-  embeddingIndexer?: EmbeddingIndexer
+  embeddingIndexer?: EmbeddingIndexer,
+  appUrl = 'http://localhost:8767/'
 ): Router {
   const router = express.Router();
+  const remoteDeps: RemoteDeps = { db, config, skillRepo, memoryRepo, skillSpec, memorySpec, identity, appUrl };
+
+  /** The shared item a mirrored doc belongs to, as the detail panel shows it. */
+  const sharedItemFor = (sourcePath: string) => {
+    const item = listSharedItems(db, identity.current().username).find(
+      (i) => sourcePath === i.mirror_path || sourcePath.startsWith((i.item_type === 'folder' ? i.mirror_path : path.dirname(i.mirror_path)) + path.sep)
+    );
+    return item ? { owner: item.owner, role: item.role, originId: item.origin_id, public: item.public } : null;
+  };
 
   // Whether the doc at `table`/`id` lives in a folder visible under the CURRENTLY logged-in
   // identity — a remote folder connected under a different user (or connected while nobody was
@@ -713,7 +723,11 @@ export function buildWebRouter(
       sourceFiles,
       has_frontmatter,
       raw_file,
-      remoteInfo: remote ? { server: remote.server, tenantId: remote.tenantId, folderPath: remote.folderPath, mirrorDir: remote.mirrorDir } : null,
+      remoteInfo: remote
+        ? { server: remote.server, tenantId: remote.tenantId, folderPath: remote.folderPath, mirrorDir: remote.mirrorDir, owner: remote.owner ?? null, role: remote.role ?? null }
+        : null,
+      // Set for someone else's shared item, so the panel can say whose it is and whether it's editable.
+      sharedFrom: isSharedFolderName(row.folder as string) ? sharedItemFor(row.source_path as string) : null,
     });
   });
 
@@ -1182,10 +1196,13 @@ export function buildWebRouter(
 
   router.get('/api/folders', async (_req: Request, res: Response) => {
     await pruneDeletedRemoteFolders();
-    res.json({
-      skill: skillRepo.listFoldersWithRemoteInfo().map((f) => ({ ...f, kind: 'skill' as const })),
-      memory: memoryRepo.listFoldersWithRemoteInfo().map((f) => ({ ...f, kind: 'memory' as const })),
-    });
+    // sharedBy/role: set for a folder someone else shared — the UI marks it and offers no Share action.
+    const withShareInfo = (repo: SkillRepository | MemoryRepository, kind: 'skill' | 'memory') =>
+      repo.listFoldersWithRemoteInfo().map((f) => {
+        const remote = repo.listRemoteFolders().find((r) => r.name === f.name);
+        return { ...f, kind, sharedBy: remote?.owner ?? null, role: remote?.role ?? null };
+      });
+    res.json({ skill: withShareInfo(skillRepo, 'skill'), memory: withShareInfo(memoryRepo, 'memory') });
   });
 
   /**
@@ -1298,6 +1315,8 @@ export function buildWebRouter(
         if (err instanceof FolderfooRequestError && (err.status === 403 || err.status === 404)) doRemove(source);
       }
     }
+    // The shares still standing may have changed role (member <-> editor) since connect.
+    if (sharedFolderSources.length > 0) await refreshSharedFolderRoles(remoteDeps);
   }
 
   // Resolves a file opened via folderfoo's own File Open dialog
@@ -1498,18 +1517,15 @@ export function buildWebRouter(
     }
     try {
       const shared = await getSharedWithMe(server, config.baseDir, tenantId);
-      res.json(shared.filter((entry) => entry.type === 'folder').map((entry) => ({ owner: entry.owner, path: entry.name, role: entry.role })));
+      res.json(shared.filter((entry) => entry.type === 'folder').map((entry) => ({ owner: entry.owner, path: entry.name, role: entry.role, kind: entry.kind })));
     } catch (err) {
       res.status(401).json({ error: (err as Error).message });
     }
   });
 
-  // Registers a REMOTE (folderfoo) source — the connect-a-folder counterpart
-  // to POST /api/folders above, which only ever handles local filesystem
-  // paths. Creates the local mirror directory, registers it with the
-  // repository (so it starts watching/scanning like any local folder), then
-  // immediately triggers one poll so content shows up without waiting for
-  // the first interval tick.
+  // Registers a REMOTE (folderfoo) source — the connect-a-folder counterpart to POST /api/folders
+  // above, which only ever handles local filesystem paths. `owner` is set when connecting a folder
+  // someone ELSE shared (see /api/folderfoo/shared-folders). See connectRemoteFolder.
   router.post('/api/remote-folders', async (req: Request, res: Response) => {
     const { kind, name, server, tenantId, folderPath, owner } = req.body as {
       kind?: string;
@@ -1517,9 +1533,6 @@ export function buildWebRouter(
       server?: string;
       tenantId?: string;
       folderPath?: string;
-      // Set when connecting a folder someone ELSE shared (see /api/folderfoo/shared-folders) rather
-      // than one of the caller's own — carried onto RemoteFolder.owner so every subsequent
-      // read/write against this source addresses the OWNER's tree, not the caller's own.
       owner?: string;
     };
     if (kind !== 'skill' && kind !== 'memory') {
@@ -1530,67 +1543,12 @@ export function buildWebRouter(
       res.status(400).json({ error: 'server, tenantId, and folderPath are required' });
       return;
     }
-    const folderName = sanitizeFolderName(name || folderPath.split('/').filter(Boolean).pop() || tenantId);
-    if (!folderName) {
-      res.status(400).json({ error: 'could not derive a valid folder name — provide one explicitly' });
-      return;
-    }
-    // A folder can only be connected while logged in — the identity it's
-    // stamped with (see identity.ts) is exactly the one that just made the
-    // "connect a folder" picker possible in the first place.
-    const current = identity.current();
-    if (!current.username) {
-      res.status(401).json({ error: 'not logged in to folderfoo' });
-      return;
-    }
-
-    const repo = kind === 'skill' ? skillRepo : memoryRepo;
-    const spec = kind === 'skill' ? skillSpec : memorySpec;
     try {
-      // Resolved FIRST (before deriving mirrorDir) — auto-suffixes the requested name when it
-      // collides with a folder connected under a DIFFERENT folderfoo login (e.g. two different users
-      // each naturally wanting "bbbmemz"), still rejecting a collision against the CALLER's own
-      // identity (a genuine naming mistake) — see resolveAvailableName's own doc comment. Everything
-      // downstream (mirrorDir, the saved config entry, the response, the kind-mismatch check) uses
-      // this resolved name, never the originally-requested one, so nothing reads/writes to a path
-      // computed from a name that ended up not being what actually got connected.
-      const resolvedName = repo.resolveAvailableName(folderName, current.username);
-      const mirrorDir = mirrorDirFor(config.baseDir, current.mode, current.username, resolvedName, owner);
-      const remote = { name: resolvedName, server, tenantId, folderPath, mirrorDir, mode: current.mode, username: current.username, owner };
-      repo.registerRemoteFolder(remote);
-      saveRemoteFolder(config, kind, { name: resolvedName, server, tenantId, folderPath, mode: current.mode, username: current.username, owner });
-      await pollOne(db, spec, remote, config.baseDir);
-      res.json({ name: resolvedName, server, tenantId, folderPath, kind, owner, kindMismatchWarning: detectKindMismatch(kind, mirrorDir) });
+      res.json(await connectRemoteFolder(remoteDeps, { kind, name, server, tenantId, folderPath, owner }));
     } catch (err) {
-      res.status(409).json({ error: (err as Error).message });
+      res.status(err instanceof SharingError ? err.status : 409).json({ error: (err as Error).message });
     }
   });
-
-  // Cheap best-effort "did the user pick the wrong kind" heuristic, checked once right after connect
-  // (content is already mirrored locally from the pollOne call above, so this is a local directory
-  // walk, not another network round trip) — surfaced to the client as a dismissible warning, never a
-  // hard block, since a folder can legitimately be empty or genuinely mixed. A skill's remote content
-  // always lives under a fixed literal filename "SKILL.md" (see remoteFilename's own doc comment in
-  // sync.ts — skills push under that name regardless of local filename), so "every .md file mirrored
-  // is literally named SKILL.md" is a strong, cheap skill-shaped signal; a memory folder's files keep
-  // their own varied names and are never named exactly that. Returns undefined (no warning) for an
-  // empty folder — nothing synced yet is not evidence of anything.
-  function detectKindMismatch(kind: 'skill' | 'memory', mirrorDir: string): string | undefined {
-    let total = 0;
-    let skillNamed = 0;
-    for (const file of walkMarkdownFiles(mirrorDir)) {
-      total++;
-      if (path.basename(file) === 'SKILL.md') skillNamed++;
-    }
-    if (total === 0) return undefined;
-    if (kind === 'memory' && skillNamed === total) {
-      return `This folder looks like it contains skills (every file is a SKILL.md), not memory docs — you connected it as a memory folder. Remove and reconnect it as a skill folder instead.`;
-    }
-    if (kind === 'skill' && skillNamed === 0) {
-      return `This folder looks like it contains memory docs, not skills (no SKILL.md files found) — you connected it as a skill folder. Remove and reconnect it as a memory folder instead.`;
-    }
-    return undefined;
-  }
 
   // Triggers one immediate out-of-cycle poll for a single remote source —
   // backs the web UI's per-source "resync now" action, so a user who just
@@ -1635,251 +1593,153 @@ export function buildWebRouter(
     }
   });
 
-  // "Shared with me" (item-level shares, not whole connected folders — see
-  // config.ts's RemoteFolder for that separate mechanism). Deliberately NOT
-  // called anywhere automatically (no poller, no auto-refresh on load/focus)
-  // — GET only ever returns whatever's currently in shared_items, exactly as
-  // fresh as the last time POST /refresh below was explicitly clicked. This
-  // is the settled "refresh is a UI-only concept" design.
+  // Sends a sharing operation's failure back with the status it carries (see SharingError), or the
+  // folderfoo status for a request folderfoo itself refused.
+  const sendShareError = (res: Response, err: unknown) => {
+    const status = err instanceof SharingError ? err.status : err instanceof FolderfooRequestError ? err.status : 500;
+    res.status(status).json({ error: (err as Error).message });
+  };
+
+  // "Shared with me" (item-level shares, not whole connected folders — see config.ts's RemoteFolder
+  // for that separate mechanism). GET only returns what's in shared_items, as fresh as the last
+  // refresh (POST /refresh below) — no poller, no auto-refresh on load/focus.
   router.get('/api/shared-items', (_req: Request, res: Response) => {
     res.json(listSharedItems(db, identity.current().username));
   });
 
-  // Turns a redeemed share-link/public-link (client/share-accept.ts's onSharedItemAccepted) into a
-  // new shared_items row and pulls its content immediately — this one fetch is the explicit act of
-  // accepting a share, not the "refresh is UI-only" background sync (see addSharedItem's own doc
-  // comment). Called once per accept, never on a timer.
+  // Files a redeemed invite link or a followed public link (client/share-accept.ts) where it
+  // belongs — a shared item, or a connected folder (see acceptShare). The explicit act of
+  // accepting, called once per accept.
   router.post('/api/shared-items/accept', async (req: Request, res: Response) => {
-    const { owner, path: itemPath, originId, kind, role, server, tenantId, publicToken } = req.body || {};
-    if (!owner || !itemPath || !originId || (kind !== 'memory' && kind !== 'skill') || !server || !tenantId) {
-      res.status(400).json({ error: 'owner, path, originId, kind, server, and tenantId are required' });
-      return;
-    }
-    // The body picks which host this process reads from (and, for a share link, sends its stored
-    // login to) — only ever the folderfoo deployment this process was started against.
-    if (!config.folderfooHost || server !== config.folderfooHost) {
-      res.status(400).json({ error: 'server must be this app\'s configured folderfoo host' });
-      return;
-    }
-    const username = identity.current().username;
-    if (!publicToken && !username) {
-      res.status(401).json({ error: 'not logged in to folderfoo' });
+    const { owner, path: itemPath, type, originId, kind, role, server, tenantId, publicToken } = req.body || {};
+    if (!owner || !itemPath || (type !== 'file' && type !== 'folder') || !server || !tenantId) {
+      res.status(400).json({ error: 'owner, path, type, server, and tenantId are required' });
       return;
     }
     try {
-      await addSharedItem(db, config.baseDir, skillSpec, memorySpec, {
-        owner,
-        path: itemPath,
-        originId,
-        kind,
-        role: role === 'editor' ? 'editor' : 'member',
-        server,
-        tenantId,
-        username,
-        publicToken: typeof publicToken === 'string' && publicToken ? publicToken : undefined,
-      });
-      res.json({ accepted: originId });
+      res.json(
+        await acceptShare(remoteDeps, {
+          owner,
+          path: itemPath,
+          type,
+          originId,
+          kind: kind === 'memory' || kind === 'skill' ? kind : null,
+          role: role === 'editor' ? 'editor' : 'member',
+          server,
+          tenantId,
+          publicToken: typeof publicToken === 'string' && publicToken ? publicToken : undefined,
+        })
+      );
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      sendShareError(res, err);
     }
   });
 
-  // "Fork to mine" — writes an INDEPENDENT copy of a shared item into a folder the caller owns
-  // (local bucket, or a remote folder they're connected to), via the same MemoryRepository.create/
-  // SkillRepository.create path any other new doc goes through (collision-avoided by
-  // uniqueFilename for memory, or a clean "already exists" error for skills — no separate fork-
-  // specific write path). The fork carries NO shared_items linkage afterward: once created, it's
-  // indistinguishable from a doc the user authored themselves — editing it never touches the
-  // original owner's copy, unlike a live role:'editor' share.
+  // "Fork to mine" — an independent copy in a folder the caller owns (see forkSharedItem).
   router.post('/api/shared-items/:originId/fork', async (req: Request, res: Response) => {
-    const { originId } = req.params;
-    const { folder } = req.body || {};
-    if (!originId) {
-      res.status(400).json({ error: 'originId is required' });
-      return;
-    }
-    const item = getForkableSharedItem(db, originId, identity.current().username);
-    if ('error' in item) {
-      res.status(404).json({ error: item.error });
-      return;
-    }
     try {
-      const parsed = readMarkdownFile<Record<string, unknown>>(item.mirror_path);
-      if (item.kind === 'memory') {
-        const fm = parsed.frontmatter as Partial<MemoryFrontmatter>;
-        const doc = await memoryRepo.create({
-          filename: path.basename(item.mirror_path),
-          key: fm.key ?? path.basename(item.mirror_path, '.md'),
-          key_type: fm.key_type ?? 'freeform',
-          doc_type: fm.doc_type ?? 'other',
-          description: fm.description ?? path.basename(item.mirror_path, '.md'),
-          body: parsed.body,
-          tags: fm.tags,
-          status: fm.status,
-          related_to: fm.related_to,
-          folder,
-        });
-        res.json({ forked: true, table: 'memory_docs', id: doc.source_path });
-      } else {
-        const fm = parsed.frontmatter as Partial<SkillFrontmatter>;
-        if (!fm.name || !fm.description) {
-          res.status(500).json({ error: 'shared skill is missing required name/description frontmatter' });
-          return;
-        }
-        const doc = await skillRepo.create(
-          { name: fm.name, description: fm.description, tags: fm.tags, trigger_phrases: fm.trigger_phrases },
-          parsed.body,
-          undefined,
-          folder
-        );
-        res.json({ forked: true, table: 'skills', id: doc.name });
-      }
+      const result = await forkSharedItem(remoteDeps, req.params.originId!, (req.body || {}).folder);
+      res.json({ ...result, table: result.kind === 'skill' ? 'skills' : 'memory_docs', id: result.ids[0] });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      sendShareError(res, err);
     }
   });
 
-  // The recycle-icon button in the "Shared with me" panel calls this — also the only way a direct
-  // (non-link) share ever gets discovered and added in the first place, since folderfoo's Share
-  // Manager UI and bucket_share_item grant access with no redeem event for this app to react to
-  // (see refreshSharedItems' own doc comment). Polls every server+tenant the caller is connected to
-  // via a remote folder, not just ones already represented in shared_items, so this works even
-  // before the very first share has been accepted.
+  // The "Shared with me" panel's refresh — also how a direct (non-link) share is discovered at all,
+  // since a share by username has no redeem event for this app to react to.
   router.post('/api/shared-items/refresh', async (_req: Request, res: Response) => {
     try {
-      const current = identity.current();
-      const servers = [...skillRepo.listRemoteFolders(), ...memoryRepo.listRemoteFolders()]
-        .filter((f) => isFolderVisible(f, current))
-        .map((f) => ({ server: f.server, tenantId: f.tenantId }));
-      // The configured host under this app's own tenant is always checked, connected folder or
-      // not — otherwise a login with no remote folder has no server to ask and never sees a share.
-      if (config.folderfooHost) servers.push({ server: config.folderfooHost, tenantId: TENANT_ID });
-      const summary = await refreshSharedItems(db, config.baseDir, skillSpec, memorySpec, servers, current.username);
-      if (summary.authExpired) identity.clearUsername();
-      res.json(summary);
+      res.json(await refreshShares(remoteDeps));
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      sendShareError(res, err);
     }
   });
 
-  // Dismisses a revoked row from view — no-ops for a still-active share (use
-  // the refresh button to detect revocation in the first place, this only
-  // clears a row already marked revoked).
+  // Removes this login from the share on folderfoo and drops the local copy.
+  router.post('/api/shared-items/:originId/leave', async (req: Request, res: Response) => {
+    try {
+      const result = await leaveSharedItem(db, config.baseDir, req.params.originId!, identity.current().username);
+      if ('error' in result) res.status(404).json(result);
+      else res.json(result);
+    } catch (err) {
+      sendShareError(res, err);
+    }
+  });
+
+  // Dismisses a revoked row from view — no-ops for a still-active share (that's /leave).
   router.delete('/api/shared-items/:originId', (req: Request, res: Response) => {
-    const { originId } = req.params;
-    if (!originId) {
-      res.status(400).json({ error: 'originId is required' });
-      return;
-    }
-    dismissRevokedSharedItem(db, originId);
-    res.json({ dismissed: originId });
+    dismissRevokedSharedItem(db, req.params.originId!);
+    res.json({ dismissed: req.params.originId });
   });
 
-  // Resolves a table/id EntryDetail into the folderfoo coordinates (folderPath, name — the
-  // "name" folderfoo actually stores it under) needed to call shareWithUser/createShareLink/
-  // createPublicLink below. Shared by all three POST routes so the "must be remote, must
-  // exist under a connected folder" validation lives in exactly one place. Returns null if the
-  // doc isn't remote (this app's own local-only docs have nothing on folderfoo to address).
-  // `?folder=` disambiguates a skill name that exists in more than one folder.
-  const resolveShareTargetHere = (req: Request, table: 'skills' | 'memory_docs', id: string) =>
-    resolveShareTarget(db, { skill: skillRepo, memory: memoryRepo }, table, id, typeof req.query.folder === 'string' ? req.query.folder : undefined);
-
-  router.post('/api/entries/:table/:id/share', async (req: Request, res: Response) => {
-    const { table, id } = req.params;
-    if (table !== 'skills' && table !== 'memory_docs') {
-      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
-      return;
-    }
-    if (!id) {
-      res.status(400).json({ error: 'id is required' });
-      return;
-    }
-    const { username, role } = req.body || {};
-    if (!username) {
-      res.status(400).json({ error: 'username is required' });
-      return;
-    }
-    const target = resolveShareTargetHere(req, table, id);
-    if ('error' in target) {
-      res.status(400).json({ error: target.error });
-      return;
-    }
+  // Who joined through this login's invite links since the last call — the web UI shows these once
+  // as a toast on load. Marks them seen.
+  router.get('/api/share-joins', async (_req: Request, res: Response) => {
     try {
-      await shareWithUser(target.server, config.baseDir, target.tenantId, target.folderPath, target.name, username, target.kind, role === 'editor' ? 'editor' : 'member');
+      res.json({ joins: await shareLinkJoins(remoteDeps) });
+    } catch (err) {
+      sendShareError(res, err);
+    }
+  });
+
+  // The owner-side sharing routes, mounted twice: for one doc (/api/entries/:table/:id, `?folder=`
+  // disambiguating a skill name) and for a whole connected folder (/api/folders/:kind/:name).
+  const entrySubject = (req: Request): ShareSubject | null => {
+    const { table, id } = req.params;
+    if ((table !== 'skills' && table !== 'memory_docs') || !id) return null;
+    return { kind: table === 'skills' ? 'skill' : 'memory', id, folder: typeof req.query.folder === 'string' ? req.query.folder : undefined };
+  };
+  const folderSubject = (req: Request): ShareSubject | null => {
+    const { kind, name } = req.params;
+    if ((kind !== 'skill' && kind !== 'memory') || !name) return null;
+    return { kind: kind === 'skill' ? 'skill_folder' : 'memory_folder', id: name };
+  };
+  for (const [base, subjectOf] of [
+    ['/api/entries/:table/:id', entrySubject],
+    ['/api/folders/:kind/:name', folderSubject],
+  ] as const) {
+    const withSubject = (handler: (subject: ShareSubject, req: Request, res: Response) => Promise<void>) => async (req: Request, res: Response) => {
+      const subject = subjectOf(req);
+      if (!subject) {
+        res.status(400).json({ error: 'unknown table/kind or missing id' });
+        return;
+      }
+      try {
+        await handler(subject, req, res);
+      } catch (err) {
+        sendShareError(res, err);
+      }
+    };
+    const roleOf = (req: Request): ShareRole => ((req.body || {}).role === 'editor' ? 'editor' : 'member');
+
+    router.post(`${base}/share`, withSubject(async (subject, req, res) => {
+      const { username } = req.body || {};
+      if (!username) {
+        res.status(400).json({ error: 'username is required' });
+        return;
+      }
+      await shareWith(remoteDeps, subject, username, roleOf(req));
       res.json({ shared: true, username });
-    } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
-    }
-  });
-
-  router.delete('/api/entries/:table/:id/share/:username', async (req: Request, res: Response) => {
-    const { table, id, username } = req.params;
-    if (table !== 'skills' && table !== 'memory_docs') {
-      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
-      return;
-    }
-    if (!id || !username) {
-      res.status(400).json({ error: 'id and username are required' });
-      return;
-    }
-    const target = resolveShareTargetHere(req, table, id);
-    if ('error' in target) {
-      res.status(400).json({ error: target.error });
-      return;
-    }
-    try {
-      await unshareWithUser(target.server, config.baseDir, target.tenantId, target.folderPath, target.name, username);
-      res.json({ unshared: true, username });
-    } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
-    }
-  });
-
-  router.post('/api/entries/:table/:id/share-link', async (req: Request, res: Response) => {
-    const { table, id } = req.params;
-    if (table !== 'skills' && table !== 'memory_docs') {
-      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
-      return;
-    }
-    if (!id) {
-      res.status(400).json({ error: 'id is required' });
-      return;
-    }
-    const target = resolveShareTargetHere(req, table, id);
-    if ('error' in target) {
-      res.status(400).json({ error: target.error });
-      return;
-    }
-    try {
-      const link = await createShareLink(target.server, config.baseDir, target.tenantId, target.folderPath, target.name, target.kind);
-      res.json(link);
-    } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
-    }
-  });
-
-  router.post('/api/entries/:table/:id/public-link', async (req: Request, res: Response) => {
-    const { table, id } = req.params;
-    if (table !== 'skills' && table !== 'memory_docs') {
-      res.status(400).json({ error: 'table must be "skills" or "memory_docs"' });
-      return;
-    }
-    if (!id) {
-      res.status(400).json({ error: 'id is required' });
-      return;
-    }
-    const target = resolveShareTargetHere(req, table, id);
-    if ('error' in target) {
-      res.status(400).json({ error: target.error });
-      return;
-    }
-    try {
-      const link = await createPublicLink(target.server, config.baseDir, target.tenantId, target.folderPath, target.name, target.kind);
-      res.json(link);
-    } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
-    }
-  });
+    }));
+    router.delete(`${base}/share/:username`, withSubject(async (subject, req, res) => {
+      await unshareWith(remoteDeps, subject, req.params.username!);
+      res.json({ unshared: true, username: req.params.username });
+    }));
+    router.post(`${base}/share-link`, withSubject(async (subject, req, res) => {
+      res.json(await createLink(remoteDeps, subject, 'invite', roleOf(req)));
+    }));
+    router.post(`${base}/public-link`, withSubject(async (subject, _req, res) => {
+      res.json(await createLink(remoteDeps, subject, 'public'));
+    }));
+    router.get(`${base}/share-status`, withSubject(async (subject, _req, res) => {
+      res.json(await shareStatus(remoteDeps, subject));
+    }));
+    router.delete(`${base}/links/:type/:linkId`, withSubject(async (subject, req, res) => {
+      const type = req.params.type === 'public' ? 'public' : 'invite';
+      await revokeShareLink(remoteDeps, subject, type, req.params.linkId!);
+      res.json({ revoked: req.params.linkId });
+    }));
+  }
 
   router.delete('/api/folders/:kind/:name', (req: Request, res: Response) => {
     const { kind, name } = req.params;

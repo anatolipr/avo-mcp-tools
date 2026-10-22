@@ -279,6 +279,34 @@ memory/skill sources. Override that with one of:
   folderfoo deployment (if any) is wanted — hence the explicit flag instead
   of hostname-sniffing.
 
+### Sharing (folderfoo)
+
+You can share any doc or folder that lives in one of your own folderfoo-backed folders.
+Use the detail panel's **Share…** button, the 🔗 on a remote folder chip, or the
+`bucket_share_item` tool.
+
+- **What gets shared.** A memory doc is shared together with its attachments. A skill is
+  shared as its whole directory: `SKILL.md`, its sibling files (`scripts/`, `references/`, …)
+  and its attachments. You can also share a whole connected folder.
+- **How you share it.** You can share it with a folderfoo username directly, or create a
+  link. An **invite link** needs a login and grants the role you pick. A **public link** needs
+  no login and is always read-only. Links expire after 30 days.
+- **Roles.** `member` is read-only. `editor` lets the recipient edit in place, and their
+  changes go to your copy. This applies to both a shared item and a connected shared folder.
+- **Who has access.** The share form (or `bucket_share_status`) lists who has access and which
+  links are live, including who joined through each one. Use it to remove a person or revoke a
+  link (or use `bucket_unshare_item`). When you open the web UI, a toast tells you about new
+  joins through your links.
+- **Receiving shares.** Shared items appear under **Shared with me** (or
+  `bucket_list_shared_items`, with `refresh: true` to sync). If someone shared a direct share
+  with you and you did not accept it through a link, it arrives paused. A folder that someone
+  invites you to is connected as a source. A folder that holds a single skill becomes a shared
+  item instead. You can fork any shared item into your own folder, or leave the share
+  (`bucket_leave_shared_item`).
+
+If the owner trashes a shared doc or folder and then restores it from folderfoo's trash, its
+shares and links come back too.
+
 ## Test
 
 ```sh

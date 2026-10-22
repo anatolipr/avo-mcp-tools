@@ -60,7 +60,10 @@ export interface EntryDetail {
    * coordinates detail-panel.ts's Share/Copy-link actions need, since those only make sense for
    * a doc that actually exists on folderfoo (a purely local doc has nothing for folderfoo's own
    * share endpoints to address). */
-  remoteInfo: { server: string; tenantId: string; folderPath: string; mirrorDir: string } | null;
+  /** owner/role are set when the doc's folder is one someone else shared with this login. */
+  remoteInfo: { server: string; tenantId: string; folderPath: string; mirrorDir: string; owner: string | null; role: 'member' | 'editor' | null } | null;
+  /** Set when this doc is someone else's item shared with this login. */
+  sharedFrom: { owner: string; role: 'member' | 'editor'; originId: string; public: boolean } | null;
 }
 
 export interface Facets {
@@ -78,6 +81,9 @@ export interface Folder {
   path: string;
   kind: 'skill' | 'memory';
   remote: boolean;
+  /** Set for a folder someone else shared with this login; role 'member' is read-only. */
+  sharedBy?: string | null;
+  role?: 'member' | 'editor' | null;
 }
 
 export interface FoldersResponse {

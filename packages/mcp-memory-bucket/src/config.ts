@@ -35,6 +35,13 @@ export interface RemoteFolder {
    * for every pre-existing own-folder connection — the common case, unchanged.
    */
   owner?: string;
+  /**
+   * For a folder someone else shared (`owner` set): the share's role as of the last check —
+   * 'member' is read-only, so the repositories refuse writes up front instead of letting folderfoo
+   * 403 them after a local edit. Undefined for own folders, and for shared folders connected
+   * before this was recorded (treated as writable; folderfoo still enforces the real role).
+   */
+  role?: 'member' | 'editor';
 }
 
 /**
@@ -71,7 +78,9 @@ export interface BucketConfig {
 type SourceEntry =
   | string
   | { name: string; path: string }
-  | { name: string; remote: { server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string; owner?: string } };
+  | { name: string; remote: RemoteEntryFields };
+
+type RemoteEntryFields = { server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string; owner?: string; role?: 'member' | 'editor' };
 
 interface ConfigFile {
   skill_sources?: SourceEntry[];
@@ -80,7 +89,7 @@ interface ConfigFile {
 
 function isRemoteEntry(
   entry: SourceEntry
-): entry is { name: string; remote: { server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string; owner?: string } } {
+): entry is { name: string; remote: RemoteEntryFields } {
   return typeof entry === 'object' && 'remote' in entry;
 }
 
@@ -240,7 +249,7 @@ export function saveFolder(config: BucketConfig, kind: 'skill' | 'memory', folde
 export function saveRemoteFolder(
   config: BucketConfig,
   kind: 'skill' | 'memory',
-  entry: { name: string; server: string; tenantId: string; folderPath: string; mode: FolderfooMode; username: string; owner?: string }
+  entry: { name: string } & RemoteEntryFields
 ): void {
   const current = readConfigFile(config.configPath);
   const key = kind === 'skill' ? 'skill_sources' : 'memory_sources';
@@ -258,11 +267,26 @@ export function saveRemoteFolder(
           mode: entry.mode,
           username: entry.username,
           ...(entry.owner ? { owner: entry.owner } : {}),
+          ...(entry.role ? { role: entry.role } : {}),
         },
       },
     ],
   };
   writeFileAtomic(config.configPath, JSON.stringify(next, null, 2) + '\n');
+}
+
+/** Rewrites a shared remote source's recorded `role` (see RemoteFolder.role), matched by name. No-op if not found. */
+export function updateRemoteFolderRole(config: BucketConfig, kind: 'skill' | 'memory', name: string, role: 'member' | 'editor'): void {
+  const current = readConfigFile(config.configPath);
+  const key = kind === 'skill' ? 'skill_sources' : 'memory_sources';
+  const entries = current[key] ?? [];
+  let changed = false;
+  const next = entries.map((entry) => {
+    if (!isRemoteEntry(entry) || entry.name !== name || entry.remote.role === role) return entry;
+    changed = true;
+    return { ...entry, remote: { ...entry.remote, role } };
+  });
+  if (changed) writeFileAtomic(config.configPath, JSON.stringify({ ...current, [key]: next }, null, 2) + '\n');
 }
 
 /** Lowercase-hyphenate a folder-derived name, same shape as skill names. */

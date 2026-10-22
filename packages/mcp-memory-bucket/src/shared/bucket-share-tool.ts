@@ -1,148 +1,124 @@
-import path from 'node:path';
 import { z } from 'zod';
-import type Database from 'better-sqlite3';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { BucketConfig } from '../config.js';
-import type { SkillRepository } from '../skills/repository.js';
-import type { MemoryRepository } from '../memory/repository.js';
-import type { SkillFrontmatter, MemoryFrontmatter } from '../types.js';
-import { readMarkdownFile } from '../store/markdown-file.js';
-import { shareWithUser, unshareWithUser, type FolderfooRequestError } from '../remote/folderfoo-client.js';
-import { resolveShareTarget, getForkableSharedItem, listSharedItems, isSharedFolderName } from '../remote/shared-items.js';
-import type { IdentityTracker } from '../remote/identity.js';
+import { listSharedItems, leaveSharedItem } from '../remote/shared-items.js';
+import { shareWith, unshareWith, createLink, shareStatus, revokeShareLink, refreshShares, forkSharedItem, type ShareSubject } from '../remote/sharing.js';
+import type { RemoteDeps } from '../remote/connect.js';
 
-const KIND = z.enum(['skill', 'memory']);
+const SUBJECT = {
+  kind: z
+    .enum(['skill', 'memory', 'skill_folder', 'memory_folder'])
+    .describe('skill/memory = one doc; skill_folder/memory_folder = one of your connected folders as a whole'),
+  name: z.string().describe('skill name, memory doc filename, or folder name'),
+  folder: z.string().optional().describe('only needed when a doc name exists in more than one folder'),
+};
+
+const subjectOf = ({ kind, name, folder }: { kind: ShareSubject['kind']; name: string; folder?: string }): ShareSubject => ({ kind, id: name, folder });
+
+const ok = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] });
+const fail = (err: unknown) => ({ content: [{ type: 'text' as const, text: (err as Error).message }], isError: true });
 
 /**
- * Item-level sharing for an agent session: share/unshare one of the caller's own docs directly
- * with another folderfoo user, and fork an already-accepted shared item into the caller's own
- * storage. Deliberately does NOT expose share-link/public-link creation here — those produce a
- * URL meant for a human to copy/paste/send, which has no useful shape for an agent to consume;
- * the web UI's detail-panel.ts "Share…" form covers that half already (Phase 4).
+ * Sharing for an agent session — the same operations the web UI's share form and "Shared with me"
+ * panel use (see remote/sharing.ts). Only docs/folders connected to the caller's OWN folderfoo
+ * remote folders can be shared.
  */
-export function registerBucketShareTools(
-  mcp: McpServer,
-  config: BucketConfig,
-  skillRepo: SkillRepository,
-  memoryRepo: MemoryRepository,
-  db: Database.Database,
-  identity: IdentityTracker
-): void {
-  const repos = { skill: skillRepo, memory: memoryRepo };
-
-  // Skills address by their frontmatter `name` (skill_get(name, folder)'s own convention); memory
-  // docs address by filename (memoryRepo.get's convention) — consistent with every other
-  // skill_*/memory_* tool, rather than the raw source_path resolveShareTarget takes as its `id`.
-  // `folder` is only needed when the name exists in more than one folder.
-  function resolveTarget(kind: 'skill' | 'memory', folder: string | undefined, name: string) {
-    if (kind === 'skill') return resolveShareTarget(db, repos, 'skills', name, folder);
-    const filename = name.endsWith('.md') ? name : `${name}.md`;
-    const rows = (
-      folder !== undefined
-        ? db.prepare(`SELECT source_path, folder FROM memory_docs WHERE folder = ?`).all(folder)
-        : db.prepare(`SELECT source_path, folder FROM memory_docs`).all()
-    ) as Array<{ source_path: string; folder: string }>;
-    const matches = rows.filter((row) => path.basename(row.source_path) === filename && !isSharedFolderName(row.folder));
-    if (matches.length === 0) return { error: 'not found' };
-    if (matches.length > 1) return { error: `exists in more than one folder (${matches.map((m) => m.folder).join(', ')}) — specify folder` };
-    return resolveShareTarget(db, repos, 'memory_docs', matches[0]!.source_path);
-  }
-
+export function registerBucketShareTools(mcp: McpServer, deps: RemoteDeps): void {
   mcp.tool(
     'bucket_share_item',
-    'Grants another folderfoo user direct access to one of YOUR OWN memory docs or skills — only works for a doc connected to a folderfoo remote folder (see bucket_list_folders\' `remote` flag); a purely local doc has nothing on folderfoo to share. `role` defaults to read-only (\'member\'); pass \'editor\' for read-write. Idempotent: re-sharing with the same username/role is a no-op on folderfoo\'s side.',
+    "Shares one of YOUR OWN folderfoo-backed docs or connected folders (bucket_list_folders' `remote` flag). Pass `username` to grant that folderfoo user access directly, or `link` to get a URL to send instead: 'invite' (recipient logs in; grants `role`) or 'public' (no login, read-only). A skill is shared with its whole directory (siblings, attachments); a memory doc with its attachments. `role` 'member' is read-only (default), 'editor' lets the recipient edit in place.",
     {
-      kind: KIND,
-      name: z.string().describe('skill name, or memory doc filename (with or without .md)'),
-      folder: z.string().optional().describe('only needed when the name exists in more than one folder'),
-      username: z.string().describe('the folderfoo username to share with'),
-      role: z.enum(['member', 'editor']).optional().describe("'member' (read-only, default) or 'editor' (read-write)"),
+      ...SUBJECT,
+      username: z.string().optional(),
+      link: z.enum(['invite', 'public']).optional(),
+      role: z.enum(['member', 'editor']).optional(),
     },
-    async ({ kind, name, folder, username, role }) => {
-      const target = resolveTarget(kind, folder, name);
-      if ('error' in target) return { content: [{ type: 'text', text: `"${name}": ${target.error}` }], isError: true };
+    async ({ username, link, role, ...subject }) => {
+      if (!username === !link) return fail(new Error('pass exactly one of username or link'));
       try {
-        await shareWithUser(target.server, config.baseDir, target.tenantId, target.folderPath, target.name, username, target.kind, role ?? 'member');
-        return { content: [{ type: 'text', text: `Shared "${name}" with ${username} (${role ?? 'member'}).` }] };
+        if (link) return ok(await createLink(deps, subjectOf(subject), link, role));
+        await shareWith(deps, subjectOf(subject), username!, role);
+        return ok(`Shared "${subject.name}" with ${username} (${role ?? 'member'}).`);
       } catch (err) {
-        return { content: [{ type: 'text', text: (err as FolderfooRequestError).message }], isError: true };
+        return fail(err);
       }
     }
   );
 
   mcp.tool(
     'bucket_unshare_item',
-    'Revokes a specific user\'s direct access to one of your own shared memory docs/skills, previously granted via bucket_share_item. No-op (not an error) if that user never had access.',
+    "Revokes access to something you shared: `username` removes that user; `link_id` (from bucket_share_status) revokes a link so nobody new can use it — people who already joined through it keep access until removed by username.",
     {
-      kind: KIND,
-      name: z.string().describe('skill name, or memory doc filename (with or without .md)'),
-      folder: z.string().optional().describe('only needed when the name exists in more than one folder'),
-      username: z.string().describe('the folderfoo username to revoke'),
+      ...SUBJECT,
+      username: z.string().optional(),
+      link_id: z.string().optional(),
+      link_type: z.enum(['invite', 'public']).optional().describe("the link's type; default 'invite'"),
     },
-    async ({ kind, name, folder, username }) => {
-      const target = resolveTarget(kind, folder, name);
-      if ('error' in target) return { content: [{ type: 'text', text: `"${name}": ${target.error}` }], isError: true };
+    async ({ username, link_id, link_type, ...subject }) => {
+      if (!username === !link_id) return fail(new Error('pass exactly one of username or link_id'));
       try {
-        await unshareWithUser(target.server, config.baseDir, target.tenantId, target.folderPath, target.name, username);
-        return { content: [{ type: 'text', text: `Revoked ${username}'s access to "${name}".` }] };
+        if (link_id) {
+          await revokeShareLink(deps, subjectOf(subject), link_type ?? 'invite', link_id);
+          return ok(`Revoked link ${link_id}.`);
+        }
+        await unshareWith(deps, subjectOf(subject), username!);
+        return ok(`Revoked ${username}'s access to "${subject.name}".`);
       } catch (err) {
-        return { content: [{ type: 'text', text: (err as FolderfooRequestError).message }], isError: true };
+        return fail(err);
       }
     }
   );
 
   mcp.tool(
-    'bucket_fork_shared_item',
-    'Copies an item someone shared with you (addressed by its origin_id from bucket_list_shared_items) into a folder you own, as an independent, fully-writable doc with no ongoing link to the original. A shared item itself is read-only here, so this is how to edit one.',
-    {
-      origin_id: z.string(),
-      folder: z.string().describe('which of YOUR OWN configured folders to copy it into (matching the item\'s kind — memory folder for a memory doc, skill folder for a skill)'),
-    },
-    async ({ origin_id, folder }) => {
-      const item = getForkableSharedItem(db, origin_id, identity.current().username);
-      if ('error' in item) return { content: [{ type: 'text', text: item.error }], isError: true };
+    'bucket_share_status',
+    'Who has access to something you shared (users and roles) and its links (id, type, role, expiry, revoked, who joined, view count).',
+    SUBJECT,
+    async (subject) => {
       try {
-        const parsed = readMarkdownFile<Record<string, unknown>>(item.mirror_path);
-        if (item.kind === 'memory') {
-          const fm = parsed.frontmatter as Partial<MemoryFrontmatter>;
-          const filename = path.basename(item.mirror_path);
-          const doc = await memoryRepo.create({
-            filename,
-            key: fm.key ?? path.basename(filename, '.md'),
-            key_type: fm.key_type ?? 'freeform',
-            doc_type: fm.doc_type ?? 'other',
-            description: fm.description ?? path.basename(filename, '.md'),
-            body: parsed.body,
-            tags: fm.tags,
-            status: fm.status,
-            related_to: fm.related_to,
-            folder,
-          });
-          return { content: [{ type: 'text', text: JSON.stringify({ forked: true, kind: 'memory', id: doc.source_path, folder }, null, 2) }] };
-        }
-        const fm = parsed.frontmatter as Partial<SkillFrontmatter>;
-        if (!fm.name || !fm.description) {
-          return { content: [{ type: 'text', text: 'shared skill is missing required name/description frontmatter' }], isError: true };
-        }
-        const doc = await skillRepo.create(
-          { name: fm.name, description: fm.description, tags: fm.tags, trigger_phrases: fm.trigger_phrases },
-          parsed.body,
-          undefined,
-          folder
-        );
-        return { content: [{ type: 'text', text: JSON.stringify({ forked: true, kind: 'skill', id: doc.name, folder }, null, 2) }] };
+        return ok(await shareStatus(deps, subjectOf(subject)));
       } catch (err) {
-        return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
+        return fail(err);
       }
     }
   );
 
   mcp.tool(
     'bucket_list_shared_items',
-    'Lists memory docs/skills someone has shared directly with you, item by item — not a whole connected folder (see bucket_list_remote_folders for that). Read one with skill_get/memory_get using its `folder`; `status` is \'active\' or \'revoked\'; `paused: true` means it arrived as a direct share the user has not yet unpaused in the web UI, so list/search skip it. Reflects the web UI\'s last sync (opening its "Shared with me" panel, or its refresh button) — this tool does not trigger one.',
-    {},
-    async () => {
-      return { content: [{ type: 'text', text: JSON.stringify(listSharedItems(db, identity.current().username), null, 2) }] };
+    "Lists docs/skills others shared with you item by item (folders shared whole are connected as sources instead). Read one with skill_get/memory_get using its `folder`; role 'editor' items are editable in place, others read-only. `paused: true` = a direct share not yet accepted — hidden from list/search until unpaused. `refresh: true` first syncs with folderfoo (discovers new shares, revocations, edits).",
+    { refresh: z.boolean().optional() },
+    async ({ refresh }) => {
+      try {
+        const summary = refresh ? await refreshShares(deps) : undefined;
+        return ok({ ...(summary ? { refresh: summary } : {}), items: listSharedItems(deps.db, deps.identity.current().username) });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  mcp.tool(
+    'bucket_fork_shared_item',
+    'Copies a shared item (origin_id from bucket_list_shared_items) into one of your own folders of the matching kind, with its attachments and skill files, as an independent doc no longer linked to the original.',
+    { origin_id: z.string(), folder: z.string() },
+    async ({ origin_id, folder }) => {
+      try {
+        return ok(await forkSharedItem(deps, origin_id, folder));
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  mcp.tool(
+    'bucket_leave_shared_item',
+    'Removes yourself from an item shared with you (origin_id from bucket_list_shared_items) and deletes its local copy. Fork it first to keep a copy.',
+    { origin_id: z.string() },
+    async ({ origin_id }) => {
+      try {
+        const result = await leaveSharedItem(deps.db, deps.config.baseDir, origin_id, deps.identity.current().username);
+        return 'error' in result ? fail(new Error(result.error)) : ok(`Left shared item ${origin_id}.`);
+      } catch (err) {
+        return fail(err);
+      }
     }
   );
 }

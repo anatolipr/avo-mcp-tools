@@ -14,11 +14,11 @@ import { applyBodyEdits, type BodyEdit } from '../shared/body-edits.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
 import { rebaseFolderPath } from '../config.js';
 import type { SkillDoc, SkillFrontmatter, SkillStatus } from '../types.js';
-import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, trashFile as trashRemoteFile, trashFolder as trashRemoteFolder, renameFolder as renameRemoteFolder, joinRemoteFolderPath, assertRemoteFolderExists } from '../remote/folderfoo-client.js';
+import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, trashFile as trashRemoteFile, trashFolder as trashRemoteFolder, renameFolder as renameRemoteFolder, joinRemoteFolderPath, assertRemoteFolderExists, ReadOnlyRemoteFolderError } from '../remote/folderfoo-client.js';
 import { guessMimeType } from '../attachments/storage.js';
 import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 import { writeRemoteThenLocal } from '../remote/write-order.js';
-import { isSharedFolderName, sharedItemReadOnlyError } from '../remote/shared-items.js';
+import { isSharedFolderName, sharedItemReadOnlyError, sharedItemWriteTarget, type SharedWriteTarget } from '../remote/shared-items.js';
 
 interface SkillRow {
   id: string;
@@ -86,6 +86,49 @@ export class SkillRepository {
     return this.remoteFolders.find((f) => f.name === folderName);
   }
 
+  /** remoteFor, for a write: refuses a folder someone shared with this login read-only (see RemoteFolder.role). */
+  private writableRemoteFor(folderName: string): RemoteFolder | undefined {
+    const remote = this.remoteFor(folderName);
+    if (remote?.owner && remote.role === 'member') throw new ReadOnlyRemoteFolderError(folderName, remote.owner);
+    return remote;
+  }
+
+  /**
+   * Where a write to `filePath` — a file inside someone else's shared skill (SKILL.md, a sibling, or
+   * an attachment) — goes on the owner's folderfoo. Throws the read-only error unless the share
+   * grants this login 'editor'.
+   */
+  private sharedTargetFor(filePath: string, displayName: string): SharedWriteTarget {
+    const target = sharedItemWriteTarget(this.db, filePath, this.identity?.current().username ?? null);
+    if ('error' in target) throw sharedItemReadOnlyError(displayName);
+    return target;
+  }
+
+  /** Writes one file of a shared skill to the owner's copy — see sharedTargetFor. */
+  private async pushShared(filePath: string, displayName: string, content: string | Buffer, mimeType?: string): Promise<void> {
+    const target = this.sharedTargetFor(filePath, displayName);
+    if (!this.credentialsBaseDir) return;
+    if (typeof content === 'string') {
+      await writeRemoteFile(target.server, this.credentialsBaseDir, target.tenantId, target.folderPath, target.name, content, target.owner);
+    } else {
+      await writeRemoteBinaryFile(target.server, this.credentialsBaseDir, target.tenantId, target.folderPath, target.name, content, mimeType ?? guessMimeType(target.name), target.owner);
+    }
+  }
+
+  private async trashShared(filePath: string): Promise<void> {
+    const target = this.sharedTargetFor(filePath, path.basename(filePath));
+    if (!this.credentialsBaseDir) return;
+    await trashRemoteFile(target.server, this.credentialsBaseDir, target.tenantId, target.folderPath, target.name, target.owner);
+  }
+
+  /** Records a shared remote folder's current role (see RemoteFolder.role). Returns whether it changed. */
+  setRemoteRole(folderName: string, role: 'member' | 'editor'): boolean {
+    const remote = this.remoteFor(folderName);
+    if (!remote || remote.role === role) return false;
+    remote.role = role;
+    return true;
+  }
+
   /** Whether `folderName` should be visible right now — always true for local folders; for a remote folder, only when it matches the current login (see identity.ts). No identity tracker configured means folderfoo integration is off entirely, so nothing remote is ever visible. */
   private isFolderNameVisible(folderName: string): boolean {
     const remote = this.remoteFor(folderName);
@@ -117,7 +160,8 @@ export class SkillRepository {
    * doc comment) — this turns that into a loud, specific RemoteFolderGoneError instead.
    */
   private async pushToRemoteIfNeeded(targetFolderName: string, filePath: string, fileContents: string): Promise<void> {
-    const remote = this.remoteFor(targetFolderName);
+    if (isSharedFolderName(targetFolderName)) return this.pushShared(filePath, path.basename(path.dirname(filePath)), fileContents);
+    const remote = this.writableRemoteFor(targetFolderName);
     if (!remote || !this.credentialsBaseDir) return;
     await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, targetFolderName, remote.owner);
     const skillDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(filePath)));
@@ -134,7 +178,8 @@ export class SkillRepository {
    * (remote/write-order.ts), so there is nothing on disk yet to read back.
    */
   async pushAttachmentIfNeeded(folderName: string, attachmentFilePath: string, data: Buffer, mimeType: string): Promise<void> {
-    const remote = this.remoteFor(folderName);
+    if (isSharedFolderName(folderName)) return this.pushShared(attachmentFilePath, path.basename(attachmentFilePath), data, mimeType);
+    const remote = this.writableRemoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
     await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
@@ -149,7 +194,8 @@ export class SkillRepository {
    * frontmatter entry, leaving the remote copy behind forever.
    */
   async trashAttachmentIfNeeded(folderName: string, attachmentFilePath: string): Promise<void> {
-    const remote = this.remoteFor(folderName);
+    if (isSharedFolderName(folderName)) return this.trashShared(attachmentFilePath);
+    const remote = this.writableRemoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
     await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
@@ -163,7 +209,8 @@ export class SkillRepository {
    * real filename, since folderfoo has no reason to rename it. No-op for a local folder.
    */
   async pushSkillSiblingFileIfNeeded(folderName: string, filePath: string, content: string | Buffer): Promise<void> {
-    const remote = this.remoteFor(folderName);
+    if (isSharedFolderName(folderName)) return this.pushShared(filePath, path.basename(filePath), content);
+    const remote = this.writableRemoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
     await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(filePath)));
@@ -177,7 +224,8 @@ export class SkillRepository {
 
   /** Trashes one sibling file's remote copy on folderfoo — the sibling-file counterpart to trashAttachmentIfNeeded. No-op for a local folder. */
   async trashSkillSiblingFileIfNeeded(folderName: string, filePath: string): Promise<void> {
-    const remote = this.remoteFor(folderName);
+    if (isSharedFolderName(folderName)) return this.trashShared(filePath);
+    const remote = this.writableRemoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
     await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(filePath)));
@@ -676,7 +724,10 @@ export class SkillRepository {
   ): Promise<SkillDoc> {
     const existing = await this.get(name, folder);
     if (!existing) throw new Error(`skill with name "${name}" not found`);
-    if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(name);
+    // Someone else's shared skill: pushToRemoteIfNeeded below writes it straight to the owner's
+    // copy, and only through an 'editor' share (checked here, before anything is written).
+    const shared = isSharedFolderName(existing.folder);
+    if (shared) this.sharedTargetFor(existing.source_path, name);
     // `paused` is local-cache-only and `body` is written separately as the markdown body, not
     // frontmatter — both must be split off of `existing` before spreading the rest into
     // `merged`, or they'd ride along into the SkillFrontmatter written to disk (duplicating the
@@ -711,7 +762,7 @@ export class SkillRepository {
         writeFileAtomic(existing.source_path, fileContents);
       }
     );
-    upsertFile(this.db, this.syncSpec, existing.source_path);
+    upsertFile(this.db, this.syncSpec, existing.source_path, shared ? existing.folder : undefined);
     return { ...merged, body: newBody, paused: existingPaused };
   }
 
@@ -750,7 +801,7 @@ export class SkillRepository {
     const merged: SkillFrontmatter = { ...existingForFile, name: newName };
     const fileContents = formatMarkdownFile(stripSourcePath(merged), existing.body);
 
-    const remote = this.remoteFor(existing.folder);
+    const remote = this.writableRemoteFor(existing.folder);
     await writeRemoteThenLocal(
       async () => {
         if (!remote || !this.credentialsBaseDir) return;
@@ -885,7 +936,7 @@ export class SkillRepository {
     if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(name);
     if (this.isBuiltin(existing)) throw new Error(`skill "${name}" is builtin and cannot be deleted`);
     const skillDir = path.dirname(existing.source_path);
-    const remote = this.remoteFor(existing.folder);
+    const remote = this.writableRemoteFor(existing.folder);
     if (remote && this.credentialsBaseDir) {
       await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder, remote.owner);
       const skillDirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, skillDir));

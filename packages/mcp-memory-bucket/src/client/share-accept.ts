@@ -33,17 +33,21 @@ let started = false;
  * folderfoo integration is off (no host configured) — matches every other folderfoo widget mount
  * in this codebase (see #mountFolderfooProfileCircle's identical off-mode guard).
  */
-export async function startShareAccept(onSharedItemAccepted: (entry: {
+export interface AcceptedShareEntry {
   owner: string;
   path: string;
+  type: 'file' | 'folder';
   originId: string;
-  kind: 'memory' | 'skill';
+  /** null for a folder shared without one — the server classifies it by content. */
+  kind: 'memory' | 'skill' | null;
   role: 'member' | 'editor';
   server: string;
   tenantId: string;
   /** Set for a public-link accept — the server re-reads the item through the link itself, since a public link grants no login-addressable access. */
   publicToken?: string;
-}) => void): Promise<void> {
+}
+
+export async function startShareAccept(onSharedItemAccepted: (entry: AcceptedShareEntry) => void): Promise<void> {
   if (started) return;
   started = true;
 
@@ -60,17 +64,17 @@ export async function startShareAccept(onSharedItemAccepted: (entry: {
   document.addEventListener('folderfoo-share-redeemed', (e) => {
     const detail = (e as CustomEvent<ShareRedeemedDetail>).detail;
     if (!detail?.owner || !detail?.path) return;
-    // A type:'folder' redemption, or one with no originId/kind, isn't an item-level share this
-    // app knows how to file anywhere yet (same "nothing to open here" outcome Bulletino/mindfoo
-    // already reach for a folder link — see their own listeners) — silently ignored rather than
-    // erroring, since the link itself redeemed successfully.
-    if (detail.type !== 'file' || !detail.originId || !detail.kind) return;
+    // The server files it (see sharing.ts's acceptShare): a file needs a memory/skill kind; a
+    // folder becomes a shared skill or a connected folder. A link with no originId wasn't made for
+    // a shared item at all — the redemption itself still succeeded, so it's ignored.
+    if (!detail.originId || (detail.type === 'file' && !detail.kind)) return;
     onSharedItemAccepted({
       owner: detail.owner,
       path: detail.path,
+      type: detail.type,
       originId: detail.originId,
-      kind: detail.kind,
-      role: detail.role ?? 'member',
+      kind: detail.kind ?? null,
+      role: detail.role === 'editor' ? 'editor' : 'member',
       server: folderfooHost,
       tenantId: TENANT_ID,
     });
@@ -100,12 +104,13 @@ export async function startShareAccept(onSharedItemAccepted: (entry: {
         alert(err.message || 'This link is invalid or has expired.');
         return null;
       });
-      if (granted?.type === 'file' && granted.originId && granted.kind) {
+      if (granted?.originId && (granted.type === 'folder' || granted.kind)) {
         onSharedItemAccepted({
           owner: granted.owner,
           path: granted.path,
+          type: granted.type,
           originId: granted.originId,
-          kind: granted.kind,
+          kind: granted.kind ?? null,
           role: 'member',
           server: folderfooHost,
           tenantId: TENANT_ID,

@@ -5,19 +5,16 @@ import type Database from 'better-sqlite3';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   saveFolder,
-  saveRemoteFolder,
   removeFolder as removeFolderFromConfig,
   sanitizeFolderName,
-  mirrorDirFor,
   type BucketConfig,
-  type RemoteFolder,
 } from '../config.js';
 import { pruneOrphanChunks } from '../store/chunks.js';
 import { initialScan, rebuildDocTables, type TableSyncSpec } from '../store/sync.js';
 import type { SkillRepository } from '../skills/repository.js';
 import type { MemoryRepository } from '../memory/repository.js';
-import { listFolders as listFolderfooFolders } from '../remote/folderfoo-client.js';
-import { pollOne } from '../remote/remote-sync.js';
+import { listFolders as listFolderfooFolders, getSharedWithMe } from '../remote/folderfoo-client.js';
+import { connectRemoteFolder, type RemoteDeps } from '../remote/connect.js';
 import type { IdentityTracker } from '../remote/identity.js';
 import { TENANT_ID } from './folderfoo-tenant.js';
 
@@ -32,10 +29,10 @@ export function registerBucketFolderTools(
   db: Database.Database,
   skillSpec: TableSyncSpec<any>,
   memorySpec: TableSyncSpec<any>,
-  identity: IdentityTracker
+  identity: IdentityTracker,
+  remoteDeps: RemoteDeps
 ): void {
   const repoFor = (kind: 'skill' | 'memory') => (kind === 'skill' ? skillRepo : memoryRepo);
-  const specFor = (kind: 'skill' | 'memory') => (kind === 'skill' ? skillSpec : memorySpec);
 
   mcp.tool(
     'bucket_list_folders',
@@ -80,7 +77,7 @@ export function registerBucketFolderTools(
 
   mcp.tool(
     'bucket_list_remote_folders',
-    "Lists the current user's own folders on the connected folderfoo deployment, including ones not yet connected to this bucket — use this to pick a `folderPath` for bucket_connect_remote_folder. Each entry is tagged `connected` (the name it's already registered under, per kind, or null) so you don't connect the same remote folder twice. Errors with a clear message if folderfoo integration is off (needs --folderfoo-mode/FOLDERFOO_MODE) or nobody is logged in yet (log in via the web UI, bucket_open_ui, first — this tool cannot itself perform a folderfoo login).",
+    "Lists the current user's own folders on the connected folderfoo deployment, plus folders others shared with them (`sharedWith`: owner, role, kind), including ones not yet connected to this bucket — use this to pick a `folderPath` (and `owner`) for bucket_connect_remote_folder. Each own folder is tagged `connected` (the name it's already registered under, per kind, or null) so you don't connect the same remote folder twice. Errors with a clear message if folderfoo integration is off (needs --folderfoo-mode/FOLDERFOO_MODE) or nobody is logged in yet (log in via the web UI, bucket_open_ui, first — this tool cannot itself perform a folderfoo login).",
     {},
     async () => {
       if (config.folderfooMode === 'off' || !config.folderfooHost) {
@@ -109,7 +106,10 @@ export function registerBucketFolderTools(
           ...f,
           connected: { skill: skillConnected.get(f.path) ?? null, memory: memoryConnected.get(f.path) ?? null },
         }));
-        return { content: [{ type: 'text', text: JSON.stringify(annotated, null, 2) }] };
+        const sharedWith = (await getSharedWithMe(server, config.baseDir, TENANT_ID))
+          .filter((entry) => entry.type === 'folder')
+          .map((entry) => ({ owner: entry.owner, path: entry.name, role: entry.role, kind: entry.kind }));
+        return { content: [{ type: 'text', text: JSON.stringify({ own: annotated, sharedWith }, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
       }
@@ -118,50 +118,23 @@ export function registerBucketFolderTools(
 
   mcp.tool(
     'bucket_connect_remote_folder',
-    "Connects one of the user's own folderfoo folders (see bucket_list_remote_folders for `folderPath` values) as a new skill or memory source — syncs like a folder added via bucket_create_folder, so skill_create/memory_create can target it via `folder` and edits push back to folderfoo automatically. Idempotent: if this exact folderPath is already connected under this kind, returns that existing folder instead of creating a duplicate. Same login requirement as bucket_list_remote_folders.",
+    "Connects a folderfoo folder (a `path` from bucket_list_remote_folders; pass `owner` for one someone shared with you) as a new skill or memory source — synced like a local folder, so skill_create/memory_create can target it via `folder` and edits push back to folderfoo (a read-only share refuses edits). Idempotent: an already-connected folder is returned as-is. Same login requirement as bucket_list_remote_folders.",
     {
       kind: KIND,
-      folderPath: z.string().describe("a `path` value from bucket_list_remote_folders ('' for the folderfoo root)"),
-      name: z.string().optional().describe("name for the folder; defaults to a sanitized version of folderPath's last segment. Auto-suffixed with the connecting username if it collides with a folder connected under a different folderfoo login."),
+      folderPath: z.string().describe("('' for your folderfoo root)"),
+      owner: z.string().optional(),
+      name: z.string().optional().describe("defaults to folderPath's last segment, auto-suffixed on a clash with another login's folder"),
     },
-    async ({ kind, folderPath, name }) => {
+    async ({ kind, folderPath, owner, name }) => {
       if (config.folderfooMode === 'off' || !config.folderfooHost) {
         return {
           content: [{ type: 'text', text: 'folderfoo integration is off — restart with --folderfoo-mode dev|cloud (or set FOLDERFOO_MODE) to enable it' }],
           isError: true,
         };
       }
-      const current = identity.current();
-      if (!current.username) {
-        return { content: [{ type: 'text', text: 'not logged in to folderfoo — open the web UI (bucket_open_ui) and log in first' }], isError: true };
-      }
-      const server = config.folderfooHost;
-      const repo = repoFor(kind);
-      const already = repo.listRemoteFolders().find((f) => f.server === server && f.tenantId === TENANT_ID && f.folderPath === folderPath);
-      if (already) {
-        return {
-          content: [
-            { type: 'text', text: JSON.stringify({ name: already.name, server, tenantId: TENANT_ID, folderPath, kind, alreadyConnected: true }, null, 2) },
-          ],
-        };
-      }
-      const folderName = sanitizeFolderName(name || folderPath.split('/').filter(Boolean).pop() || TENANT_ID);
-      if (!folderName) {
-        return { content: [{ type: 'text', text: 'could not derive a valid folder name — provide one explicitly' }], isError: true };
-      }
       try {
-        // Resolved FIRST (before deriving mirrorDir) — auto-suffixes the requested name when it
-        // collides with a folder connected under a DIFFERENT folderfoo login (e.g. two different users
-        // each naturally wanting "bbbmemz"), still rejecting a collision against the CALLER's own
-        // identity. Mirrors the web route's POST /api/remote-folders logic (routes.ts) — see
-        // repo.resolveAvailableName's doc comment.
-        const resolvedName = repo.resolveAvailableName(folderName, current.username);
-        const mirrorDir = mirrorDirFor(config.baseDir, current.mode, current.username, resolvedName);
-        const remote: RemoteFolder = { name: resolvedName, server, tenantId: TENANT_ID, folderPath, mirrorDir, mode: current.mode, username: current.username };
-        repo.registerRemoteFolder(remote);
-        saveRemoteFolder(config, kind, { name: resolvedName, server, tenantId: TENANT_ID, folderPath, mode: current.mode, username: current.username });
-        await pollOne(db, specFor(kind), remote, config.baseDir);
-        return { content: [{ type: 'text', text: JSON.stringify({ name: resolvedName, server, tenantId: TENANT_ID, folderPath, kind }, null, 2) }] };
+        const result = await connectRemoteFolder(remoteDeps, { kind, name, server: config.folderfooHost, tenantId: TENANT_ID, folderPath, owner });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return { content: [{ type: 'text', text: (err as Error).message }], isError: true };
       }

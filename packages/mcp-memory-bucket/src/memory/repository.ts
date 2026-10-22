@@ -15,10 +15,10 @@ import { attachmentsDirFor } from '../attachments/storage.js';
 import type { NamedFolder, RemoteFolder } from '../config.js';
 import { rebaseFolderPath } from '../config.js';
 import { normalizeKey } from '../types.js';
-import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, renameFile as renameRemoteFile, trashFile as trashRemoteFile, joinRemoteFolderPath, assertRemoteFolderExists, FolderfooRequestError } from '../remote/folderfoo-client.js';
+import { readFile as readRemoteFile, writeFile as writeRemoteFile, writeBinaryFile as writeRemoteBinaryFile, renameFile as renameRemoteFile, renameFolder as renameRemoteFolder, trashFile as trashRemoteFile, joinRemoteFolderPath, assertRemoteFolderExists, FolderfooRequestError, ReadOnlyRemoteFolderError } from '../remote/folderfoo-client.js';
 import { isFolderVisible, type IdentityTracker } from '../remote/identity.js';
 import { writeRemoteThenLocal } from '../remote/write-order.js';
-import { isSharedFolderName, sharedItemReadOnlyError } from '../remote/shared-items.js';
+import { isSharedFolderName, sharedItemReadOnlyError, sharedItemWriteTarget, type SharedWriteTarget } from '../remote/shared-items.js';
 import type { MemoryDoc, MemoryDocType, MemoryFrontmatter, MemoryKeyType, MemoryStatus } from '../types.js';
 
 /** Uppercases and strips everything but letters/digits — used to compare keys that differ only in
@@ -82,6 +82,32 @@ export class MemoryRepository {
     return this.remoteFolders.find((f) => f.name === folderName);
   }
 
+  /** remoteFor, for a write: refuses a folder someone shared with this login read-only (see RemoteFolder.role). */
+  private writableRemoteFor(folderName: string): RemoteFolder | undefined {
+    const remote = this.remoteFor(folderName);
+    if (remote?.owner && remote.role === 'member') throw new ReadOnlyRemoteFolderError(folderName, remote.owner);
+    return remote;
+  }
+
+  /**
+   * Where a write to `filePath` — a file inside someone else's shared item (the doc itself, or one
+   * of its attachments) — goes on the owner's folderfoo. Throws the read-only error unless the
+   * share grants this login 'editor'.
+   */
+  private sharedTargetFor(filePath: string, displayName: string): SharedWriteTarget {
+    const target = sharedItemWriteTarget(this.db, filePath, this.identity?.current().username ?? null);
+    if ('error' in target) throw sharedItemReadOnlyError(displayName);
+    return target;
+  }
+
+  /** Records a shared remote folder's current role (see RemoteFolder.role). Returns whether it changed. */
+  setRemoteRole(folderName: string, role: 'member' | 'editor'): boolean {
+    const remote = this.remoteFor(folderName);
+    if (!remote || remote.role === role) return false;
+    remote.role = role;
+    return true;
+  }
+
   /** Whether `folderName` should be visible right now — always true for local folders; for a remote folder, only when it matches the current login (see identity.ts). No identity tracker configured means folderfoo integration is off entirely, so nothing remote is ever visible. */
   private isFolderNameVisible(folderName: string): boolean {
     const remote = this.remoteFor(folderName);
@@ -106,7 +132,13 @@ export class MemoryRepository {
    * nothing on disk yet to read back.
    */
   async pushAttachmentIfNeeded(folderName: string, attachmentFilePath: string, data: Buffer, mimeType: string): Promise<void> {
-    const remote = this.remoteFor(folderName);
+    if (isSharedFolderName(folderName)) {
+      const target = this.sharedTargetFor(attachmentFilePath, path.basename(attachmentFilePath));
+      if (!this.credentialsBaseDir) return;
+      await writeRemoteBinaryFile(target.server, this.credentialsBaseDir, target.tenantId, target.folderPath, target.name, data, mimeType, target.owner);
+      return;
+    }
+    const remote = this.writableRemoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
     await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
@@ -124,7 +156,13 @@ export class MemoryRepository {
    * the removal was a mistake.
    */
   async trashAttachmentIfNeeded(folderName: string, attachmentFilePath: string): Promise<void> {
-    const remote = this.remoteFor(folderName);
+    if (isSharedFolderName(folderName)) {
+      const target = this.sharedTargetFor(attachmentFilePath, path.basename(attachmentFilePath));
+      if (!this.credentialsBaseDir) return;
+      await trashRemoteFile(target.server, this.credentialsBaseDir, target.tenantId, target.folderPath, target.name, target.owner);
+      return;
+    }
+    const remote = this.writableRemoteFor(folderName);
     if (!remote || !this.credentialsBaseDir) return;
     await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, folderName, remote.owner);
     const dirRelPath = joinRemoteFolderPath(remote.folderPath, path.relative(remote.mirrorDir, path.dirname(attachmentFilePath)));
@@ -714,7 +752,7 @@ export class MemoryRepository {
     // rejects it, nothing local changes at all, so a remote outage can't leave the local mirror
     // and folderfoo disagreeing (see remote/write-order.ts). Only on remote success does the local
     // mirror get created.
-    const remote = this.remoteFor(targetFolder.name);
+    const remote = this.writableRemoteFor(targetFolder.name);
     await writeRemoteThenLocal(
       async () => {
         if (!remote || !this.credentialsBaseDir) return;
@@ -780,7 +818,9 @@ export class MemoryRepository {
   async update(folder: string | undefined, filename: string, frontmatter?: Partial<MemoryFrontmatter>, body?: string, bodyEdits?: BodyEdit[]): Promise<MemoryDoc> {
     const existing = await this.get(folder, filename);
     if (!existing) throw new Error(`memory doc "${filename}" not found`);
-    if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(filename);
+    // Someone else's shared doc: editable in place only through an 'editor' share, written
+    // straight to the owner's copy.
+    const sharedTarget = isSharedFolderName(existing.folder) ? this.sharedTargetFor(existing.source_path, filename) : undefined;
     // `paused` is local-cache-only and `body` is written separately as the markdown body, not
     // frontmatter — both must be split off of `existing` before spreading the rest into
     // `merged`, or they'd ride along into the MemoryFrontmatter written to disk (duplicating the
@@ -796,9 +836,13 @@ export class MemoryRepository {
     const fileContents = formatMarkdownFile(stripSourcePath(merged), newBody);
 
     // Remote-first — see create()'s comment on why (remote/write-order.ts).
-    const remote = this.remoteFor(existing.folder);
+    const remote = sharedTarget ? undefined : this.writableRemoteFor(existing.folder);
     await writeRemoteThenLocal(
       async () => {
+        if (sharedTarget && this.credentialsBaseDir) {
+          await writeRemoteFile(sharedTarget.server, this.credentialsBaseDir, sharedTarget.tenantId, sharedTarget.folderPath, sharedTarget.name, fileContents, sharedTarget.owner);
+          return;
+        }
         if (!remote || !this.credentialsBaseDir) return;
         await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder, remote.owner);
         // No .md stripping — see create()'s comment.
@@ -812,7 +856,8 @@ export class MemoryRepository {
         writeFileAtomic(existing.source_path, fileContents);
       }
     );
-    upsertFile(this.db, this.syncSpec, existing.source_path);
+    // A shared doc's mirror is outside every configured folder, so its folder is passed explicitly.
+    upsertFile(this.db, this.syncSpec, existing.source_path, sharedTarget ? existing.folder : undefined);
     return { ...merged, body: newBody, paused: existingPaused };
   }
 
@@ -889,7 +934,7 @@ export class MemoryRepository {
     // folderfoo has no permanent single-file delete on /data/:filename, and trash matches this
     // tool's existing move-not-copy conventions elsewhere while still leaving the remote side
     // recoverable if the delete was a mistake.
-    const remote = this.remoteFor(existing.folder);
+    const remote = this.writableRemoteFor(existing.folder);
     if (remote && this.credentialsBaseDir) {
       await assertRemoteFolderExists(remote.server, this.credentialsBaseDir, remote.tenantId, remote.folderPath, existing.folder, remote.owner);
       const relPath = path.relative(remote.mirrorDir, existing.source_path);
@@ -935,7 +980,7 @@ export class MemoryRepository {
     const newAttachmentsWrapper = path.dirname(attachmentsDirFor(newPath, 'memory'));
 
     const merged: MemoryFrontmatter = { ...existing, source_path: newPath };
-    const remote = this.remoteFor(existing.folder);
+    const remote = this.writableRemoteFor(existing.folder);
     await writeRemoteThenLocal(
       async () => {
         if (!remote || !this.credentialsBaseDir) return;
@@ -944,6 +989,22 @@ export class MemoryRepository {
         const dir = joinRemoteFolderPath(remote.folderPath, path.dirname(oldRelPath));
         const oldName = path.basename(oldRelPath);
         const newName = path.basename(newPath);
+        // The doc's attachments live beside it in "<stem>/attachments/" — renamed first, so a
+        // clash at the new stem (409) stops the rename before the doc itself has moved. A 404 means
+        // the doc has no attachments folder on folderfoo, and a 400 a stem folderfoo can't use as a
+        // folder name (so no attachments folder can exist under it) — both fine.
+        try {
+          await renameRemoteFolder(
+            remote.server,
+            this.credentialsBaseDir,
+            remote.tenantId,
+            joinRemoteFolderPath(dir, path.basename(oldName, '.md')),
+            joinRemoteFolderPath(dir, path.basename(newName, '.md')),
+            remote.owner
+          );
+        } catch (err) {
+          if (!(err instanceof FolderfooRequestError) || (err.status !== 404 && err.status !== 400)) throw err;
+        }
         try {
           await renameRemoteFile(remote.server, this.credentialsBaseDir, remote.tenantId, dir, oldName, newName, remote.owner);
         } catch (err) {
@@ -980,6 +1041,7 @@ export class MemoryRepository {
     const existing = await this.get(folder, filename);
     if (!existing) throw new Error(`memory doc "${filename}" not found`);
     if (isSharedFolderName(existing.folder)) throw sharedItemReadOnlyError(filename);
+    this.writableRemoteFor(existing.folder);
     snapshotToTrash(this.credentialsBaseDir, existing.source_path);
     writeMarkdownFile(existing.source_path, {}, existing.body);
     upsertFile(this.db, this.syncSpec, existing.source_path);

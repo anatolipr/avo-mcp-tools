@@ -117,6 +117,7 @@ export function openCache(dbPath: string): Database.Database {
       tenant_id TEXT NOT NULL,
       kind TEXT NOT NULL CHECK (kind IN ('memory', 'skill')),
       role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member', 'editor')),
+      item_type TEXT NOT NULL DEFAULT 'file', -- 'file' (one doc) or 'folder' (mirrored whole, e.g. a skill with its siblings) — see shared-items.ts
       remote_path TEXT NOT NULL,       -- current path on the owner's folderfoo, e.g. "notes.md"
       mirror_path TEXT NOT NULL,       -- local mirror file this item is synced into
       last_seen_modified_at TEXT,      -- folderfoo's modifiedAt as of the last refresh, for change detection
@@ -146,6 +147,7 @@ export function openCache(dbPath: string): Database.Database {
   ensureColumns(db, 'shared_items', [
     ['username', "TEXT NOT NULL DEFAULT ''"],
     ['public_token', 'TEXT'],
+    ['item_type', "TEXT NOT NULL DEFAULT 'file'"],
   ]);
   // After ensureColumns: `paused`/`folder` may only just have been added to an older cache file.
   // Both let bucket_recall find the docs it must skip (paused, or in a folder hidden from the

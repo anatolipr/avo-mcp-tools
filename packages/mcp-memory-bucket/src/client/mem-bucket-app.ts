@@ -15,7 +15,8 @@ import type { SharedItemRow, RefreshSummary } from './shared-with-me-panel.js';
 import { TENANT_ID, getFolderfooConfig } from './server-config.js';
 import { parseFolderfooAddress } from './folderfoo-address.js';
 import { currentIdentity, startIdentityStream } from './identity-stream.js';
-import { startShareAccept } from './share-accept.js';
+import { startShareAccept, type AcceptedShareEntry } from './share-accept.js';
+import './share-form.js';
 import { toast } from './toast.js';
 import './toast.js';
 
@@ -260,6 +261,15 @@ export class MemBucketApp extends LitElement {
       opacity: 0.6; font-size: 12px; line-height: 1; padding: 2px; border-radius: 50%;
     }
     .folder-chip .remove:hover { opacity: 1; background: var(--hover-strong); }
+    .share-folder-overlay {
+      position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-start; justify-content: center;
+      padding-top: 12vh; background: rgba(0, 0, 0, 0.3);
+    }
+    .share-folder-dialog {
+      width: min(480px, calc(100vw - 32px)); padding: 12px; border-radius: 8px; background: var(--bg);
+      border: 1px solid var(--border-strong); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    }
+    .share-folder-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
     .add-folder-btn {
       border: 1px dashed var(--border-strong); border-radius: 999px; padding: 3px 10px; font-size: 12px;
       cursor: pointer; background: none; color: inherit; opacity: 0.75;
@@ -321,6 +331,7 @@ export class MemBucketApp extends LitElement {
   #folders = new Signal<FoldersResponse>(EMPTY_FOLDERS);
   #showAddFolder = new Signal<boolean>(false);
   #removingFolder = new Signal<string>('');
+  #sharingFolder = new Signal<Folder | null>(null);
   #foldersLoaded = new Signal<boolean>(false);
   #splitPct = new Signal<number>(loadSplitPct());
   #folderfooOpenStatus = new Signal<string>(''); // transient banner for the folderfoo-file-open handler's result/miss message
@@ -508,7 +519,8 @@ export class MemBucketApp extends LitElement {
     // logged in," so without this check the server's process-wide identity
     // would stay unset (hiding every remote folder) until the user manually
     // logged out and back in.
-    this.#onFolderfooAuthChange();
+    // Join notifications wait for the login above to reach the server, which asks folderfoo as that user.
+    this.#onFolderfooAuthChange().then(() => this.#announceShareJoins());
     startIdentityStream();
     startShareAccept((entry) => this.#acceptSharedItem(entry));
     // Loaded once up front (not just on-demand when the panel opens) so showShared's "has at least
@@ -723,7 +735,7 @@ export class MemBucketApp extends LitElement {
     }
     const { folderfooMode, folderfooHost } = await getFolderfooConfig();
     if (folderfooMode === 'off' || !folderfooHost) return; // no page-level widget was ever mounted - nothing to attribute this login to
-    fetch('/api/folderfoo/login', {
+    await fetch('/api/folderfoo/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ server: folderfooHost, token }),
@@ -853,31 +865,40 @@ export class MemBucketApp extends LitElement {
     this.#setView('entries');
   }
 
-  // Called by share-accept.ts once a redeemed share-link/public-link resolves to an item-level
-  // share (Phase 3) — posts it into shared_items and switches straight into the "Shared with me"
-  // panel so accepting a link feels the same as Bulletino force-opening a shared document, not a
-  // silent background change the user has to go looking for.
-  async #acceptSharedItem(entry: {
-    owner: string;
-    path: string;
-    originId: string;
-    kind: 'memory' | 'skill';
-    role: 'member' | 'editor';
-    server: string;
-    tenantId: string;
-    publicToken?: string;
-  }) {
+  // Called by share-accept.ts once a redeemed invite link or a followed public link resolves —
+  // the server files it as a shared item (then the "Shared with me" panel opens, so accepting
+  // feels like opening the shared thing, not a silent background change) or, for a whole folder,
+  // connects it as a source (then the folder list reloads to show it).
+  async #acceptSharedItem(entry: AcceptedShareEntry) {
     const res = await fetch('/api/shared-items/accept', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(entry),
     });
+    const body = (await res.json().catch(() => ({}))) as { error?: string; connected?: { name: string; role?: string; kindMismatchWarning?: string } };
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      alert((body as { error?: string }).error || 'Failed to accept the shared item.');
+      toast.danger(body.error || 'Failed to accept the shared item.', 6000);
       return;
     }
+    if (body.connected) {
+      const readOnly = body.connected.role === 'member' ? ' (read-only)' : '';
+      toast.success(`Connected ${entry.owner}'s folder as "${body.connected.name}"${readOnly}.`, 5000);
+      if (body.connected.kindMismatchWarning) toast.warning(body.connected.kindMismatchWarning, 8000);
+      await this.#refetch();
+      return;
+    }
+    toast.success(`${entry.owner} shared "${entry.path.split('/').pop()}" with you.`, 4000);
     this.#setView('shared');
+  }
+
+  // "Alice joined via your link to plans/q3.md" — once per join (the server marks them seen), on
+  // page load. Silent when not logged in or folderfoo is off.
+  async #announceShareJoins() {
+    const res = await fetch('/api/share-joins').catch(() => null);
+    if (!res?.ok) return;
+    const { joins } = (await res.json()) as { joins: Array<{ username: string; path: string }> };
+    for (const join of joins.slice(0, 3)) toast.info(`${join.username} joined via your link to ${join.path}.`, 6000);
+    if (joins.length > 3) toast.info(`…and ${joins.length - 3} more joined via your links.`, 6000);
   }
 
   // Writes an independent copy of a shared item into a folder the user owns — see
@@ -894,6 +915,19 @@ export class MemBucketApp extends LitElement {
     if (!res.ok) return { ok: false, message: body.error || `Fork failed (${res.status}).` };
     await this.#refetch();
     return { ok: true, message: `Copied into "${folder}".` };
+  }
+
+  async #leaveSharedItem(item: SharedItemRow) {
+    if (!confirm(`Leave "${item.remote_path}" shared by ${item.owner}? Your local copy is deleted — fork it first to keep one.`)) return;
+    const res = await fetch(`/api/shared-items/${encodeURIComponent(item.origin_id)}/leave`, { method: 'POST' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast.danger(body.error || `Leave failed (${res.status}).`, 6000);
+      return;
+    }
+    toast.success(`Left "${item.remote_path}".`);
+    await this.#loadSharedItems();
+    await this.#refetch();
   }
 
   async #refetchChannels() {
@@ -1224,6 +1258,7 @@ export class MemBucketApp extends LitElement {
           .onDismiss=${(originId: string) => this.#dismissSharedItem(originId)}
           .onOpen=${(item: SharedItemRow) => this.#openSharedItem(item)}
           .onFork=${(item: SharedItemRow, folder: string) => this.#forkSharedItem(item, folder)}
+          .onLeave=${(item: SharedItemRow) => this.#leaveSharedItem(item)}
         ></shared-with-me-panel>
       `;
     }
@@ -1296,11 +1331,26 @@ export class MemBucketApp extends LitElement {
             (folder) => html`
               <button
                 class="folder-chip ${folder.remote ? 'remote' : ''} ${this.#activeFolders.value.includes(folder.name) ? 'active' : ''}"
-                title=${folder.remote ? `${folder.path} (remote — folderfoo)` : folder.path}
+                title=${folder.sharedBy
+                  ? `shared by ${folder.sharedBy}${folder.role === 'member' ? ' (read-only)' : ''} — folderfoo`
+                  : folder.remote
+                    ? `${folder.path} (remote — folderfoo)`
+                    : folder.path}
                 @click=${() => this.#toggleFolder(folder.name)}
               >
                 ${folder.remote ? html`<span class="remote-dot"></span>` : '📁'} ${folder.name}
                 <span class="kind">(${folder.kind === 'skill' ? 's' : 'm'})</span>
+                ${folder.remote && !folder.sharedBy
+                  ? html`<span
+                      class="remove"
+                      title="Share folder"
+                      @click=${(e: Event) => {
+                        e.stopPropagation();
+                        this.#sharingFolder.set(folder);
+                      }}
+                      >🔗</span
+                    >`
+                  : ''}
                 <span
                   class="remove"
                   title="Remove folder"
@@ -1314,6 +1364,18 @@ export class MemBucketApp extends LitElement {
         </div>
         <div class="header-toolbar">${this.#renderToolbar()}</div>
       </div>
+      ${this.#sharingFolder.value
+        ? html`<div class="share-folder-overlay" @click=${() => this.#sharingFolder.set(null)}>
+            <div class="share-folder-dialog" @click=${(e: Event) => e.stopPropagation()}>
+              <div class="share-folder-title">Share folder "${this.#sharingFolder.value.name}" — everything in it</div>
+              <share-form
+                .base=${`/api/folders/${this.#sharingFolder.value.kind}/${encodeURIComponent(this.#sharingFolder.value.name)}`}
+                .query=${''}
+                .onClose=${() => this.#sharingFolder.set(null)}
+              ></share-form>
+            </div>
+          </div>`
+        : ''}
       ${this.#folderfooOpenStatus.value
         ? html`
             <div class="folderfoo-open-banner">

@@ -9,6 +9,11 @@ export interface SharedItemRow {
   tenant_id: string;
   kind: 'memory' | 'skill';
   role: 'member' | 'editor';
+  /** 'folder': mirrored whole — a skill with its files, or a public folder of docs. */
+  item_type: 'file' | 'folder';
+  /** True for a public-link item (always read-only). */
+  public: boolean;
+  docCount: number;
   remote_path: string;
   mirror_path: string;
   last_seen_modified_at: string | null;
@@ -48,6 +53,7 @@ export class SharedWithMePanel extends LitElement {
     onDismiss: { attribute: false },
     onOpen: { attribute: false },
     onFork: { attribute: false },
+    onLeave: { attribute: false },
     _forkOpenFor: { state: true },
     _forkFolder: { state: true },
     _forkBusy: { state: true },
@@ -66,6 +72,7 @@ export class SharedWithMePanel extends LitElement {
   declare onDismiss: (originId: string) => void;
   declare onOpen: (item: SharedItemRow) => void;
   declare onFork: (item: SharedItemRow, folder: string) => Promise<{ ok: boolean; message: string }>;
+  declare onLeave: (item: SharedItemRow) => void;
 
   private _forkOpenFor: string | null = null;
   private _forkFolder = localStorage.getItem(LAST_FORK_FOLDER_KEY) ?? '';
@@ -171,10 +178,10 @@ export class SharedWithMePanel extends LitElement {
     return html`
       <div class="row ${revoked ? 'revoked' : ''}" @click=${() => openable && this.onOpen(item)}>
         <span class="icon">${item.kind === 'skill' ? '⚡' : '📝'}</span>
-        <span class="name">${item.remote_path}</span>
+        <span class="name">${item.remote_path}${item.item_type === 'folder' && item.docCount > 1 ? html` <span class="role-badge">${item.docCount} docs</span>` : ''}</span>
         ${revoked
           ? html`<span class="revoked-badge">no longer shared with you</span>`
-          : html`<span class="role-badge">${item.role}</span>`}
+          : html`<span class="role-badge" title=${item.role === 'editor' ? 'You can edit this in place — changes go to the owner\'s copy' : 'Read-only'}>${item.public ? 'public' : item.role === 'editor' ? 'can edit' : 'read-only'}</span>`}
         ${!revoked && item.paused
           ? html`<span class="role-badge" title="Arrived as a direct share — hidden from agents until you open it and unpause it">paused</span>`
           : ''}
@@ -183,7 +190,7 @@ export class SharedWithMePanel extends LitElement {
           : ''}
         ${revoked
           ? html`<button class="dismiss-btn" title="Dismiss" @click=${(e: Event) => { e.stopPropagation(); this.onDismiss(item.origin_id); }}>✕</button>`
-          : ''}
+          : html`<button class="dismiss-btn" title="Leave — remove yourself from this share and delete the local copy" @click=${(e: Event) => { e.stopPropagation(); this.onLeave(item); }}>⎋</button>`}
       </div>
       ${forkOpen
         ? html`

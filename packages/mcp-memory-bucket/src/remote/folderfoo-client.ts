@@ -176,54 +176,95 @@ export async function getSharedWithMe(server: string, baseDir: string, tenantId:
   );
 }
 
+/** A share role on folderfoo. 'live' (file channel publishing) exists there but is not used by this app. */
+export type ShareRole = 'member' | 'editor';
+
 /**
- * Grants another folderfoo user direct access to one of the caller's own memory docs/skills, via
- * folderfoo's POST /share/:filename — the immediate, no-link-needed half of Phase 4's share UX
- * (paired with createShareLink/createPublicLink below for the out-of-band half). `kind` tags the
- * grant so a recipient's shared_items row (see shared-items.ts) never has to guess memory-vs-skill
- * from content — see folderfoo's shares.js v6->v7 migration for why this exists at all.
+ * One shareable thing on the CALLER's own folderfoo tree: a file (a memory doc, or a legacy skill
+ * shared as its SKILL file) or a folder (a skill's own directory, or a whole connected folder).
+ * `path` is relative to the caller's root, e.g. "memz/notes.md" or "skills/deploy".
+ */
+export interface ShareAddress {
+  path: string;
+  type: 'file' | 'folder';
+}
+
+/** Splits a file's root-relative path into folderfoo's (folderPath, name) address. */
+function splitFilePath(filePath: string): { folderPath: string; name: string } {
+  const idx = filePath.lastIndexOf('/');
+  return idx === -1 ? { folderPath: '', name: filePath } : { folderPath: filePath.slice(0, idx), name: filePath.slice(idx + 1) };
+}
+
+function authed(jwt: string, tenantId: string, body?: unknown): RequestInit {
+  const headers: Record<string, string> = { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId };
+  if (body === undefined) return { headers };
+  headers['content-type'] = 'application/json';
+  return { headers, body: JSON.stringify(body) };
+}
+
+/**
+ * Grants another folderfoo user direct access to one of the caller's own files or folders — POST
+ * /share/:filename or POST /folders/share. `kind` tags the grant so a recipient never has to guess
+ * memory-vs-skill from content (see folderfoo's shares.js v6->v7 migration). A memory-kind file
+ * share also covers the doc's attachments directory on folderfoo's side.
  */
 export async function shareWithUser(
   server: string,
   baseDir: string,
   tenantId: string,
-  folderPath: string,
-  name: string,
+  target: ShareAddress,
   targetUsername: string,
   kind: 'memory' | 'skill',
-  role: 'member' | 'editor'
+  role: ShareRole
 ): Promise<void> {
+  const body = { username: targetUsername, kind, role };
   await withAuth(
     server,
     baseDir,
-    (jwt) =>
-      fetch(`${server}/share/${filenameParam(folderPath, name)}`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'application/json' },
-        body: JSON.stringify({ username: targetUsername, kind, role }),
-      }),
+    (jwt) => {
+      if (target.type === 'folder') return fetch(`${server}/folders/share`, { method: 'POST', ...authed(jwt, tenantId, { ...body, folderPath: target.path }) });
+      const { folderPath, name } = splitFilePath(target.path);
+      return fetch(`${server}/share/${filenameParam(folderPath, name)}`, { method: 'POST', ...authed(jwt, tenantId, body) });
+    },
     async () => undefined
   );
 }
 
-/** Revokes a specific recipient's direct access via folderfoo's DELETE /share/:filename/:username. */
-export async function unshareWithUser(
-  server: string,
-  baseDir: string,
-  tenantId: string,
-  folderPath: string,
-  name: string,
-  targetUsername: string
-): Promise<void> {
+/** Revokes one recipient's direct access — DELETE /share/:filename/:username or DELETE /folders/share. */
+export async function unshareWithUser(server: string, baseDir: string, tenantId: string, target: ShareAddress, targetUsername: string): Promise<void> {
   await withAuth(
     server,
     baseDir,
-    (jwt) =>
-      fetch(`${server}/share/${filenameParam(folderPath, name)}/${encodeURIComponent(targetUsername)}`, {
-        method: 'DELETE',
-        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId },
-      }),
+    (jwt) => {
+      if (target.type === 'folder') {
+        return fetch(`${server}/folders/share`, { method: 'DELETE', ...authed(jwt, tenantId, { folderPath: target.path, username: targetUsername }) });
+      }
+      const { folderPath, name } = splitFilePath(target.path);
+      return fetch(`${server}/share/${filenameParam(folderPath, name)}/${encodeURIComponent(targetUsername)}`, { method: 'DELETE', ...authed(jwt, tenantId) });
+    },
     async () => undefined
+  );
+}
+
+export interface ShareMember {
+  username: string;
+  role: string;
+}
+
+/** Who currently has direct access to one of the caller's own files/folders, with their roles. */
+export async function listShareMembers(server: string, baseDir: string, tenantId: string, target: ShareAddress): Promise<ShareMember[]> {
+  return withAuth(
+    server,
+    baseDir,
+    (jwt) => {
+      if (target.type === 'folder') return fetch(`${server}/folders/share?${new URLSearchParams({ folderPath: target.path })}`, authed(jwt, tenantId));
+      const { folderPath, name } = splitFilePath(target.path);
+      return fetch(`${server}/share/${filenameParam(folderPath, name)}`, authed(jwt, tenantId));
+    },
+    async (res) => {
+      const body = (await res.json()) as { sharedWith: string[]; members?: ShareMember[] };
+      return body.members ?? body.sharedWith.map((username) => ({ username, role: 'member' }));
+    }
   );
 }
 
@@ -233,52 +274,93 @@ export interface CreatedLink {
   expiresAt: string;
 }
 
-/** Creates an out-of-band, login-required collaborator share link via folderfoo's POST /share-links. */
+/** Creates an out-of-band, login-required collaborator invite link (POST /share-links); every redemption grants `role`. */
 export async function createShareLink(
   server: string,
   baseDir: string,
   tenantId: string,
-  folderPath: string,
-  name: string,
-  kind: 'memory' | 'skill'
+  target: ShareAddress,
+  kind: 'memory' | 'skill',
+  role: ShareRole = 'member'
 ): Promise<CreatedLink> {
   return withAuth(
     server,
     baseDir,
-    (jwt) =>
-      fetch(`${server}/share-links`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'application/json' },
-        body: JSON.stringify({ path: joinRemoteFolderPath(folderPath, name), type: 'file', kind }),
-      }),
+    (jwt) => fetch(`${server}/share-links`, { method: 'POST', ...authed(jwt, tenantId, { path: target.path, type: target.type, kind, role }) }),
     (res) => res.json() as Promise<CreatedLink>
   );
 }
 
-/** Creates an anonymous, no-login-required public view link via folderfoo's POST /public-links. */
-export async function createPublicLink(
-  server: string,
-  baseDir: string,
-  tenantId: string,
-  folderPath: string,
-  name: string,
-  kind: 'memory' | 'skill'
-): Promise<CreatedLink> {
+/** Creates an anonymous, no-login-required, read-only public link (POST /public-links) for a file or folder. */
+export async function createPublicLink(server: string, baseDir: string, tenantId: string, target: ShareAddress, kind: 'memory' | 'skill'): Promise<CreatedLink> {
   return withAuth(
     server,
     baseDir,
-    (jwt) =>
-      fetch(`${server}/public-links`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, 'content-type': 'application/json' },
-        body: JSON.stringify({ path: joinRemoteFolderPath(folderPath, name), kind }),
-      }),
+    (jwt) => fetch(`${server}/public-links`, { method: 'POST', ...authed(jwt, tenantId, { path: target.path, type: target.type, kind }) }),
     (res) => res.json() as Promise<CreatedLink>
   );
+}
+
+export interface LinkSummary {
+  id: string;
+  kind: 'invite' | 'public';
+  role: string;
+  createdAt: string;
+  expiresAt: string;
+  revoked: boolean;
+  /** Invite links: everyone who joined through it. */
+  redeemers?: string[];
+  /** Public links: best-effort view count. */
+  viewCount?: number;
+}
+
+/** Every invite and public link the caller created for one of their own files/folders (never the tokens). */
+export async function listLinks(server: string, baseDir: string, tenantId: string, target: ShareAddress): Promise<LinkSummary[]> {
+  const qs = new URLSearchParams({ path: target.path, type: target.type });
+  type Raw = Omit<LinkSummary, 'kind' | 'role'> & { role?: string };
+  const [invites, publics] = await Promise.all([
+    withAuth(server, baseDir, (jwt) => fetch(`${server}/share-links?${qs}`, authed(jwt, tenantId)), async (res) => ((await res.json()) as { links: Raw[] }).links),
+    withAuth(server, baseDir, (jwt) => fetch(`${server}/public-links?${qs}`, authed(jwt, tenantId)), async (res) => ((await res.json()) as { links: Raw[] }).links),
+  ]);
+  return [
+    ...invites.map((l) => ({ ...l, kind: 'invite' as const, role: l.role ?? 'member' })),
+    ...publics.map((l) => ({ ...l, kind: 'public' as const, role: 'member' })),
+  ];
+}
+
+/** Revokes one of the caller's links by id. Access an invite link already granted stays — unshare that user separately. */
+export async function revokeLink(server: string, baseDir: string, tenantId: string, kind: 'invite' | 'public', id: string): Promise<void> {
+  const route = kind === 'invite' ? 'share-links' : 'public-links';
+  await withAuth(server, baseDir, (jwt) => fetch(`${server}/${route}/${encodeURIComponent(id)}`, { method: 'DELETE', ...authed(jwt, tenantId) }), async () => undefined);
+}
+
+/** The caller removes THEMSELVES from a file/folder someone shared with them (POST /shared-with-me/leave). */
+export async function leaveShare(server: string, baseDir: string, tenantId: string, owner: string, itemPath: string, type: 'file' | 'folder'): Promise<void> {
+  await withAuth(
+    server,
+    baseDir,
+    (jwt) => fetch(`${server}/shared-with-me/leave`, { method: 'POST', ...authed(jwt, tenantId, { owner, path: itemPath, type }) }),
+    async () => undefined
+  );
+}
+
+export interface LinkJoin {
+  username: string;
+  redeemedAt: string;
+  path: string;
+  type: 'file' | 'folder';
+}
+
+/** Who joined through any of the caller's invite links since the last call — this call marks them seen (GET /share-links/joins). */
+export async function getShareLinkJoins(server: string, baseDir: string, tenantId: string): Promise<LinkJoin[]> {
+  return withAuth(server, baseDir, (jwt) => fetch(`${server}/share-links/joins`, authed(jwt, tenantId)), async (res) => ((await res.json()) as { joins: LinkJoin[] }).joins);
 }
 
 export interface PublicLinkView {
-  content: unknown;
+  /** File links only: the stored text (raw, see fetchPublicLink). */
+  content?: unknown;
+  /** Folder links only: every file under the folder, folderPath relative to it. */
+  files?: Array<{ name: string; folderPath: string; size: number; mtime: number }>;
   owner: string;
   path: string;
   type: 'file' | 'folder';
@@ -286,19 +368,37 @@ export interface PublicLinkView {
   kind: 'memory' | 'skill' | null;
 }
 
-/**
- * Reads a public link's target via folderfoo's GET /public/:token — no login, the token is the
- * only credential. `content` is the raw file text for a file stored as raw bytes (every memory
- * doc/skill), or parsed JSON for folderfoo's legacy .json form. A revoked, expired, or deleted
- * link is a 404 (FolderfooRequestError).
- */
-export async function fetchPublicLink(server: string, token: string): Promise<PublicLinkView> {
-  const res = await fetch(`${server}/public/${encodeURIComponent(token)}`);
+async function publicFetch(url: string): Promise<Response> {
+  const res = await fetch(url);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new FolderfooRequestError(res.status, (body as { error?: string }).error ?? res.statusText);
   }
-  return (await res.json()) as PublicLinkView;
+  return res;
+}
+
+/**
+ * Reads a public link via folderfoo's GET /public/:token — no login, the token is the only
+ * credential. `raw=1` makes a file link's `content` the exact stored text even for folderfoo's
+ * legacy .json form; a folder link returns its `files` listing instead. A revoked, expired, or
+ * deleted link is a 404 (FolderfooRequestError).
+ */
+export async function fetchPublicLink(server: string, token: string): Promise<PublicLinkView> {
+  return (await (await publicFetch(`${server}/public/${encodeURIComponent(token)}?raw=1`)).json()) as PublicLinkView;
+}
+
+/** One file inside a public FOLDER link, by its path relative to that folder (GET /public/:token/file). */
+export async function fetchPublicFolderFile(server: string, token: string, relPath: string): Promise<Buffer> {
+  const res = await publicFetch(`${server}/public/${encodeURIComponent(token)}/file?${new URLSearchParams({ path: relPath })}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/** Thrown when a write targets a folder someone shared with the caller read-only (RemoteFolder.role 'member'). */
+export class ReadOnlyRemoteFolderError extends Error {
+  constructor(folderName: string, owner: string) {
+    super(`folder "${folderName}" is shared with you read-only by ${owner} — ask ${owner} for editor access, or copy the doc into your own folder`);
+    this.name = 'ReadOnlyRemoteFolderError';
+  }
 }
 
 /** Thrown when a write targets a remote folder that no longer exists on folderfoo (deleted server-side since the last connect/UI-open sync). */

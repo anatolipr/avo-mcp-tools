@@ -49,7 +49,7 @@ function writeLocalWatermark(mirrorDir: string, value: number): void {
  * changed-since response entry into a local mirror path must go through
  * this, not path.join the raw folderPath directly.
  */
-function toMirrorRelativeDir(remoteFolderPath: string, absoluteFolderPath: string): string {
+export function toMirrorRelativeDir(remoteFolderPath: string, absoluteFolderPath: string): string {
   if (!absoluteFolderPath) return '';
   if (absoluteFolderPath === remoteFolderPath) return '';
   if (remoteFolderPath && absoluteFolderPath.startsWith(`${remoteFolderPath}/`)) {
