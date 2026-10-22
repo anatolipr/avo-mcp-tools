@@ -15,7 +15,7 @@ import {
   sharedFolderName,
 } from '../src/remote/shared-items.js';
 import { sharedFolderRole, connectRemoteFolder, type RemoteDeps } from '../src/remote/connect.js';
-import { acceptShare, forkSharedItem } from '../src/remote/sharing.js';
+import { acceptShare, forkSharedItem, createLink, createPage, editPage } from '../src/remote/sharing.js';
 import { MemoryRepository } from '../src/memory/repository.js';
 import { SkillRepository } from '../src/skills/repository.js';
 import { IdentityTracker } from '../src/remote/identity.js';
@@ -88,6 +88,19 @@ function fakeFolderfoo(state: {
       return files.length ? json({ files, serverTime: 0 }) : json({ error: 'You do not have access to this folder' }, 403);
     }
     if (url.pathname === '/folders/last-changed') return json({ lastChanged: state.lastChanged ?? 1 });
+    if (url.pathname === '/public-links' && init?.method === 'POST') return json({ id: 'link-1', token: 'pub.t1.secret', expiresAt: '2026-12-01T00:00:00.000Z' });
+    if (url.pathname.startsWith('/public-pages')) {
+      const pages = ((state as { pages?: Array<Record<string, unknown>> }).pages ??= []);
+      const id = url.pathname.split('/')[2];
+      if (!id && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body));
+        pages.push({ id: `page-${pages.length + 1}`, token: `page.t1.s${pages.length + 1}`, title: body.title, items: body.items, createdAt: 'x', expiresAt: 'y', revoked: false, viewCount: 0 });
+        return json({ id: pages.at(-1)!.id, token: pages.at(-1)!.token, expiresAt: 'y' });
+      }
+      if (!id) return json({ pages });
+      Object.assign(pages.find((p) => p.id === id)!, JSON.parse(String(init!.body)));
+      return json({ message: 'updated' });
+    }
     if (url.pathname === '/folders') return json([]);
     if (url.pathname.startsWith('/data/')) {
       const { owner, path: p } = parseParam(url.pathname.slice('/data/'.length));
@@ -327,4 +340,42 @@ test('accepting an invite to a folder of docs connects it as a source with its r
   // Connecting the same folder again is a no-op.
   const again = await connectRemoteFolder(deps, { kind: 'memory', server: SERVER, tenantId: TENANT, folderPath: 'team', owner: 'bob' });
   assert.equal(again.alreadyConnected, true);
+});
+
+test("a public link points at folderfoo's viewer, readable without an account, plus a bucket URL", async (t) => {
+  const { baseDir, db, identity, memoryRepo, skillRepo, skillSpec, memorySpec } = setup();
+  t.mock.method(globalThis, 'fetch', fakeFolderfoo({ files: {}, shares: [] }).fetchImpl);
+  // The mirror already holds the doc when the folder is registered, so registering indexes it.
+  const mirrorDir = tmpDir('mb-sharing-pub-');
+  fs.writeFileSync(path.join(mirrorDir, 'plan.md'), memoryDoc('v1'));
+  memoryRepo.registerRemoteFolder({ name: 'memz', server: SERVER, tenantId: TENANT, folderPath: 'memz', mirrorDir, mode: 'dev', username: 'alice' });
+  const deps = { db, skillRepo, memoryRepo, identity, skillSpec, memorySpec, config: { baseDir } as BucketConfig, appUrl: 'http://localhost:8767/' } as RemoteDeps;
+
+  const link = await createLink(deps, { kind: 'memory', id: 'plan', folder: 'memz' }, 'public');
+  assert.equal(link.url, `${SERVER}/p/pub.t1.secret`);
+  assert.equal(link.bucketUrl, 'http://localhost:8767/?publicToken=pub.t1.secret');
+  assert.equal(link.downloadUrl, `${SERVER}/public/pub.t1.secret/download`);
+});
+
+test('a public page bundles several docs under one link that stays the same as items come and go', async (t) => {
+  const { baseDir, db, identity, memoryRepo, skillRepo, skillSpec, memorySpec } = setup();
+  t.mock.method(globalThis, 'fetch', fakeFolderfoo({ files: {}, shares: [] }).fetchImpl);
+  const mirrorDir = tmpDir('mb-sharing-page-');
+  fs.writeFileSync(path.join(mirrorDir, 'plan.md'), memoryDoc('v1'));
+  fs.writeFileSync(path.join(mirrorDir, 'notes.md'), memoryDoc('v2'));
+  memoryRepo.registerRemoteFolder({ name: 'memz', server: SERVER, tenantId: 'membkt', folderPath: 'memz', mirrorDir, mode: 'dev', username: 'alice' });
+  const config = { baseDir, folderfooHost: SERVER } as BucketConfig;
+  const deps = { db, skillRepo, memoryRepo, identity, skillSpec, memorySpec, config, appUrl: 'http://localhost:8767/' } as RemoteDeps;
+
+  const page = await createPage(deps, 'Team kit', [{ kind: 'memory', id: 'plan', folder: 'memz' }]);
+  assert.equal(page.url, `${SERVER}/b/page.t1.s1`);
+  assert.equal(page.downloadUrl, `${SERVER}/public-page/page.t1.s1/download`);
+  assert.deepEqual(page.items, [{ path: 'memz/plan.md', type: 'file', kind: 'memory' }]);
+
+  const grown = await editPage(deps, page.id, { add: [{ kind: 'memory', id: 'notes', folder: 'memz' }, { kind: 'memory', id: 'plan', folder: 'memz' }] });
+  assert.deepEqual(grown.items.map((i) => i.path), ['memz/plan.md', 'memz/notes.md']);
+  assert.equal(grown.url, page.url);
+  const shrunk = await editPage(deps, page.id, { remove: [{ kind: 'memory', id: 'plan', folder: 'memz' }] });
+  assert.deepEqual(shrunk.items.map((i) => i.path), ['memz/notes.md']);
+  await assert.rejects(editPage(deps, page.id, { remove: [{ kind: 'memory', id: 'notes', folder: 'memz' }] }), /at least one item/);
 });

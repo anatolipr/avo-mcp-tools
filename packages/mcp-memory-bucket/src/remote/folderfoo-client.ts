@@ -356,6 +356,55 @@ export async function getShareLinkJoins(server: string, baseDir: string, tenantI
   return withAuth(server, baseDir, (jwt) => fetch(`${server}/share-links/joins`, authed(jwt, tenantId)), async (res) => ((await res.json()) as { joins: LinkJoin[] }).joins);
 }
 
+/** One entry of a public page: a file or folder on the caller's own folderfoo. */
+export interface PublicPageItem {
+  path: string;
+  type: 'file' | 'folder';
+  kind: 'memory' | 'skill' | null;
+}
+
+export interface PublicPage {
+  id: string;
+  /** null once revoked. */
+  token: string | null;
+  title: string;
+  items: PublicPageItem[];
+  createdAt: string;
+  expiresAt: string;
+  revoked: boolean;
+  viewCount: number;
+}
+
+/** Creates a public page — one no-login link (folderfoo's /b/<token>) to browse and download several items. */
+export async function createPublicPage(
+  server: string,
+  baseDir: string,
+  tenantId: string,
+  title: string,
+  items: PublicPageItem[],
+  expiresInDays?: number
+): Promise<{ id: string; token: string; expiresAt: string }> {
+  return withAuth(
+    server,
+    baseDir,
+    (jwt) => fetch(`${server}/public-pages`, { method: 'POST', ...authed(jwt, tenantId, { title, items, ...(expiresInDays ? { expiresInDays } : {}) }) }),
+    (res) => res.json() as Promise<{ id: string; token: string; expiresAt: string }>
+  );
+}
+
+export async function listPublicPages(server: string, baseDir: string, tenantId: string): Promise<PublicPage[]> {
+  return withAuth(server, baseDir, (jwt) => fetch(`${server}/public-pages`, authed(jwt, tenantId)), async (res) => ((await res.json()) as { pages: PublicPage[] }).pages);
+}
+
+/** Replaces a page's title and/or items; its link stays the same. */
+export async function updatePublicPage(server: string, baseDir: string, tenantId: string, id: string, update: { title?: string; items?: PublicPageItem[] }): Promise<void> {
+  await withAuth(server, baseDir, (jwt) => fetch(`${server}/public-pages/${encodeURIComponent(id)}`, { method: 'POST', ...authed(jwt, tenantId, update) }), async () => undefined);
+}
+
+export async function revokePublicPage(server: string, baseDir: string, tenantId: string, id: string): Promise<void> {
+  await withAuth(server, baseDir, (jwt) => fetch(`${server}/public-pages/${encodeURIComponent(id)}`, { method: 'DELETE', ...authed(jwt, tenantId) }), async () => undefined);
+}
+
 export interface PublicLinkView {
   /** File links only: the stored text (raw, see fetchPublicLink). */
   content?: unknown;

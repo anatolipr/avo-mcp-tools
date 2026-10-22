@@ -39,6 +39,10 @@ import {
   shareStatus,
   shareWith,
   unshareWith,
+  pagesFor,
+  createPage,
+  editPage,
+  revokePage,
   type ShareSubject,
 } from '../remote/sharing.js';
 import { getChannel, listChannels } from '../channels/store.js';
@@ -1672,6 +1676,16 @@ export function buildWebRouter(
     res.json({ dismissed: req.params.originId });
   });
 
+  // Revokes a whole public page — its link stops working for everyone.
+  router.delete('/api/public-pages/:pageId', async (req: Request, res: Response) => {
+    try {
+      await revokePage(remoteDeps, req.params.pageId!);
+      res.json({ revoked: req.params.pageId });
+    } catch (err) {
+      sendShareError(res, err);
+    }
+  });
+
   // Who joined through this login's invite links since the last call — the web UI shows these once
   // as a toast on load. Marks them seen.
   router.get('/api/share-joins', async (_req: Request, res: Response) => {
@@ -1738,6 +1752,20 @@ export function buildWebRouter(
       const type = req.params.type === 'public' ? 'public' : 'invite';
       await revokeShareLink(remoteDeps, subject, type, req.params.linkId!);
       res.json({ revoked: req.params.linkId });
+    }));
+    // Public pages, from this item's point of view: which pages it's on, putting it on one (an
+    // existing `pageId`, or a new page titled `title`), and taking it off.
+    router.get(`${base}/public-pages`, withSubject(async (subject, _req, res) => {
+      res.json({ pages: await pagesFor(remoteDeps, subject) });
+    }));
+    router.post(`${base}/public-pages`, withSubject(async (subject, req, res) => {
+      const { pageId, title } = req.body || {};
+      if (pageId) res.json(await editPage(remoteDeps, pageId, { add: [subject] }));
+      else if (typeof title === 'string' && title.trim()) res.json(await createPage(remoteDeps, title.trim(), [subject]));
+      else res.status(400).json({ error: 'pageId or title is required' });
+    }));
+    router.delete(`${base}/public-pages/:pageId`, withSubject(async (subject, req, res) => {
+      res.json(await editPage(remoteDeps, req.params.pageId!, { remove: [subject] }));
     }));
   }
 

@@ -6,6 +6,16 @@ interface ShareAccess {
   links: Array<{ id: string; kind: 'invite' | 'public'; role: string; expiresAt: string; revoked: boolean; redeemers?: string[]; viewCount?: number }>;
 }
 
+/** GET <base>/public-pages — see remote/sharing.ts's pagesFor. */
+interface PageRow {
+  id: string;
+  title: string;
+  url: string | null;
+  items: unknown[];
+  included: boolean;
+  viewCount: number;
+}
+
 /**
  * The owner's sharing controls for one thing on folderfoo: share with a username (read-only or
  * editor), copy an invite link (login, grants the picked role) or a public link (no login,
@@ -23,6 +33,8 @@ export class ShareForm extends LitElement {
     _busy: { state: true },
     _status: { state: true },
     _access: { state: true },
+    _pages: { state: true },
+    _newPageTitle: { state: true },
   };
 
   declare base: string;
@@ -33,6 +45,8 @@ export class ShareForm extends LitElement {
   private _busy = false;
   private _status: string | null = null;
   private _access: ShareAccess | null = null;
+  private _pages: PageRow[] | null = null;
+  private _newPageTitle = '';
 
   static styles = css`
     :host { display: block; }
@@ -58,6 +72,87 @@ export class ShareForm extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     void this.#loadAccess();
+    void this.#loadPages();
+  }
+
+  async #loadPages() {
+    const res = await fetch(this.#url('public-pages')).catch(() => null);
+    if (res?.ok) this._pages = ((await res.json()) as { pages: PageRow[] }).pages;
+  }
+
+  async #copy(text: string, what: string) {
+    try {
+      await navigator.clipboard?.writeText(text);
+      this._status = `${what} copied to clipboard.`;
+    } catch {
+      this._status = `${what}: ${text}`;
+    }
+  }
+
+  // Puts this item on a page (an existing one, or a new one titled `title`), or takes it off.
+  async #togglePage(page: PageRow | null, title?: string) {
+    const request =
+      page && page.included
+        ? fetch(this.#url(`public-pages/${encodeURIComponent(page.id)}`), { method: 'DELETE' })
+        : fetch(this.#url('public-pages'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(page ? { pageId: page.id } : { title }),
+          });
+    await this.#act(
+      request,
+      async (body) => {
+        void this.#loadPages();
+        if (!page) {
+          this._newPageTitle = '';
+          await this.#copy(String(body.url), `Page "${title}" created — its link`);
+          return this._status ?? '';
+        }
+        return page.included ? `Removed from "${page.title}".` : `Added to "${page.title}".`;
+      },
+      'Public page change failed'
+    );
+  }
+
+  async #revokePage(page: PageRow) {
+    if (!confirm(`Revoke the public page "${page.title}"? Its link stops working for everyone.`)) return;
+    await this.#act(fetch(`/api/public-pages/${encodeURIComponent(page.id)}`, { method: 'DELETE' }), () => `Revoked "${page.title}".`, 'Revoke failed');
+    void this.#loadPages();
+  }
+
+  #renderPages() {
+    const pages = this._pages;
+    if (!pages) return nothing;
+    return html`
+      <div class="share-access">
+        <div class="share-status" title="One link where anyone, with no account, can browse and download everything on the page">
+          Public pages — a link to browse and download several items, no account needed
+        </div>
+        ${pages.map(
+          (p) => html`
+            <div class="share-row">
+              <label class="share-who">
+                <input type="checkbox" .checked=${p.included} ?disabled=${this._busy || (p.included && p.items.length === 1)} @change=${() => this.#togglePage(p)} />
+                ${p.title}
+              </label>
+              <span class="share-status">${p.items.length} item${p.items.length === 1 ? '' : 's'} · ${p.viewCount} views</span>
+              ${p.url ? html`<button ?disabled=${this._busy} @click=${() => this.#copy(p.url!, `Link to "${p.title}"`)}>Copy link</button>` : nothing}
+              <button ?disabled=${this._busy} title="Revoke this page" @click=${() => this.#revokePage(p)}>✕</button>
+            </div>
+          `
+        )}
+        <div class="share-row">
+          <input
+            type="text"
+            placeholder="New page title"
+            .value=${this._newPageTitle}
+            @input=${(e: Event) => (this._newPageTitle = (e.target as HTMLInputElement).value)}
+            @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && this._newPageTitle.trim() && this.#togglePage(null, this._newPageTitle.trim())}
+          />
+          <button ?disabled=${this._busy || !this._newPageTitle.trim()} @click=${() => this.#togglePage(null, this._newPageTitle.trim())}>Create page with this</button>
+        </div>
+      </div>
+    `;
   }
 
   #url(suffix: string): string {
@@ -104,9 +199,10 @@ export class ShareForm extends LitElement {
     void this.#act(
       request,
       async (body) => {
-        // Rebuilt on this page's own origin, in case it is reached under a different host than the server assumes.
+        // A public link is folderfoo's own viewer page, sent as-is. An invite lands on this app,
+        // so it is rebuilt on this page's origin in case that differs from what the server assumes.
         const url = new URL(String(body.url));
-        const linkText = new URL(`${url.pathname}${url.search}`, window.location.origin).toString();
+        const linkText = kind === 'public-link' ? url.toString() : new URL(`${url.pathname}${url.search}`, window.location.origin).toString();
         try {
           await navigator.clipboard?.writeText(linkText);
           return `${kind === 'share-link' ? 'Invite' : 'Public'} link copied to clipboard.`;
@@ -180,11 +276,11 @@ export class ShareForm extends LitElement {
         </div>
         <div class="share-links-row">
           <button ?disabled=${this._busy} title="Recipient logs in; grants the role picked above" @click=${() => this.#copyLink('share-link')}>Copy invite link</button>
-          <button ?disabled=${this._busy} title="Anyone with the link can read it, no login" @click=${() => this.#copyLink('public-link')}>Copy public link</button>
+          <button ?disabled=${this._busy} title="Anyone with the link can read it in a browser — no account, no app" @click=${() => this.#copyLink('public-link')}>Copy public link</button>
           <button @click=${() => this.onClose?.()}>Close</button>
         </div>
         ${this._status ? html`<div class="share-status">${this._status}</div>` : nothing}
-        ${this.#renderAccess()}
+        ${this.#renderAccess()} ${this.#renderPages()}
       </div>
     `;
   }

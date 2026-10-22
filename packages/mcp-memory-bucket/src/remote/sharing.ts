@@ -15,6 +15,12 @@ import {
   getShareLinkJoins,
   getChangedSince,
   fetchPublicLink,
+  createPublicPage,
+  listPublicPages,
+  updatePublicPage,
+  revokePublicPage,
+  type PublicPage,
+  type PublicPageItem,
   FolderfooRequestError,
   type ShareRole,
   type ShareMember,
@@ -100,7 +106,12 @@ export async function unshareWith(deps: RemoteDeps, subject: ShareSubject, usern
 
 export interface CreatedShareLink {
   id: string;
+  /** The link to send. A public link opens folderfoo's viewer, readable by anyone with no account or app. */
   url: string;
+  /** Public links only: the same link opened in a Memory Bucket, which files it as a shared item. */
+  bucketUrl?: string;
+  /** Public links only: the whole share as one file — a skill directory or a doc with attachments as a .zip. */
+  downloadUrl?: string;
   expiresAt: string;
   role: ShareRole;
   type: 'invite' | 'public';
@@ -108,7 +119,9 @@ export interface CreatedShareLink {
 
 /**
  * Creates an invite link (login required, grants `role`) or a public link (no login, read-only) and
- * returns the URL to send — it lands on this app's web UI, whose share-accept flow redeems it.
+ * returns the URL to send. An invite lands on this app's web UI, whose share-accept flow redeems it.
+ * A public link lands on folderfoo's own viewer page (/p/<token>), so anyone can read it in a
+ * browser without an account or a Memory Bucket; `bucketUrl` is the same link for bucket users.
  */
 export async function createLink(deps: RemoteDeps, subject: ShareSubject, type: 'invite' | 'public', role: ShareRole = 'member'): Promise<CreatedShareLink> {
   const target = resolveSubject(deps, subject);
@@ -117,9 +130,19 @@ export async function createLink(deps: RemoteDeps, subject: ShareSubject, type: 
     type === 'invite'
       ? await createShareLink(target.server, baseDir, target.tenantId, target, target.kind, role)
       : await createPublicLink(target.server, baseDir, target.tenantId, target, target.kind);
-  const url = new URL(deps.appUrl);
-  url.searchParams.set(type === 'invite' ? 'shareToken' : 'publicToken', link.token);
-  return { id: link.id, url: url.toString(), expiresAt: link.expiresAt, role: type === 'invite' ? role : 'member', type };
+  const appLink = new URL(deps.appUrl);
+  appLink.searchParams.set(type === 'invite' ? 'shareToken' : 'publicToken', link.token);
+  if (type === 'invite') return { id: link.id, url: appLink.toString(), expiresAt: link.expiresAt, role, type };
+  const token = encodeURIComponent(link.token);
+  return {
+    id: link.id,
+    url: `${target.server}/p/${token}`,
+    bucketUrl: appLink.toString(),
+    downloadUrl: `${target.server}/public/${token}/download`,
+    expiresAt: link.expiresAt,
+    role: 'member',
+    type,
+  };
 }
 
 export interface ShareStatus {
@@ -147,6 +170,102 @@ export async function shareStatus(deps: RemoteDeps, subject: ShareSubject): Prom
 export async function revokeShareLink(deps: RemoteDeps, subject: ShareSubject, type: 'invite' | 'public', linkId: string): Promise<void> {
   const target = resolveSubject(deps, subject);
   await revokeLink(target.server, deps.config.baseDir, target.tenantId, type, linkId);
+}
+
+// --- Public pages: one no-login link (folderfoo's /b/<token>) where anyone can browse and
+// download a set of the owner's docs, skills, and folders. Pages live on this app's configured
+// folderfoo host under its own tenant, like the remote folders that hold the items.
+
+export interface PageView {
+  id: string;
+  title: string;
+  /** The page's link (null once revoked) — a file browser anyone can open. */
+  url: string | null;
+  /** Everything on the page as one .zip. */
+  downloadUrl: string | null;
+  items: PublicPageItem[];
+  expiresAt: string;
+  revoked: boolean;
+  viewCount: number;
+}
+
+function pageHost(deps: RemoteDeps): { server: string; tenantId: string } {
+  if (!deps.config.folderfooHost) throw new SharingError('folderfoo integration is off — restart with --folderfoo-mode dev|cloud', 400);
+  if (!deps.identity.current().username) throw new SharingError('not logged in to folderfoo — open the web UI (bucket_open_ui) and log in first', 401);
+  return { server: deps.config.folderfooHost, tenantId: TENANT_ID };
+}
+
+function pageView(server: string, page: PublicPage): PageView {
+  const token = page.token ? encodeURIComponent(page.token) : null;
+  return {
+    id: page.id,
+    title: page.title,
+    url: token ? `${server}/b/${token}` : null,
+    downloadUrl: token ? `${server}/public-page/${token}/download` : null,
+    items: page.items,
+    expiresAt: page.expiresAt,
+    revoked: page.revoked,
+    viewCount: page.viewCount,
+  };
+}
+
+/** A subject as a page item — it must live on the same folderfoo host/tenant pages are kept on. */
+function pageItemFor(deps: RemoteDeps, host: { server: string; tenantId: string }, subject: ShareSubject): PublicPageItem {
+  const target = resolveSubject(deps, subject);
+  if (target.server !== host.server || target.tenantId !== host.tenantId) {
+    throw new SharingError(`"${subject.id}" lives on a different folderfoo deployment than this app's — it can't go on a public page`, 400);
+  }
+  return { path: target.path, type: target.type, kind: target.kind };
+}
+
+const sameItem = (a: PublicPageItem, b: PublicPageItem) => a.path === b.path && a.type === b.type;
+
+export async function listPages(deps: RemoteDeps): Promise<PageView[]> {
+  const host = pageHost(deps);
+  return (await listPublicPages(host.server, deps.config.baseDir, host.tenantId)).map((page) => pageView(host.server, page));
+}
+
+async function findPage(deps: RemoteDeps, host: { server: string; tenantId: string }, pageId: string): Promise<PublicPage> {
+  const page = (await listPublicPages(host.server, deps.config.baseDir, host.tenantId)).find((p) => p.id === pageId);
+  if (!page || page.revoked) throw new SharingError(`no live public page with id "${pageId}"`, 404);
+  return page;
+}
+
+export async function createPage(deps: RemoteDeps, title: string, subjects: ShareSubject[], expiresInDays?: number): Promise<PageView> {
+  const host = pageHost(deps);
+  const items = subjects.map((subject) => pageItemFor(deps, host, subject));
+  const { id } = await createPublicPage(host.server, deps.config.baseDir, host.tenantId, title, items, expiresInDays);
+  return pageView(host.server, await findPage(deps, host, id));
+}
+
+/** Adds and/or removes items (and optionally retitles); the page's link stays the same. */
+export async function editPage(deps: RemoteDeps, pageId: string, change: { add?: ShareSubject[]; remove?: ShareSubject[]; title?: string }): Promise<PageView> {
+  const host = pageHost(deps);
+  const page = await findPage(deps, host, pageId);
+  let items = page.items;
+  for (const subject of change.remove ?? []) {
+    const gone = pageItemFor(deps, host, subject);
+    items = items.filter((item) => !sameItem(item, gone));
+  }
+  for (const subject of change.add ?? []) {
+    const added = pageItemFor(deps, host, subject);
+    if (!items.some((item) => sameItem(item, added))) items = [...items, added];
+  }
+  if (items.length === 0) throw new SharingError('a public page needs at least one item — revoke the page instead', 400);
+  await updatePublicPage(host.server, deps.config.baseDir, host.tenantId, pageId, { items, ...(change.title ? { title: change.title } : {}) });
+  return pageView(host.server, await findPage(deps, host, pageId));
+}
+
+export async function revokePage(deps: RemoteDeps, pageId: string): Promise<void> {
+  const host = pageHost(deps);
+  await revokePublicPage(host.server, deps.config.baseDir, host.tenantId, pageId);
+}
+
+/** The live pages, each marked with whether `subject` is on it — the share form's "Public pages" list. */
+export async function pagesFor(deps: RemoteDeps, subject: ShareSubject): Promise<Array<PageView & { included: boolean }>> {
+  const host = pageHost(deps);
+  const item = pageItemFor(deps, host, subject);
+  return (await listPages(deps)).filter((p) => !p.revoked).map((p) => ({ ...p, included: p.items.some((i) => sameItem(i, item)) }));
 }
 
 /** Every server+tenant this login can have shares on: its visible remote folders' plus the configured host under this app's tenant. */

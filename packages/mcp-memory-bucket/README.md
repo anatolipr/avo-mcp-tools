@@ -289,8 +289,13 @@ Use the detail panel's **Share…** button, the 🔗 on a remote folder chip, or
   shared as its whole directory: `SKILL.md`, its sibling files (`scripts/`, `references/`, …)
   and its attachments. You can also share a whole connected folder.
 - **How you share it.** You can share it with a folderfoo username directly, or create a
-  link. An **invite link** needs a login and grants the role you pick. A **public link** needs
-  no login and is always read-only. Links expire after 30 days.
+  link. An **invite link** needs a login and grants the role you pick. A **public link** is always read-only.
+  It opens folderfoo's viewer page, so anyone can read it in a browser with no account and no
+  Memory Bucket. The page has a **Download** button: a skill arrives as a `.zip` of its directory,
+  and a memory doc with attachments arrives as a `.zip` of the doc plus its `<name>/attachments/`.
+  Unzip either into a skill or memory folder. A doc without attachments downloads as the file
+  itself. A Memory Bucket user can also open the link in their bucket, which adds it under
+  **Shared with me**. Links expire after 30 days.
 - **Roles.** `member` is read-only. `editor` lets the recipient edit in place, and their
   changes go to your copy. This applies to both a shared item and a connected shared folder.
 - **Who has access.** The share form (or `bucket_share_status`) lists who has access and which
@@ -303,6 +308,14 @@ Use the detail panel's **Share…** button, the 🔗 on a remote folder chip, or
   invites you to is connected as a source. A folder that holds a single skill becomes a shared
   item instead. You can fork any shared item into your own folder, or leave the share
   (`bucket_leave_shared_item`).
+
+- **Public pages.** A public page is one link, `https://<folderfoo>/b/<token>`, to a whole set
+  of docs, skills, and folders. Anyone can open it with no account. It works like a small file
+  browser: preview any file, download a single file, download one item as a `.zip`, or download
+  everything. The share form has a **Public pages** section, where you can put the item on a page,
+  start a new page, copy a page's link, or revoke the page. Agents use `bucket_public_page` for
+  the same actions. A page's link stays the same as you add and remove items, and it lasts
+  365 days unless you choose otherwise.
 
 If the owner trashes a shared doc or folder and then restores it from folderfoo's trash, its
 shares and links come back too.
