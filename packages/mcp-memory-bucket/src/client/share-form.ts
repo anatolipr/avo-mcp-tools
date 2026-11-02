@@ -1,4 +1,5 @@
 import { LitElement, html, css, nothing } from 'lit';
+import './publish-form.js';
 
 /** GET <base>/share-status — see remote/sharing.ts's shareStatus. */
 interface ShareAccess {
@@ -281,6 +282,7 @@ export class ShareForm extends LitElement {
         </div>
         ${this._status ? html`<div class="share-status">${this._status}</div>` : nothing}
         ${this.#renderAccess()} ${this.#renderPages()}
+        ${this.base.startsWith('/api/entries/skills/') ? html`<publish-form .base=${this.base} .query=${this.query}></publish-form>` : nothing}
       </div>
     `;
   }

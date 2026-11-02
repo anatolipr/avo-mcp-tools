@@ -10,6 +10,9 @@ export class FolderfooAuthError extends Error {
 
 /** Thrown for any non-ok, non-401 folderfoo response — carries the HTTP status so callers can distinguish e.g. a 404 (file genuinely absent) from other failures without string-matching the message. */
 export class FolderfooRequestError extends Error {
+  /** The rest of the error body, for a caller that shows why (see publishListing). */
+  details?: Record<string, unknown>;
+
   constructor(public readonly status: number, message: string) {
     super(`folderfoo request failed (${status}): ${message}`);
     this.name = 'FolderfooRequestError';
@@ -93,7 +96,9 @@ async function withAuth<T>(server: string, baseDir: string, call: (jwt: string) 
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new FolderfooRequestError(res.status, (body as { error?: string }).error ?? res.statusText);
+    const error = new FolderfooRequestError(res.status, (body as { error?: string }).error ?? res.statusText);
+    error.details = body as Record<string, unknown>;
+    throw error;
   }
   return parse(res);
 }
@@ -403,6 +408,52 @@ export async function updatePublicPage(server: string, baseDir: string, tenantId
 
 export async function revokePublicPage(server: string, baseDir: string, tenantId: string, id: string): Promise<void> {
   await withAuth(server, baseDir, (jwt) => fetch(`${server}/public-pages/${encodeURIComponent(id)}`, { method: 'DELETE', ...authed(jwt, tenantId) }), async () => undefined);
+}
+
+// --- The public directory (see remote/directory.ts) ---
+
+export interface DirectoryListing {
+  id: string;
+  owner: string;
+  title: string;
+  description: string;
+  license: string;
+  version: number;
+  content: string;
+  files: Array<{ path: string; size: number; contentType: string; kind: 'image' | 'text' | 'binary' }>;
+}
+
+/** One listed skill. Anonymous; a hidden or removed listing is a 404 (FolderfooRequestError). */
+export async function directoryListing(server: string, tenantId: string, id: string): Promise<DirectoryListing> {
+  return (await (await publicFetch(`${server}/directory/${encodeURIComponent(tenantId)}/${encodeURIComponent(id)}`)).json()) as DirectoryListing;
+}
+
+/** One file of a listing. A binary file needs a login on folderfoo's side. */
+export async function directoryFile(server: string, baseDir: string, tenantId: string, id: string, filePath: string, signedIn: boolean): Promise<Buffer> {
+  const url = `${server}/directory/${encodeURIComponent(tenantId)}/${encodeURIComponent(id)}/file?${new URLSearchParams({ path: filePath })}`;
+  const read = async (res: Response) => Buffer.from(await res.arrayBuffer());
+  if (signedIn) return withAuth(server, baseDir, (jwt) => fetch(url, authed(jwt, tenantId)), read);
+  return read(await publicFetch(url));
+}
+
+/** A tenant's fixed categories. None if the tenant has no directory yet. */
+export async function directoryCategories(server: string, tenantId: string): Promise<string[]> {
+  try {
+    const res = await publicFetch(`${server}/directory/${encodeURIComponent(tenantId)}?limit=1`);
+    return ((await res.json()) as { categories?: string[] }).categories ?? [];
+  } catch (err) {
+    if (err instanceof FolderfooRequestError && err.status === 404) return [];
+    throw err;
+  }
+}
+
+export async function publishListing(server: string, baseDir: string, tenantId: string, listing: Record<string, unknown>): Promise<{ id: string; version: number; status: string; heldReason: string | null }> {
+  return withAuth(
+    server,
+    baseDir,
+    (jwt) => fetch(`${server}/published`, { method: 'POST', ...authed(jwt, tenantId, listing) }),
+    (res) => res.json() as Promise<{ id: string; version: number; status: string; heldReason: string | null }>
+  );
 }
 
 export interface PublicLinkView {

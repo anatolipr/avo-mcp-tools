@@ -29,6 +29,7 @@ import { decodeUsername, isFolderVisible, type IdentityTracker } from '../remote
 import { listSharedItems, dismissRevokedSharedItem, leaveSharedItem, syncSharedItemsIndex, isSharedFolderName } from '../remote/shared-items.js';
 import { getSharedWithMe, FolderfooRequestError, type ShareRole } from '../remote/folderfoo-client.js';
 import { connectRemoteFolder, refreshSharedFolderRoles, SharingError, type RemoteDeps } from '../remote/connect.js';
+import { importListing, importStatuses, previewListing, publishPreview, publishSkill } from '../remote/directory.js';
 import {
   acceptShare,
   createLink,
@@ -1601,8 +1602,32 @@ export function buildWebRouter(
   // folderfoo status for a request folderfoo itself refused.
   const sendShareError = (res: Response, err: unknown) => {
     const status = err instanceof SharingError ? err.status : err instanceof FolderfooRequestError ? err.status : 500;
-    res.status(status).json({ error: (err as Error).message });
+    const details = err instanceof FolderfooRequestError ? err.details : undefined;
+    res.status(status).json({ ...(details ?? {}), error: (details?.error as string | undefined) ?? (err as Error).message });
   };
+
+  // Public skills: the adopter's side (see remote/directory.ts).
+  router.get('/api/directory/imports', async (_req: Request, res: Response) => {
+    try {
+      res.json({ imports: await importStatuses(remoteDeps) });
+    } catch (err) {
+      sendShareError(res, err);
+    }
+  });
+  router.get('/api/directory/preview/:id', async (req: Request, res: Response) => {
+    try {
+      res.json(await previewListing(remoteDeps, req.params.id!));
+    } catch (err) {
+      sendShareError(res, err);
+    }
+  });
+  router.post('/api/directory/import/:id', async (req: Request, res: Response) => {
+    try {
+      res.json(await importListing(remoteDeps, req.params.id!, (req.body || {}).folder));
+    } catch (err) {
+      sendShareError(res, err);
+    }
+  });
 
   // "Shared with me" (item-level shares, not whole connected folders — see config.ts's RemoteFolder
   // for that separate mechanism). GET only returns what's in shared_items, as fresh as the last
@@ -1744,6 +1769,13 @@ export function buildWebRouter(
     }));
     router.post(`${base}/public-link`, withSubject(async (subject, _req, res) => {
       res.json(await createLink(remoteDeps, subject, 'public'));
+    }));
+    // Publishing to the public directory, for a single skill (see remote/directory.ts).
+    router.get(`${base}/publish-preview`, withSubject(async (subject, _req, res) => {
+      res.json(await publishPreview(remoteDeps, subject));
+    }));
+    router.post(`${base}/publish`, withSubject(async (subject, req, res) => {
+      res.json(await publishSkill(remoteDeps, subject, req.body || {}));
     }));
     router.get(`${base}/share-status`, withSubject(async (subject, _req, res) => {
       res.json(await shareStatus(remoteDeps, subject));
