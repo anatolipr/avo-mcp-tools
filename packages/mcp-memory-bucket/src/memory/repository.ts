@@ -609,15 +609,13 @@ export class MemoryRepository {
   }
 
   /**
-   * For a doc in a LOCAL folder, returns the cached row unchanged (identical behavior to before
-   * remote sources existed). For a doc in a REMOTE folder, the cached `body` is only ever a
-   * poll-interval-stale mirror snapshot — per the settled design, `get` always fetches the current
-   * body live from folderfoo instead of trusting it, so a caller never sees stale content just
-   * because the last poll tick hasn't run yet.
+   * The cached row only, with no live remote body fetch — for callers that need metadata
+   * (source_path, attachments) but not the current body, e.g. attachment reconciliation after a
+   * remote poll. Same visibility gate as get().
    */
-  async get(folder: string | undefined, filename: string): Promise<MemoryDoc | null> {
+  getCached(folder: string | undefined, filename: string): MemoryDoc | null {
     // A shared item has no configured folder to resolve a path against — match it by filename
-    // among the rows filed under its shared folder. Its mirror is the only copy this side has.
+    // among the rows filed under its shared folder.
     if (isSharedFolderName(folder)) {
       const wanted = MemoryRepository.normalizeFilename(filename);
       const rows = this.db.prepare(`SELECT * FROM memory_docs WHERE folder = ?`).all(folder) as MemoryRow[];
@@ -628,7 +626,21 @@ export class MemoryRepository {
     const row = this.db.prepare(`SELECT * FROM memory_docs WHERE source_path = ?`).get(sourcePath) as MemoryRow | undefined;
     if (!row) return null;
     const doc = rowToDoc(row);
-    if (!this.isFolderNameVisible(doc.folder)) return null;
+    return this.isFolderNameVisible(doc.folder) ? doc : null;
+  }
+
+  /**
+   * For a doc in a LOCAL folder, returns the cached row unchanged (identical behavior to before
+   * remote sources existed). For a doc in a REMOTE folder, the cached `body` is only ever a
+   * poll-interval-stale mirror snapshot — per the settled design, `get` always fetches the current
+   * body live from folderfoo instead of trusting it, so a caller never sees stale content just
+   * because the last poll tick hasn't run yet.
+   */
+  async get(folder: string | undefined, filename: string): Promise<MemoryDoc | null> {
+    // A shared item's mirror is the only copy this side has — nothing live to fetch.
+    if (isSharedFolderName(folder)) return this.getCached(folder, filename);
+    const doc = this.getCached(folder, filename);
+    if (!doc) return null;
     const remote = this.remoteFor(doc.folder);
     if (!remote || !this.credentialsBaseDir) return doc;
     // No .md stripping — the remote copy keeps the exact same filename as the local mirror (see

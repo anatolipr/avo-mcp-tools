@@ -204,7 +204,10 @@ export class AttachmentRepository {
    * all) if declared already exactly matches disk.
    */
   async reconcileToDisk(kind: DocKind, folder: string | undefined, docIdOrName: string): Promise<{ added: AttachmentEntry[]; removed: string[] }> {
-    const doc = await this.getDoc(kind, folder, docIdOrName);
+    // Cached row is enough: this compares the attachments list against the local mirror, so a
+    // live remote body fetch per doc (what get() does) would only add network calls per poll tick.
+    const doc = kind === 'memory' ? this.memoryRepo.getCached(folder, docIdOrName) : this.skillRepo.getCached(docIdOrName, folder);
+    if (!doc) throw new Error(`${kind} doc "${docIdOrName}" not found`);
     const dir = attachmentsDirFor(doc.source_path, kind);
     const declared = doc.attachments ?? [];
     const onDisk = new Set(listAttachmentFiles(dir));
@@ -237,7 +240,12 @@ export class AttachmentRepository {
       id: string;
       source_path: string;
     }>;
+    const repo = table === 'skills' ? this.skillRepo : this.memoryRepo;
     for (const row of rows) {
+      // Another folder's poll can hit a FolderfooAuthError mid-loop and clear the identity
+      // (server.ts onAuthExpired), which hides this folder. Stop quietly: every remaining doc would
+      // otherwise log a misleading "not found".
+      if (repo.hiddenFolderNames().includes(folderName)) return;
       // Skills address by their frontmatter `name` (row.id) regardless of directory depth. Memory
       // docs address by (folder, filename) — filename must be the path RELATIVE TO THE FOLDER ROOT,
       // not just the basename: a doc living in a subfolder of this remote source (e.g.

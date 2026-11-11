@@ -546,16 +546,26 @@ export class SkillRepository {
   }
 
   /**
+   * The cached row only, with no live remote body fetch — for callers that need metadata
+   * (source_path, attachments) but not the current body, e.g. attachment reconciliation after a
+   * remote poll. Same visibility gate as get().
+   */
+  getCached(name: string, folder?: string): SkillDoc | null {
+    const row = this.resolveRow(name, folder);
+    if (!row) return null;
+    const doc = rowToDoc(row);
+    return this.isFolderNameVisible(doc.folder) ? doc : null;
+  }
+
+  /**
    * For a skill in a LOCAL folder, returns the cached row unchanged (identical behavior to before
    * remote sources existed). For a skill in a REMOTE folder, the cached `body` is only ever a
    * poll-interval-stale mirror snapshot — per the settled design, `get` always fetches the current
    * body live from folderfoo instead of trusting it.
    */
   async get(name: string, folder?: string): Promise<SkillDoc | null> {
-    const row = this.resolveRow(name, folder);
-    if (!row) return null;
-    const doc = rowToDoc(row);
-    if (!this.isFolderNameVisible(doc.folder)) return null;
+    const doc = this.getCached(name, folder);
+    if (!doc) return null;
     const remote = this.remoteFor(doc.folder);
     if (!remote || !this.credentialsBaseDir) return doc;
     // A skill's SKILL.md sits INSIDE a directory named after the skill
