@@ -4,12 +4,36 @@ import type Database from 'better-sqlite3';
 import type { TableSyncSpec } from '../store/sync.js';
 import { upsertFile, removeFile, walkMarkdownFiles, walkAttachmentFiles, walkSkillSiblingFiles } from '../store/sync.js';
 import type { RemoteFolder } from '../config.js';
-import { getLastChanged, getChangedSince, readFile, readBinaryFile, FolderfooAuthError } from './folderfoo-client.js';
+import { getLastChanged, getChangedSince, readFile, readBinaryFile, watchFolderChanges, FolderfooAuthError, FolderfooRequestError } from './folderfoo-client.js';
 import { isUnderAttachmentsDir } from '../attachments/storage.js';
 
 // Fixed for every remote source in v1 - no per-source tuning knob, per the
 // settled design (Q15 in the grilling session).
 const POLL_INTERVAL_MS = 60_000;
+
+// Live sync: each visible remote folder also listens on folderfoo's
+// GET /folders/changes stream and polls at once when it reports a change, so
+// an edit made in the scaffoldify web app shows up here in about a second.
+// The interval poll above stays as the fallback. MEMORY_BUCKET_LIVE_SYNC=off
+// turns the stream off.
+const LIVE_SYNC = process.env.MEMORY_BUCKET_LIVE_SYNC !== 'off';
+const LIVE_RETRY_MIN_MS = 5_000;
+const LIVE_RETRY_MAX_MS = 60_000;
+const LIVE_RETRY_NOT_SUPPORTED_MS = 10 * 60_000;
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    timer.unref();
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+    signal.addEventListener('abort', done);
+  });
+}
 
 /**
  * Local, per-source last-synced watermark - NOT the sqlite cache itself
@@ -377,8 +401,58 @@ export function startRemotePolling<TFrontmatter>(
   // this interval - unref so remote polling never blocks a clean process exit.
   interval.unref();
 
+  // One poll at a time per folder; a change that arrives mid-poll queues one more.
+  const running = new Map<string, Promise<void>>();
+  const again = new Set<string>();
+  function pollSoon(folder: RemoteFolder): void {
+    if (running.has(folder.name)) {
+      again.add(folder.name);
+      return;
+    }
+    const run = pollAndNotify(folder)
+      .catch((err) => console.error(`[memory-bucket] live sync failed for ${folder.name}:`, err))
+      .finally(() => {
+        running.delete(folder.name);
+        if (again.delete(folder.name)) pollSoon(folder);
+      });
+    running.set(folder.name, run);
+  }
+
+  const live = new AbortController();
+  if (LIVE_SYNC) {
+    for (const folder of remoteFolders) {
+      void (async () => {
+        let failures = 0;
+        while (!live.signal.aborted) {
+          if (!isVisible(folder)) {
+            await sleep(POLL_INTERVAL_MS, live.signal);
+            continue;
+          }
+          try {
+            await watchFolderChanges(folder.server, credentialsBaseDir, folder.tenantId, folder.folderPath, folder.owner, (lastChanged) => {
+              failures = 0;
+              if (lastChanged > readLocalWatermark(folder.mirrorDir)) pollSoon(folder);
+            }, live.signal);
+          } catch (err) {
+            if (live.signal.aborted) return;
+            // An older folderfoo without the stream: the interval poll covers it; check again later.
+            if (err instanceof FolderfooRequestError && err.status === 404) {
+              await sleep(LIVE_RETRY_NOT_SUPPORTED_MS, live.signal);
+              continue;
+            }
+            failures += 1;
+          }
+          await sleep(Math.min(LIVE_RETRY_MAX_MS, LIVE_RETRY_MIN_MS * 2 ** failures), live.signal);
+        }
+      })();
+    }
+  }
+
   return {
-    stop: () => clearInterval(interval),
+    stop: () => {
+      clearInterval(interval);
+      live.abort();
+    },
     resyncNow: async (folderName: string) => {
       const folder = byName.get(folderName);
       if (!folder) throw new Error(`no remote source configured with name "${folderName}"`);

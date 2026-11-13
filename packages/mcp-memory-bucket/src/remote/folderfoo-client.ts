@@ -128,6 +128,55 @@ export async function getLastChanged(server: string, baseDir: string, tenantId: 
 }
 
 /**
+ * Listens on GET /folders/changes (Server-Sent Events) and calls `onChange` with the folder's
+ * last-changed watermark: once on connect, then each time something under `folderPath` changes.
+ * Resolves when the server ends the stream; rejects like any other call here (FolderfooAuthError,
+ * FolderfooRequestError - a server without this route answers 404). Abort `signal` to stop.
+ */
+export async function watchFolderChanges(
+  server: string,
+  baseDir: string,
+  tenantId: string,
+  folderPath: string,
+  owner: string | undefined,
+  onChange: (lastChanged: number) => void,
+  signal: AbortSignal
+): Promise<void> {
+  const res = await withAuth(
+    server,
+    baseDir,
+    (jwt) =>
+      fetch(`${server}/folders/changes?${folderQuery(tenantId, folderPath, owner ? { owner } : undefined)}`, {
+        headers: { authorization: `Bearer ${jwt}`, 'x-tenant-id': tenantId, accept: 'text/event-stream' },
+        signal,
+      }),
+    async (r) => r
+  );
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    buffer += decoder.decode(value, { stream: true });
+    let end: number;
+    while ((end = buffer.indexOf('\n\n')) >= 0) {
+      const block = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      const data = block.split('\n').filter((line) => line.startsWith('data: ')).map((line) => line.slice(6)).join('\n');
+      if (!data) continue; // a ": ping" keepalive
+      try {
+        const event = JSON.parse(data) as { lastChanged?: unknown };
+        if (typeof event.lastChanged === 'number') onChange(event.lastChanged);
+      } catch {
+        // ignore a malformed event; the poll fallback still covers it
+      }
+    }
+  }
+}
+
+/**
  * Lists folderfoo folders via GET /folders — the caller's own when `owner`/`rootFolder` are
  * omitted, or a subtree someone else shared with the caller when both are passed (folderfoo gates
  * this via the same hasAccess check every other shared read uses, requiring `rootFolder` to be a
