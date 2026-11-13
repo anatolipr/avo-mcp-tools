@@ -1,4 +1,7 @@
-# mcp-memory-bucket
+# scaffoldify-mcp
+
+Formerly published as `mcp-memory-bucket`. The package was renamed in 0.18.0;
+the `mcp-memory-bucket` command still works as an alias.
 
 MCP server exposing `skill_*` (reusable coding patterns, stored as
 [agentskills.io](https://agentskills.io)-standard `SKILL.md` folders) and
@@ -99,9 +102,9 @@ query, also lists docs that match by meaning alone.
 No install needed — runs the published package directly (requires Node 22 or newer):
 
 ```sh
-npx mcp-memory-bucket
+npx scaffoldify-mcp
 # or, with the flags described below:
-npx mcp-memory-bucket --memory-dir /path/to/dir
+npx scaffoldify-mcp --memory-dir /path/to/dir
 ```
 
 This is the simplest way to point an MCP client at a memory bucket
