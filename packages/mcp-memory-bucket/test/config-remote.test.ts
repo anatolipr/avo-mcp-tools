@@ -115,11 +115,11 @@ test('--folderfoo-mode dev resolves to the localhost:3000 dev host', () => {
   assert.equal(config.folderfooHost, 'http://localhost:3000');
 });
 
-test('--folderfoo-mode cloud resolves to the hosted files.cuul.cc host', () => {
+test('--folderfoo-mode cloud resolves to the hosted scaffoldify.com host', () => {
   const baseDir = tmpBaseDir();
   const config = load(baseDir, ['node', 'server.js', '--folderfoo-mode', 'cloud']);
   assert.equal(config.folderfooMode, 'cloud');
-  assert.equal(config.folderfooHost, 'https://files.cuul.cc');
+  assert.equal(config.folderfooHost, 'https://scaffoldify.com');
 });
 
 test('FOLDERFOO_MODE env var is used when no --folderfoo-mode flag is passed', () => {

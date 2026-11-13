@@ -4,6 +4,7 @@ import { readMarkdownFile } from '../store/markdown-file.js';
 import { walkFilesRecursive, guessMimeType } from '../attachments/storage.js';
 import type { MemoryFrontmatter, SkillFrontmatter } from '../types.js';
 import { TENANT_ID } from '../shared/folderfoo-tenant.js';
+import { canonicalServer } from './hosts.js';
 import {
   shareWithUser,
   unshareWithUser,
@@ -325,7 +326,7 @@ export type AcceptResult = { accepted: string; itemType: 'file' | 'folder' } | {
  */
 export async function acceptShare(deps: RemoteDeps, share: AcceptedShare): Promise<AcceptResult> {
   const { config, identity } = deps;
-  if (!config.folderfooHost || share.server !== config.folderfooHost) {
+  if (!config.folderfooHost || canonicalServer(share.server) !== config.folderfooHost) {
     throw new SharingError("server must be this app's configured folderfoo host", 400);
   }
   const username = identity.current().username;

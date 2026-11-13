@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { writeFileAtomic } from '../store/atomic-write.js';
+import { canonicalServer, serverNames } from './hosts.js';
 
 /**
  * Persists folderfoo JWTs across memory-bucket server restarts, in a
@@ -37,19 +38,25 @@ function writeStore(baseDir: string, store: CredentialStore): void {
   writeFileAtomic(credentialsPath(baseDir), JSON.stringify(store, null, 2) + '\n', { mode: 0o600 });
 }
 
+// Keys are canonical server URLs (see hosts.ts); a token saved under an alias of the cloud host
+// (files.cuul.cc) is found under the new name and moved to it on the next write.
 export function getCredential(baseDir: string, server: string): { jwt: string } | undefined {
-  return readStore(baseDir)[server];
+  const store = readStore(baseDir);
+  for (const name of serverNames(server)) if (store[name]) return store[name];
+  return undefined;
 }
 
 export function setCredential(baseDir: string, server: string, jwt: string): void {
   const store = readStore(baseDir);
-  store[server] = { jwt };
+  for (const name of serverNames(server)) delete store[name];
+  store[canonicalServer(server)] = { jwt };
   writeStore(baseDir, store);
 }
 
 export function clearCredential(baseDir: string, server: string): void {
   const store = readStore(baseDir);
-  if (!(server in store)) return;
-  delete store[server];
+  const names = serverNames(server).filter((name) => name in store);
+  if (!names.length) return;
+  for (const name of names) delete store[name];
   writeStore(baseDir, store);
 }

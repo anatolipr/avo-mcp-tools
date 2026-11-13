@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { FOLDERFOO_CLOUD_HOST, canonicalServer } from './remote/hosts.js';
 import os from 'node:os';
 import path from 'node:path';
 import { writeFileAtomic } from './store/atomic-write.js';
@@ -56,11 +57,10 @@ export interface RemoteFolder {
  * explicit switch instead: 'off' (default - no folderfoo integration at
  * all, matches every existing user's behavior with zero opt-in), 'dev'
  * (http://localhost:3000, folderfoo's own local dev server), 'cloud'
- * (the real hosted deployment, https://files.cuul.cc).
+ * (the real hosted deployment, https://scaffoldify.com; files.cuul.cc is an alias, see remote/hosts.ts).
  */
 export type FolderfooMode = 'off' | 'dev' | 'cloud';
 const FOLDERFOO_DEV_HOST = 'http://localhost:3000';
-const FOLDERFOO_CLOUD_HOST = 'https://files.cuul.cc';
 
 export interface BucketConfig {
   skillFolders: NamedFolder[];
@@ -160,7 +160,7 @@ function resolveFolders(entries: SourceEntry[], baseDir: string): { folders: Nam
     }
     if (isRemoteEntry(entry)) {
       const mirrorDir = mirrorDirFor(baseDir, entry.remote.mode, entry.remote.username, entry.name, entry.remote.owner);
-      remoteFolders.push({ name: entry.name, ...entry.remote, mirrorDir });
+      remoteFolders.push({ name: entry.name, ...entry.remote, server: canonicalServer(entry.remote.server), mirrorDir });
       return { name: entry.name, path: mirrorDir };
     }
     return { name: entry.name, path: path.resolve(baseDir, entry.path) };
