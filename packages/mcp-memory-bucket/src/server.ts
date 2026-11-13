@@ -24,6 +24,7 @@ import { registerAttachmentTools } from './attachments/tools.js';
 import { AttachmentRepository } from './attachments/repository.js';
 import { buildWebRouter } from './web/routes.js';
 import { registerUiTool } from './web/ui-tool.js';
+import { loadUiToken, scaffoldifyAccess } from './web/scaffoldify-access.js';
 import { registerMemoryChannelTools } from './channels/tools.js';
 import { startChannelSweep } from './channels/store.js';
 import { startRemotePolling, type RemotePollerHandle } from './remote/remote-sync.js';
@@ -266,14 +267,16 @@ function buildMcpServer(): McpServer {
   registerBucketFolderTools(server, config, skillRepo, memoryRepo, db, skillSpec, memorySpec, identity, remoteDeps);
   registerBucketShareTools(server, remoteDeps);
   registerAttachmentTools(server, attachmentRepo);
-  registerUiTool(server, PORT);
+  registerUiTool(server, PORT, uiToken);
   registerMemoryChannelTools(server);
   return server;
 }
 
 startChannelSweep((name) => console.error(`[memory-bucket] sweeping idle memory channel: ${name}`));
 
+const uiToken = loadUiToken(config.baseDir);
 const app = express();
+app.use(scaffoldifyAccess(uiToken));
 app.use(express.json());
 app.use(buildWebRouter(db, config, skillRepo, memoryRepo, skillSpec, memorySpec, identity, { skill: remoteSkillPoller, memory: remoteMemoryPoller }, attachmentRepo, embeddingIndexer, remoteDeps.appUrl));
 app.use(express.static(path.join(packageRoot, 'dist', 'client')));
