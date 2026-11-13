@@ -1,6 +1,6 @@
 {
   "name": "scaffoldify-mcp",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "type": "module",
   "description": "MCP server exposing skill_* (reusable coding patterns) and memory_* (point-in-time working context) tools over a markdown+frontmatter source, cached into SQLite at runtime, with hybrid keyword + local-embedding passage retrieval.",
   "repository": {
