@@ -528,6 +528,9 @@ export class ScreenMarker extends LitElement {
     } else if (key === 'a') {
       e.preventDefault();
       this.#store.selectShapes(this.#store.activePage.shapes.map((s) => s.id));
+    } else if (key === 'd' && e.shiftKey) {
+      e.preventDefault();
+      this.#duplicatePage(this.#store.activePageId.value);
     } else if (key === 'd') {
       e.preventDefault();
       this.#store.duplicateSelectedShapes();
@@ -1801,6 +1804,13 @@ export class ScreenMarker extends LitElement {
     void this.#switchPage(pages[nextIndex]!.id);
   }
 
+  #duplicatePage(id: string): void {
+    this.#commitTextEdit();
+    this.#clearRegion();
+    this.#store.duplicatePage(id);
+    this.#flashStatus('Page duplicated');
+  }
+
   #addPage(): void {
     this.#commitTextEdit();
     this.#store.addPage();
@@ -1985,6 +1995,15 @@ export class ScreenMarker extends LitElement {
               @dragend=${this.#onTabDragEnd}
             >
               ${this.#pageLabel(i)}
+              <span
+                class="tab-close"
+                title="Duplicate page (Shift+Cmd/Ctrl+D)"
+                @click=${(e: Event) => {
+                  e.stopPropagation();
+                  this.#duplicatePage(p.id);
+                }}
+                >⧉</span
+              >
               <span class="tab-close" title="Close page" @click=${(e: Event) => this.#closePage(e, p.id)}>×</span>
             </div>
           `

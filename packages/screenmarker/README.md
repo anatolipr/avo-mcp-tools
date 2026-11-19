@@ -24,7 +24,7 @@ Starts a local server and opens the app in your browser. Paste a screenshot (`Cm
 - **Rotate and flip** the image; annotations follow
 - **Zoom and pan**: images open fit-to-window; `Cmd/Ctrl+scroll` or trackpad pinch zooms around the cursor; hold `Space` and drag to pan (tap `Space` for the preview)
 - **Custom colors** via a color picker, plus an eyedropper (in Chromium browsers) to pick any color on screen
-- **Multi-page documents** — add multiple screenshots as tabs, reorder them by dragging, and copy/export them together as one stacked image or individually
+- **Multi-page documents** — add multiple screenshots as tabs, duplicate a page (⧉ on its tab, or `Shift+Cmd/Ctrl+D`), reorder them by dragging, and copy/export them together as one stacked image or individually
 - **Paste, drag-and-drop, or file picker** to load images
 - **Copy to clipboard** or **download as PNG**, plus a **preview** of exactly what will be copied
 - **Save/load as a document file** (JSON) to resume annotating later. Note: the saved file keeps the original, un-blurred image so blur stays editable — share the exported PNG, not the document file, when blur hides something sensitive

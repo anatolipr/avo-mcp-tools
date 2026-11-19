@@ -145,6 +145,23 @@ export class AnnotatorStore {
     this.activePageId.set(page.id);
   }
 
+  /** Inserts a copy of a page (image and annotations, with fresh ids) right after it and switches to it. Undoable. */
+  duplicatePage(id: string): void {
+    const pages = this.pages.value;
+    const index = pages.findIndex((p) => p.id === id);
+    if (index === -1) return;
+    this.#snapshot();
+    const source = pages[index]!;
+    const copy: Page = {
+      ...structuredClone(source),
+      id: makeId(),
+      shapes: source.shapes.map((s) => ({ ...structuredClone(s), id: makeId() })),
+    };
+    this.pages.set([...pages.slice(0, index + 1), copy, ...pages.slice(index + 1)]);
+    this.activePageId.set(copy.id);
+    this.selection.set(null);
+  }
+
   /**
    * Moves page `fromId` to sit just before page `beforeId`. Not undoable —
    * purely organizational, not content. Returns whether the order actually
