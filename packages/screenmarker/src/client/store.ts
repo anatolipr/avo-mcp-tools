@@ -4,7 +4,7 @@ import { loadSession, saveSession } from './persistence.js';
 import { getTabId } from './tab-identity.js';
 import { loadPreferences, savePreferences } from './preferences.js';
 
-function makeId(): string {
+export function makeId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
@@ -22,21 +22,29 @@ const ZOOM_MAX = 4;
 const ZOOM_STEP = 1.2;
 const PASTE_OFFSET = 16;
 
-export type Selection = { type: 'shape'; id: string } | { type: 'image' } | null;
-type Clipboard = { type: 'shape'; shape: Shape } | { type: 'image'; imageDataUrl: string } | null;
+/** One or more shapes (ids in no particular order), the page's background image, or nothing. */
+export type Selection = { type: 'shapes'; ids: string[] } | { type: 'image' } | null;
+type Clipboard = { type: 'shapes'; shapes: Shape[] } | { type: 'image'; imageDataUrl: string } | null;
+
+export type ShapeStyle = { color?: string; lineWidth?: number; fontSize?: number; fill?: boolean };
 
 const initialPrefs = loadPreferences();
+
+function offsetShape(shape: Shape, dx: number, dy: number): Shape {
+  return { ...shape, points: shape.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+}
 
 export class AnnotatorStore {
   pages = new Signal<Page[]>([makePage()]);
   activePageId = new Signal<string>(this.pages.value[0]!.id);
   activeTool = new Signal<Tool>('rect');
-  // Color/lineWidth/fontSize are seeded from localStorage (see
+  // Color/lineWidth/fontSize/fill are seeded from localStorage (see
   // preferences.ts) so the last-used values persist across sessions and
   // are shared by every tab — unlike document content, which is per-tab.
   activeColor = new Signal<string>(initialPrefs.color);
   activeLineWidth = new Signal<number>(initialPrefs.lineWidth);
   activeFontSize = new Signal<number>(initialPrefs.fontSize);
+  activeFill = new Signal<boolean>(initialPrefs.fill);
   zoom = new Signal<number>(1);
   previewZoom = new Signal<number>(1);
   selection = new Signal<Selection>(null);
@@ -64,6 +72,7 @@ export class AnnotatorStore {
         color: this.activeColor.value,
         lineWidth: this.activeLineWidth.value,
         fontSize: this.activeFontSize.value,
+        fill: this.activeFill.value,
       });
     });
   }
@@ -89,12 +98,44 @@ export class AnnotatorStore {
     return this.pages.value.find((p) => p.id === id) ?? this.pages.value[0]!;
   }
 
+  /** Ids of the selected shapes that still exist on the active page, in stacking order. */
+  get selectedIds(): string[] {
+    const sel = this.selection.value;
+    if (sel?.type !== 'shapes') return [];
+    const ids = new Set(sel.ids);
+    return this.activePage.shapes.filter((s) => ids.has(s.id)).map((s) => s.id);
+  }
+
+  get selectedShapes(): Shape[] {
+    const sel = this.selection.value;
+    if (sel?.type !== 'shapes') return [];
+    const ids = new Set(sel.ids);
+    return this.activePage.shapes.filter((s) => ids.has(s.id));
+  }
+
+  selectShapes(ids: string[]): void {
+    this.selection.set(ids.length ? { type: 'shapes', ids } : null);
+  }
+
+  /** Adds the shape to the selection, or removes it if already selected (Shift+click). */
+  toggleShapeSelected(id: string): void {
+    const current = this.selectedIds;
+    this.selectShapes(current.includes(id) ? current.filter((x) => x !== id) : [...current, id]);
+  }
+
   #snapshot(): void {
     this.#undoStack.push({
       pages: structuredClone(this.pages.value),
       activePageId: this.activePageId.value,
     });
     this.#redoStack = [];
+  }
+
+  /** Applies `fn` to the active page's shape list. Undoable. */
+  #updateActiveShapes(fn: (shapes: Shape[]) => Shape[]): void {
+    this.#snapshot();
+    const pageId = this.activePageId.value;
+    this.pages.update((pages) => pages.map((p) => (p.id === pageId ? { ...p, shapes: fn(p.shapes) } : p)));
   }
 
   addPage(): void {
@@ -183,30 +224,93 @@ export class AnnotatorStore {
   }
 
   addShape(shape: Shape): void {
-    this.#snapshot();
-    const id = this.activePageId.value;
-    this.pages.update((pages) =>
-      pages.map((p) => (p.id === id ? { ...p, shapes: [...p.shapes, shape] } : p))
+    this.#updateActiveShapes((shapes) => [...shapes, shape]);
+  }
+
+  /** Replaces one shape wholesale (resize, text edit). Undoable. */
+  replaceShape(shape: Shape): void {
+    this.#updateActiveShapes((shapes) => shapes.map((s) => (s.id === shape.id ? shape : s)));
+  }
+
+  /** Translates the given shapes by (dx, dy). Undoable as a single step. */
+  moveShapes(ids: string[], dx: number, dy: number): void {
+    if ((dx === 0 && dy === 0) || ids.length === 0) return;
+    const set = new Set(ids);
+    this.#updateActiveShapes((shapes) => shapes.map((s) => (set.has(s.id) ? offsetShape(s, dx, dy) : s)));
+  }
+
+  /**
+   * Restyles the given shapes. Font size only applies to text/step, line
+   * width only to the others, and fill only to shapes that support it, so
+   * one toolbar change on a mixed selection does the sensible thing for
+   * each. Undoable as a single step.
+   */
+  updateShapesStyle(ids: string[], style: ShapeStyle): void {
+    if (ids.length === 0) return;
+    const set = new Set(ids);
+    this.#updateActiveShapes((shapes) =>
+      shapes.map((s) => {
+        if (!set.has(s.id)) return s;
+        const next: Shape = { ...s };
+        if (style.color !== undefined) next.color = style.color;
+        const sized = s.type === 'text' || s.type === 'step';
+        if (style.fontSize !== undefined && sized) next.fontSize = style.fontSize;
+        if (style.lineWidth !== undefined && !sized) next.lineWidth = style.lineWidth;
+        if (style.fill !== undefined && (s.type === 'rect' || s.type === 'ellipse' || s.type === 'text')) {
+          next.fill = style.fill;
+        }
+        return next;
+      })
     );
   }
 
-  /** Translates a shape by (dx, dy). Undoable as a single step. */
-  moveShape(id: string, dx: number, dy: number): void {
-    if (dx === 0 && dy === 0) return;
+  deleteShapes(ids: string[]): void {
+    if (ids.length === 0) return;
+    const set = new Set(ids);
+    this.#updateActiveShapes((shapes) => shapes.filter((s) => !set.has(s.id)));
+    const remaining = this.selectedIds.filter((id) => !set.has(id));
+    if (this.selection.value?.type === 'shapes') this.selectShapes(remaining);
+  }
+
+  deleteSelectedShapes(): void {
+    this.deleteShapes(this.selectedIds);
+  }
+
+  /** Copies the selected shapes in place, offset slightly, and selects the copies. Undoable. */
+  duplicateSelectedShapes(): void {
+    const selected = this.selectedShapes;
+    if (selected.length === 0) return;
+    const copies = selected.map((s) => ({ ...offsetShape(structuredClone(s), PASTE_OFFSET, PASTE_OFFSET), id: makeId() }));
+    this.#updateActiveShapes((shapes) => [...shapes, ...copies]);
+    this.selectShapes(copies.map((c) => c.id));
+  }
+
+  /** Moves the selected shapes to the top (drawn last) or bottom of the stack, keeping their relative order. Undoable. */
+  reorderSelectedShapes(where: 'front' | 'back'): void {
+    const set = new Set(this.selectedIds);
+    if (set.size === 0) return;
+    this.#updateActiveShapes((shapes) => {
+      const picked = shapes.filter((s) => set.has(s.id));
+      const rest = shapes.filter((s) => !set.has(s.id));
+      return where === 'front' ? [...rest, ...picked] : [...picked, ...rest];
+    });
+  }
+
+  /** The number the next step marker on the active page should show. */
+  nextStepNumber(): number {
+    const steps = this.activePage.shapes.filter((s) => s.type === 'step').map((s) => s.stepNumber ?? 0);
+    return steps.length ? Math.max(...steps) + 1 : 1;
+  }
+
+  /**
+   * Replaces the active page's image and shapes in one undoable step — used
+   * by crop, rotate, and flip, which change both together.
+   */
+  replaceActivePageContent(imageDataUrl: string, shapes: Shape[]): void {
     this.#snapshot();
     const pageId = this.activePageId.value;
-    this.pages.update((pages) =>
-      pages.map((p) =>
-        p.id === pageId
-          ? {
-              ...p,
-              shapes: p.shapes.map((s) =>
-                s.id === id ? { ...s, points: s.points.map((pt) => ({ x: pt.x + dx, y: pt.y + dy })) } : s
-              ),
-            }
-          : p
-      )
-    );
+    this.pages.update((pages) => pages.map((p) => (p.id === pageId ? { ...p, imageDataUrl, shapes } : p)));
+    this.selection.set(null);
   }
 
   /**
@@ -216,46 +320,10 @@ export class AnnotatorStore {
    * won't render) so Undo is the only thing that ever drops content. Undoable.
    */
   cropActivePage(imageDataUrl: string, dx: number, dy: number): void {
-    this.#snapshot();
-    const pageId = this.activePageId.value;
-    this.pages.update((pages) =>
-      pages.map((p) =>
-        p.id === pageId
-          ? {
-              ...p,
-              imageDataUrl,
-              shapes: p.shapes.map((s) => ({ ...s, points: s.points.map((pt) => ({ x: pt.x - dx, y: pt.y - dy })) })),
-            }
-          : p
-      )
+    this.replaceActivePageContent(
+      imageDataUrl,
+      this.activePage.shapes.map((s) => offsetShape(s, -dx, -dy))
     );
-    this.selection.set(null);
-  }
-
-  /** Updates a shape's color, lineWidth, and/or fontSize in place. Undoable as a single step. */
-  updateShapeStyle(id: string, style: { color?: string; lineWidth?: number; fontSize?: number }): void {
-    this.#snapshot();
-    const pageId = this.activePageId.value;
-    this.pages.update((pages) =>
-      pages.map((p) =>
-        p.id === pageId ? { ...p, shapes: p.shapes.map((s) => (s.id === id ? { ...s, ...style } : s)) } : p
-      )
-    );
-  }
-
-  deleteShape(id: string): void {
-    this.#snapshot();
-    const pageId = this.activePageId.value;
-    this.pages.update((pages) =>
-      pages.map((p) => (p.id === pageId ? { ...p, shapes: p.shapes.filter((s) => s.id !== id) } : p))
-    );
-    const sel = this.selection.value;
-    if (sel && sel.type === 'shape' && sel.id === id) this.selection.set(null);
-  }
-
-  deleteSelectedShape(): void {
-    const sel = this.selection.value;
-    if (sel && sel.type === 'shape') this.deleteShape(sel.id);
   }
 
   /** Replaces the whole document (all pages) with loaded content. Undoable. */
@@ -276,11 +344,7 @@ export class AnnotatorStore {
   }
 
   clearActivePage(): void {
-    this.#snapshot();
-    const id = this.activePageId.value;
-    this.pages.update((pages) =>
-      pages.map((p) => (p.id === id ? { ...p, shapes: [] } : p))
-    );
+    this.#updateActiveShapes(() => []);
     this.selection.set(null);
   }
 
@@ -312,14 +376,14 @@ export class AnnotatorStore {
     return this.#clipboard !== null;
   }
 
-  /** Copies the current selection (a shape, or just the active page's background image — no annotations) into the in-app clipboard. No-op if nothing selected. */
+  /** Copies the current selection (shapes, or just the active page's background image — no annotations) into the in-app clipboard. No-op if nothing selected. */
   copySelection(): void {
     const sel = this.selection.value;
     if (!sel) return;
 
-    if (sel.type === 'shape') {
-      const shape = this.activePage.shapes.find((s) => s.id === sel.id);
-      if (shape) this.#clipboard = { type: 'shape', shape: structuredClone(shape) };
+    if (sel.type === 'shapes') {
+      const shapes = this.selectedShapes;
+      if (shapes.length) this.#clipboard = { type: 'shapes', shapes: structuredClone(shapes) };
     } else if (this.activePage.imageDataUrl) {
       this.#clipboard = { type: 'image', imageDataUrl: this.activePage.imageDataUrl };
     }
@@ -327,40 +391,40 @@ export class AnnotatorStore {
 
   /**
    * Pastes whatever's in the in-app clipboard onto the active page — pasting
-   * never creates a new page. A copied shape is added (offset slightly,
+   * never creates a new page. Copied shapes are added (offset slightly,
    * selected). A copied image replaces just the active page's background
    * image — its own shapes are left untouched, and none of the source
    * page's annotations come along. No-op if the clipboard is empty.
    */
   paste(): void {
     if (!this.#clipboard) return;
-    this.#snapshot();
-    const pageId = this.activePageId.value;
 
-    if (this.#clipboard.type === 'shape') {
-      const original = this.#clipboard.shape;
-      const pasted: Shape = {
-        ...structuredClone(original),
+    if (this.#clipboard.type === 'shapes') {
+      const pasted = this.#clipboard.shapes.map((s) => ({
+        ...offsetShape(structuredClone(s), PASTE_OFFSET, PASTE_OFFSET),
         id: makeId(),
-        points: original.points.map((p) => ({ x: p.x + PASTE_OFFSET, y: p.y + PASTE_OFFSET })),
-      };
-      this.pages.update((pages) =>
-        pages.map((p) => (p.id === pageId ? { ...p, shapes: [...p.shapes, pasted] } : p))
-      );
-      this.selection.set({ type: 'shape', id: pasted.id });
+      }));
+      this.#updateActiveShapes((shapes) => [...shapes, ...pasted]);
+      this.selectShapes(pasted.map((p) => p.id));
     } else {
+      this.#snapshot();
+      const pageId = this.activePageId.value;
       const imageDataUrl = this.#clipboard.imageDataUrl;
       this.pages.update((pages) => pages.map((p) => (p.id === pageId ? { ...p, imageDataUrl } : p)));
       this.selection.set({ type: 'image' });
     }
   }
 
+  setZoom(z: number): void {
+    this.zoom.set(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z)));
+  }
+
   zoomIn(): void {
-    this.zoom.set(Math.min(ZOOM_MAX, this.zoom.value * ZOOM_STEP));
+    this.setZoom(this.zoom.value * ZOOM_STEP);
   }
 
   zoomOut(): void {
-    this.zoom.set(Math.max(ZOOM_MIN, this.zoom.value / ZOOM_STEP));
+    this.setZoom(this.zoom.value / ZOOM_STEP);
   }
 
   zoomReset(): void {

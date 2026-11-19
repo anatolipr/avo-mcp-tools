@@ -1,47 +1,64 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html } from 'lit';
 import { createRef, ref } from 'lit/directives/ref.js';
+import { live } from 'lit/directives/live.js';
 import { SignalWatcher } from 'avosignals';
-import { AnnotatorStore } from './store.js';
+import { AnnotatorStore, makeId, type ShapeStyle } from './store.js';
 import {
-  drawShapes,
-  drawShape,
-  drawSelectionOutline,
-  drawImageSelectionOutline,
-  drawRegionOverlay,
+  boxHandlePoints,
+  contrastColor,
   cropImageDataUrl,
-  hitTestShapes,
+  drawHandles,
+  drawImageSelectionOutline,
+  drawMarquee,
+  drawRegionOverlay,
+  drawSelectionOutline,
+  drawShapes,
   flattenPagesToCanvas,
+  hitTestShapes,
+  shapeBounds,
+  shapesInRect,
+  transformImageDataUrl,
+  transformShape,
+  type ImageTransform,
 } from './render.js';
 import { copyImageOnly, copyRegion, downloadImage } from './export.js';
 import { downloadDocument, readDocumentFile } from './save-load.js';
-import type { Point, Rect, Shape, Tool } from './types.js';
+import { screenMarkerStyles } from './styles.js';
+import type { Point, Rect, Shape, ShapeType, Tool } from './types.js';
 
 const TOOLS: { type: Tool; label: string; icon: string; key: string }[] = [
   { type: 'select', label: 'Select', icon: '↖', key: 'v' },
   { type: 'region', label: 'Region', icon: '⬚', key: 'm' },
   { type: 'rect', label: 'Rectangle', icon: '▭', key: 'r' },
+  { type: 'ellipse', label: 'Ellipse', icon: '◯', key: 'o' },
   { type: 'arrow', label: 'Arrow', icon: '↗', key: 'a' },
+  { type: 'line', label: 'Line', icon: '╱', key: 'l' },
   { type: 'text', label: 'Text', icon: 'T', key: 't' },
+  { type: 'step', label: 'Step', icon: '①', key: 'n' },
   { type: 'pen', label: 'Pen', icon: '✎', key: 'p' },
   { type: 'highlight', label: 'Highlight', icon: '▮', key: 'h' },
+  { type: 'blur', label: 'Blur', icon: '▦', key: 'b' },
 ];
 
 const COLORS = ['#ff3b30', '#ffcc00', '#34c759', '#007aff', '#000000', '#ffffff'];
 const LINE_WIDTHS = [1, 2, 3, 5, 8, 12];
 const FONT_SIZES = [12, 14, 18, 24, 32, 48, 64];
 
-// Below this drag distance (in canvas pixels), a pointerdown→pointerup with a
-// draw tool active is treated as a click-to-select rather than a real drag —
-// a shape that small would be a useless zero-size artifact anyway.
+// Below this drag distance (in canvas pixels), a pointerdown→pointerup is
+// treated as a click rather than a drag (no zero-size shapes, no 1px moves).
 const CLICK_THRESHOLD = 3;
 
-// Region-select handles, in CSS pixels (converted to canvas pixels per zoom).
-const REGION_HANDLE_CSS_PX = 9;
+// Resize handles, in CSS pixels (converted to canvas pixels per zoom).
+const HANDLE_CSS_PX = 9;
 
-/** Which part of the region a drag grabbed: an edge/corner (compass letters) or the body. */
-type RegionGrab = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
+const FILLABLE: ShapeType[] = ['rect', 'ellipse', 'text'];
+const SIZED_BY_FONT: ShapeType[] = ['text', 'step'];
+const BOX_RESIZABLE: ShapeType[] = ['rect', 'ellipse', 'highlight', 'blur', 'pen'];
 
-const REGION_CURSOR: Record<RegionGrab, string> = {
+/** Which part of a box a drag grabbed: an edge/corner (compass letters) or the body. */
+type BoxGrab = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
+
+const GRAB_CURSOR: Record<BoxGrab, string> = {
   move: 'move',
   n: 'ns-resize',
   s: 'ns-resize',
@@ -53,12 +70,66 @@ const REGION_CURSOR: Record<RegionGrab, string> = {
   se: 'nwse-resize',
 };
 
-function normalizeRect(x1: number, y1: number, x2: number, y2: number, maxW: number, maxH: number): Rect {
-  const left = Math.max(0, Math.min(x1, x2));
-  const top = Math.max(0, Math.min(y1, y2));
-  const right = Math.min(maxW, Math.max(x1, x2));
-  const bottom = Math.min(maxH, Math.max(y1, y2));
-  return { x: Math.round(left), y: Math.round(top), w: Math.round(right - left), h: Math.round(bottom - top) };
+type ShapeDrag =
+  | { kind: 'move'; ids: string[]; start: Point; delta: Point; selectOnlyOnClick: string | null }
+  | { kind: 'resize'; orig: Shape; grab: BoxGrab | 0 | 1; start: Point; draft: Shape | null };
+
+type TextEdit = { id: string | null; anchor: Point; value: string; color: string; fontSize: number; fill: boolean };
+
+function sortedRect(x1: number, y1: number, x2: number, y2: number): Rect {
+  return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+}
+
+function clampedRect(x1: number, y1: number, x2: number, y2: number, maxW: number, maxH: number): Rect {
+  const r = sortedRect(
+    Math.max(0, Math.min(maxW, x1)),
+    Math.max(0, Math.min(maxH, y1)),
+    Math.max(0, Math.min(maxW, x2)),
+    Math.max(0, Math.min(maxH, y2))
+  );
+  return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.w), h: Math.round(r.h) };
+}
+
+/** Applies an edge/corner drag of (dx, dy) to box `o`. Dragging past the opposite side flips it. */
+function resizeBox(o: Rect, grab: Exclude<BoxGrab, 'move'>, dx: number, dy: number): [number, number, number, number] {
+  let left = o.x;
+  let top = o.y;
+  let right = o.x + o.w;
+  let bottom = o.y + o.h;
+  if (grab.includes('w')) left += dx;
+  if (grab.includes('e')) right += dx;
+  if (grab.includes('n')) top += dy;
+  if (grab.includes('s')) bottom += dy;
+  return [left, top, right, bottom];
+}
+
+/** What part of box `r` is under `pt` (within `tol`): a corner, an edge, the body, or nothing. */
+function boxGrabAt(r: Rect, pt: Point, tol: number): BoxGrab | null {
+  const inX = pt.x >= r.x - tol && pt.x <= r.x + r.w + tol;
+  const inY = pt.y >= r.y - tol && pt.y <= r.y + r.h + tol;
+  if (!inX || !inY) return null;
+  const v = Math.abs(pt.y - r.y) <= tol ? 'n' : Math.abs(pt.y - (r.y + r.h)) <= tol ? 's' : '';
+  const h = Math.abs(pt.x - r.x) <= tol ? 'w' : Math.abs(pt.x - (r.x + r.w)) <= tol ? 'e' : '';
+  return v || h ? ((v + h) as BoxGrab) : 'move';
+}
+
+function boundsRect(shape: Shape): Rect {
+  const b = shapeBounds(shape);
+  return { x: b.x, y: b.y, w: b.width, h: b.height };
+}
+
+/** Linearly maps all of a shape's points from box `from` to box `to` — resizes rects, ellipses, and pen strokes alike. */
+function mapShapeToBox(shape: Shape, from: Rect, to: Rect): Shape {
+  const sx = from.w ? to.w / from.w : 1;
+  const sy = from.h ? to.h / from.h : 1;
+  return {
+    ...shape,
+    points: shape.points.map((p) => ({ x: to.x + (p.x - from.x) * sx, y: to.y + (p.y - from.y) * sy })),
+  };
+}
+
+function offsetShape(shape: Shape, dx: number, dy: number): Shape {
+  return { ...shape, points: shape.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
 }
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -70,8 +141,15 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
-function makeId(): string {
-  return Math.random().toString(36).slice(2, 10);
+/** Whether a keyboard/clipboard event started in an editable field — checked via composedPath since targets inside the shadow root are retargeted to the host at window level. */
+function fromEditable(e: Event): boolean {
+  const el = e.composedPath()[0] as HTMLElement | undefined;
+  return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+}
+
+function fromControl(e: Event): boolean {
+  const el = e.composedPath()[0] as HTMLElement | undefined;
+  return !!el && (el.tagName === 'BUTTON' || el.tagName === 'SELECT');
 }
 
 type ThemeMode = 'system' | 'light' | 'dark';
@@ -90,297 +168,37 @@ function applyTheme(mode: ThemeMode) {
   else document.documentElement.setAttribute('data-theme', mode);
 }
 
+interface EyeDropperLike {
+  open(): Promise<{ sRGBHex: string }>;
+}
+const EyeDropperCtor = (window as unknown as { EyeDropper?: new () => EyeDropperLike }).EyeDropper;
+
 export class ScreenMarker extends LitElement {
-  static styles = css`
-    :host {
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      font-family: system-ui, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-    }
-    .theme-toggle {
-      position: fixed;
-      top: 10px;
-      right: 12px;
-      z-index: 10;
-      width: 28px;
-      height: 28px;
-      border: 1px solid var(--border);
-      border-radius: 50%;
-      background: var(--panel);
-      color: inherit;
-      cursor: pointer;
-      font-size: 14px;
-      line-height: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      opacity: 0.75;
-    }
-    .theme-toggle:hover {
-      opacity: 1;
-    }
-    .tabs {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      padding: 8px 8px 0;
-      background: var(--panel);
-      border-bottom: 1px solid var(--border);
-      user-select: none;
-    }
-    .tab {
-      position: relative;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 8px 10px 8px 14px;
-      border-radius: 8px 8px 0 0;
-      cursor: pointer;
-      font-size: 13px;
-      border: 1px solid transparent;
-      user-select: none;
-    }
-    /* Vertical bar at the tab's edge showing exactly where a dragged page
-       will be inserted — left edge = before this tab, right edge = after it. */
-    .tab.drag-over-before::before,
-    .tab.drag-over-after::after {
-      content: '';
-      position: absolute;
-      top: -2px;
-      bottom: -2px;
-      width: 3px;
-      background: var(--accent);
-      border-radius: 2px;
-    }
-    .tab.drag-over-before::before {
-      left: -2px;
-    }
-    .tab.drag-over-after::after {
-      right: -2px;
-    }
-    .tab.just-moved {
-      animation: tab-flash 1.5s ease-out;
-    }
-    @keyframes tab-flash {
-      0% {
-        background: #ffd60a;
-      }
-      100% {
-        background: transparent;
-      }
-    }
-    .tab-close {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 16px;
-      height: 16px;
-      border-radius: 4px;
-      font-size: 13px;
-      line-height: 1;
-      opacity: 0.5;
-    }
-    .tab-close:hover {
-      opacity: 1;
-      background: rgba(128, 128, 128, 0.25);
-    }
-    .tab.active {
-      background: var(--bg);
-      border-color: var(--border);
-      border-bottom-color: var(--bg);
-      margin-bottom: -1px;
-    }
-    .tab-add {
-      padding: 6px 10px;
-      cursor: pointer;
-      font-size: 16px;
-      opacity: 0.6;
-    }
-    .tab-add:hover {
-      opacity: 1;
-    }
-    .toolbar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 14px;
-      background: var(--panel);
-      border-bottom: 1px solid var(--border);
-      flex-wrap: wrap;
-      user-select: none;
-    }
-    button,
-    select {
-      font: inherit;
-      cursor: pointer;
-      border: 1px solid var(--border);
-      background: var(--panel);
-      color: var(--text);
-      border-radius: 6px;
-      padding: 6px 10px;
-      font-size: 13px;
-    }
-    button.active {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: white;
-    }
-    button.button-primary {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: white;
-    }
-    button.button-primary:hover:not(:disabled) {
-      filter: brightness(1.1);
-    }
-    button:disabled {
-      opacity: 0.4;
-      cursor: default;
-    }
-    .swatch {
-      width: 22px;
-      height: 22px;
-      border-radius: 50%;
-      border: 2px solid transparent;
-      box-shadow: inset 0 0 0 1px var(--border);
-      cursor: pointer;
-      padding: 0;
-    }
-    .swatch.active {
-      border-color: var(--text);
-    }
-    .spacer {
-      flex: 1;
-    }
-    .stage {
-      flex: 1;
-      display: flex;
-      overflow: auto;
-      padding: 16px;
-    }
-    .canvas-wrap {
-      position: relative;
-      margin: auto;
-      box-shadow: 0 2px 16px rgba(0, 0, 0, 0.15);
-      background: var(--panel);
-      flex: none;
-      overflow: hidden;
-    }
-    canvas {
-      display: block;
-      transform-origin: 0 0;
-    }
-    .region-actions {
-      position: absolute;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      padding: 4px;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
-      white-space: nowrap;
-      z-index: 2;
-    }
-    .region-actions button {
-      padding: 4px 8px;
-      font-size: 12px;
-    }
-    .region-size {
-      font-size: 11px;
-      opacity: 0.7;
-      padding: 0 4px;
-      font-variant-numeric: tabular-nums;
-    }
-    .zoom-controls {
-      display: inline-flex;
-      align-items: center;
-      gap: 2px;
-    }
-    .zoom-level {
-      font-size: 12px;
-      opacity: 0.7;
-      min-width: 42px;
-      text-align: center;
-    }
-    .empty {
-      color: var(--text);
-      opacity: 0.6;
-      text-align: center;
-      font-size: 14px;
-      max-width: 320px;
-      line-height: 1.6;
-    }
-    .status {
-      padding: 4px 14px 8px;
-      font-size: 12px;
-      opacity: 0.6;
-    }
-    .preview-overlay {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.6);
-      display: grid;
-      place-items: center;
-      padding: 32px;
-      z-index: 100;
-    }
-    .preview-card {
-      background: var(--panel);
-      border-radius: 10px;
-      box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
-      max-width: 90vw;
-      max-height: 90vh;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-    .preview-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--border);
-      font-size: 13px;
-    }
-    .preview-header-controls {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .preview-header button {
-      padding: 2px 8px;
-    }
-    .preview-body {
-      flex: 1;
-      overflow: auto;
-      padding: 16px;
-      display: flex;
-    }
-    .preview-img-wrap {
-      position: relative;
-      margin: auto;
-      flex: none;
-      overflow: hidden;
-    }
-    .preview-img-wrap img {
-      display: block;
-      transform-origin: 0 0;
-    }
-  `;
+  static styles = screenMarkerStyles;
 
   #store = new AnnotatorStore();
   #canvasRef = createRef<HTMLCanvasElement>();
+  #stageRef = createRef<HTMLDivElement>();
+  #textInputRef = createRef<HTMLInputElement>();
   #loadDocumentInputRef = createRef<HTMLInputElement>();
+  #image: { src: string; img: HTMLImageElement } | null = null;
+
+  // Transient interaction state — never part of the document or undo history.
   #drawing = false;
   #currentPoints: Point[] = [];
   #dragStart: Point | null = null;
-  #movingShapeId: string | null = null;
-  #moveDelta: Point = { x: 0, y: 0 };
+  #shapeDrag: ShapeDrag | null = null;
+  #marquee: { start: Point; rect: Rect; additive: boolean } | null = null;
+  // Region select is tied to a page id so it never leaks onto another page after switching tabs.
+  #region: { pageId: string; rect: Rect } | null = null;
+  #regionDrag: { grab: BoxGrab | 'create'; start: Point; orig: Rect } | null = null;
+  #textEdit: TextEdit | null = null;
+  #focusTextEdit = false;
+  #spaceHeld = false;
+  #spacePanned = false;
+  #pan: { x: number; y: number; left: number; top: number } | null = null;
+  #canvasCursor = '';
+
   #statusMsg = '';
   #previewUrl: string | null = null;
   #previewSize: { width: number; height: number } | null = null;
@@ -389,12 +207,6 @@ export class ScreenMarker extends LitElement {
   #dragOverSide: 'before' | 'after' | null = null;
   #justMovedPageId: string | null = null;
   #theme: ThemeMode = loadTheme();
-  // Region-select state is transient UI (not document content), so it lives
-  // here rather than in the store/undo history. Tied to a page id so it
-  // never leaks onto another page after switching tabs.
-  #region: { pageId: string; rect: Rect } | null = null;
-  #regionDrag: { grab: RegionGrab | 'create'; start: Point; orig: Rect } | null = null;
-  #canvasCursor = '';
 
   constructor() {
     super();
@@ -418,11 +230,15 @@ export class ScreenMarker extends LitElement {
     super.connectedCallback();
     window.addEventListener('paste', this.#onPaste);
     window.addEventListener('keydown', this.#onKeydown);
+    window.addEventListener('keyup', this.#onKeyup);
+    window.addEventListener('blur', this.#onWindowBlur);
     this.addEventListener('dragover', this.#onDragOver);
     this.addEventListener('drop', this.#onDrop);
-    this.#store.restore().then(() => {
+    this.#store.restore().then(async () => {
       this.requestUpdate();
-      this.updateComplete.then(() => this.#redraw());
+      await this.updateComplete;
+      await this.#redraw();
+      this.#fitToWindow();
     });
   }
 
@@ -430,6 +246,8 @@ export class ScreenMarker extends LitElement {
     super.disconnectedCallback();
     window.removeEventListener('paste', this.#onPaste);
     window.removeEventListener('keydown', this.#onKeydown);
+    window.removeEventListener('keyup', this.#onKeyup);
+    window.removeEventListener('blur', this.#onWindowBlur);
   }
 
   #onDragOver = (e: DragEvent) => {
@@ -443,6 +261,7 @@ export class ScreenMarker extends LitElement {
   };
 
   #onPaste = async (e: ClipboardEvent) => {
+    if (fromEditable(e)) return;
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {
@@ -454,9 +273,23 @@ export class ScreenMarker extends LitElement {
     }
   };
 
+  #onWindowBlur = () => {
+    this.#spaceHeld = false;
+    this.#pan = null;
+    this.requestUpdate();
+  };
+
+  #onKeyup = (e: KeyboardEvent) => {
+    if (e.key !== ' ' || !this.#spaceHeld) return;
+    this.#spaceHeld = false;
+    // A Space tap (no drag) still toggles the preview, as before Space+drag panning existed.
+    if (!this.#spacePanned && this.#store.activePage.imageDataUrl) this.#openPreview();
+    this.requestUpdate();
+  };
+
   #onKeydown = (e: KeyboardEvent) => {
-    const target = e.target as HTMLElement | null;
-    const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+    const typing = fromEditable(e);
+    const mod = e.metaKey || e.ctrlKey;
 
     if (e.key === 'Escape' && this.#previewUrl) {
       e.preventDefault();
@@ -464,8 +297,24 @@ export class ScreenMarker extends LitElement {
       return;
     }
 
+    if (e.key === ' ' && !mod && !e.altKey) {
+      if (typing || fromControl(e)) return;
+      e.preventDefault();
+      if (e.repeat) return;
+      if (this.#previewUrl) {
+        this.#closePreview();
+        return;
+      }
+      this.#spaceHeld = true;
+      this.#spacePanned = false;
+      this.requestUpdate();
+      return;
+    }
+
+    if (typing) return;
+
     const region = this.#activeRegion();
-    if (region && !typing) {
+    if (region) {
       if (e.key === 'Escape') {
         e.preventDefault();
         this.#clearRegion();
@@ -476,29 +325,26 @@ export class ScreenMarker extends LitElement {
         void this.#cropRegion();
         return;
       }
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+      if (mod && e.key.toLowerCase() === 'c') {
         e.preventDefault();
         void this.#copyRegion();
         return;
       }
     }
 
-    if (e.key === ' ' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-      const interactive = target && (typing || target.tagName === 'BUTTON' || target.tagName === 'SELECT');
-      if (interactive) return;
+    const selectedIds = this.#store.selectedIds;
+
+    if (e.key === 'Escape' && this.#store.selection.value) {
       e.preventDefault();
-      if (this.#previewUrl) this.#closePreview();
-      else if (this.#store.activePage.imageDataUrl) this.#openPreview();
+      this.#store.selection.set(null);
       return;
     }
 
-    if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey) {
-      if (typing) return;
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) {
       const sel = this.#store.selection.value;
-      if (sel?.type === 'shape') {
+      if (selectedIds.length) {
         e.preventDefault();
-        this.#store.deleteSelectedShape();
-        this.#redraw();
+        this.#store.deleteSelectedShapes();
       } else if (sel?.type === 'image' && this.#store.activePage.shapes.length === 0) {
         // Image selected with no other annotations on the page: delete the
         // whole page (or, if it's the only page left, reset to a blank
@@ -510,76 +356,70 @@ export class ScreenMarker extends LitElement {
       return;
     }
 
-    if (!e.metaKey && !e.ctrlKey && !e.altKey && !typing) {
+    if (e.key.startsWith('Arrow') && !mod && !e.altKey) {
+      if (selectedIds.length) {
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+        this.#store.moveShapes(selectedIds, dx, dy);
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        this.#gotoAdjacentPage(e.key === 'ArrowLeft' ? -1 : 1);
+      }
+      return;
+    }
+
+    if (!mod && !e.altKey) {
       const tool = TOOLS.find((t) => t.key === e.key.toLowerCase());
-      if (tool) {
+      if (tool && !e.shiftKey) {
         e.preventDefault();
-        this.#store.activeTool.set(tool.type);
+        this.#setTool(tool.type);
         return;
       }
-      if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        this.#gotoAdjacentPage(-1);
-        return;
-      }
-      if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        this.#gotoAdjacentPage(1);
-        return;
-      }
-      if (e.key === ',') {
-        e.preventDefault();
-        const moved = this.#store.moveActivePage(-1);
-        if (moved) this.#flashMovedTab(this.#store.activePageId.value);
-        return;
-      }
-      if (e.key === '.') {
-        e.preventDefault();
-        const moved = this.#store.moveActivePage(1);
-        if (moved) this.#flashMovedTab(this.#store.activePageId.value);
-        return;
-      }
-      if (e.key === '[') {
-        e.preventDefault();
-        if (this.#styleContextIsText()) this.#adjustFontSize(-2);
-        else this.#adjustLineWidth(-1);
-        return;
-      }
-      if (e.key === ']') {
-        e.preventDefault();
-        if (this.#styleContextIsText()) this.#adjustFontSize(2);
-        else this.#adjustLineWidth(1);
-        return;
-      }
-      if (e.key === '+' || e.key === '=') {
-        e.preventDefault();
-        this.#store.zoomIn();
-        return;
-      }
-      if (e.key === '-') {
-        e.preventDefault();
-        this.#store.zoomOut();
-        return;
-      }
-      if (e.key === '0') {
-        e.preventDefault();
-        this.#store.zoomReset();
-        return;
+      switch (e.key) {
+        case ',':
+        case '.': {
+          e.preventDefault();
+          const moved = this.#store.moveActivePage(e.key === ',' ? -1 : 1);
+          if (moved) this.#flashMovedTab(this.#store.activePageId.value);
+          return;
+        }
+        case '[':
+        case ']': {
+          e.preventDefault();
+          const dir = e.key === '[' ? -1 : 1;
+          if (this.#styleContextIsText()) this.#adjustFontSize(dir * 2);
+          else this.#adjustLineWidth(dir);
+          return;
+        }
+        case '+':
+        case '=':
+          e.preventDefault();
+          this.#store.zoomIn();
+          return;
+        case '-':
+          e.preventDefault();
+          this.#store.zoomOut();
+          return;
+        case '0':
+          e.preventDefault();
+          this.#store.zoomReset();
+          return;
+        case 'f':
+          e.preventDefault();
+          this.#fitToWindow();
+          return;
       }
     }
 
-    const mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
-    if (e.key.toLowerCase() === 'z' && e.shiftKey) {
+    const key = e.key.toLowerCase();
+    if (key === 'z') {
       e.preventDefault();
-      this.#store.redo();
+      if (e.shiftKey) this.#store.redo();
+      else this.#store.undo();
       this.#clearRegion();
-      this.#redraw();
-    } else if (e.key.toLowerCase() === 'z') {
-      e.preventDefault();
-      this.#store.undo();
-      this.#clearRegion();
-      this.#redraw();
     } else if (e.key === '=' || e.key === '+') {
       e.preventDefault();
       this.#store.zoomIn();
@@ -589,13 +429,22 @@ export class ScreenMarker extends LitElement {
     } else if (e.key === '0') {
       e.preventDefault();
       this.#store.zoomReset();
-    } else if (e.key.toLowerCase() === 'c' && !typing) {
+    } else if (key === 'a') {
+      e.preventDefault();
+      this.#store.selectShapes(this.#store.activePage.shapes.map((s) => s.id));
+    } else if (key === 'd') {
+      e.preventDefault();
+      this.#store.duplicateSelectedShapes();
+    } else if (e.key === ']' || e.key === '[') {
+      e.preventDefault();
+      this.#store.reorderSelectedShapes(e.key === ']' ? 'front' : 'back');
+    } else if (key === 'c') {
       e.preventDefault();
       const sel = this.#store.selection.value;
-      if (sel?.type === 'shape') {
-        // In-app clipboard copy — pastes back as a new, still-editable shape.
+      if (selectedIds.length) {
+        // In-app clipboard copy — pastes back as new, still-editable shapes.
         this.#store.copySelection();
-        this.#flashStatus('Shape copied');
+        this.#flashStatus(selectedIds.length === 1 ? 'Shape copied' : `${selectedIds.length} shapes copied`);
       } else if (sel?.type === 'image') {
         // The image is selected: copy the page to the OS clipboard AND the
         // in-app clipboard, so Cmd+V can still duplicate it onto another page.
@@ -605,26 +454,31 @@ export class ScreenMarker extends LitElement {
         // Nothing selected: copy the whole scene (all pages) to the OS clipboard.
         void this.#copyImage();
       }
-    } else if (e.key.toLowerCase() === 'v' && this.#store.hasClipboard()) {
+    } else if (key === 'v' && this.#store.hasClipboard()) {
       e.preventDefault();
       this.#store.paste();
-      this.updateComplete.then(() => this.#redraw());
-    } else if (e.key.toLowerCase() === 's') {
+    } else if (key === 's') {
       e.preventDefault();
       this.#saveDocument();
-    } else if (e.key.toLowerCase() === 'o') {
+    } else if (key === 'o') {
       e.preventDefault();
       this.#loadDocumentInputRef.value?.click();
     }
   };
 
+  #setTool(tool: Tool): void {
+    this.#commitTextEdit();
+    this.#store.activeTool.set(tool);
+    this.#canvasCursor = '';
+  }
+
   async #loadImageFile(file: File): Promise<void> {
     const dataUrl = await fileToDataUrl(file);
     this.#store.setImage(this.#store.activePageId.value, dataUrl);
     this.#clearRegion();
-    this.#store.zoomReset();
     await this.updateComplete;
-    this.#redraw();
+    await this.#redraw();
+    this.#fitToWindow();
   }
 
   #onFilePick = async (e: Event) => {
@@ -655,45 +509,121 @@ export class ScreenMarker extends LitElement {
     try {
       const { pages, activePageId } = await readDocumentFile(file);
       this.#store.loadDocument(pages, activePageId);
-      this.#store.zoomReset();
       await this.updateComplete;
-      this.#redraw();
+      await this.#redraw();
+      this.#fitToWindow();
       this.#flashStatus('Document loaded');
     } catch (err) {
       this.#flashStatus(`Load failed: ${(err as Error).message}`);
     }
   };
 
+  // ---------- drawing ----------
+
+  async #loadPageImage(src: string): Promise<HTMLImageElement> {
+    if (this.#image?.src === src) return this.#image.img;
+    const img = new Image();
+    img.src = src;
+    await img.decode();
+    this.#image = { src, img };
+    return img;
+  }
+
+  /** The page's shapes as they should look right now — with any in-progress move, resize, or new shape applied, and the text being edited hidden (the input overlay shows it instead). */
+  #displayShapes(): Shape[] {
+    const drag = this.#shapeDrag;
+    const movingIds = drag?.kind === 'move' ? new Set(drag.ids) : null;
+    const shapes: Shape[] = [];
+    for (const s of this.#store.activePage.shapes) {
+      if (this.#textEdit?.id === s.id) continue;
+      if (movingIds?.has(s.id) && drag?.kind === 'move') shapes.push(offsetShape(s, drag.delta.x, drag.delta.y));
+      else if (drag?.kind === 'resize' && drag.orig.id === s.id && drag.draft) shapes.push(drag.draft);
+      else shapes.push(s);
+    }
+    const tool = this.#store.activeTool.value;
+    if (this.#drawing && this.#currentPoints.length >= 2 && this.#isShapeTool(tool)) {
+      shapes.push(this.#newShape(tool, this.#currentPoints));
+    }
+    return shapes;
+  }
+
+  #isShapeTool(tool: Tool): tool is ShapeType {
+    return tool !== 'select' && tool !== 'region';
+  }
+
+  #newShape(type: ShapeType, points: Point[]): Shape {
+    const shape: Shape = {
+      id: makeId(),
+      type,
+      color: this.#store.activeColor.value,
+      lineWidth: this.#store.activeLineWidth.value,
+      points,
+    };
+    if (FILLABLE.includes(type)) shape.fill = this.#store.activeFill.value;
+    if (SIZED_BY_FONT.includes(type)) shape.fontSize = this.#store.activeFontSize.value;
+    return shape;
+  }
+
   async #redraw(): Promise<void> {
     const page = this.#store.activePage;
     const canvas = this.#canvasRef.value;
     if (!canvas || !page.imageDataUrl) return;
 
-    const img = new Image();
-    img.src = page.imageDataUrl;
-    await img.decode();
+    const img = await this.#loadPageImage(page.imageDataUrl);
     const sizeChanged = canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight;
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
+    if (sizeChanged) {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+    }
     const ctx = canvas.getContext('2d')!;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0);
-    drawShapes(ctx, page.shapes);
-    const sel = this.#store.selection.value;
-    if (sel?.type === 'shape') {
-      const selected = page.shapes.find((s) => s.id === sel.id);
-      if (selected) drawSelectionOutline(ctx, selected);
-    } else if (sel?.type === 'image') {
-      drawImageSelectionOutline(ctx, canvas.width, canvas.height);
+    const shapes = this.#displayShapes();
+    drawShapes(ctx, shapes);
+
+    const unit = 1 / this.#displayScale();
+    const selected = new Set(this.#store.selectedIds);
+    const selectedShapes = shapes.filter((s) => selected.has(s.id));
+    for (const s of selectedShapes) drawSelectionOutline(ctx, s, unit);
+    const handleShape = selectedShapes.length === 1 ? selectedShapes[0]! : null;
+    if (handleShape && this.#store.activeTool.value === 'select' && this.#shapeDrag?.kind !== 'move') {
+      const pts = this.#handlePoints(handleShape);
+      if (pts.length) drawHandles(ctx, pts, HANDLE_CSS_PX * unit);
     }
+    if (this.#store.selection.value?.type === 'image') drawImageSelectionOutline(ctx, canvas.width, canvas.height);
+    if (this.#marquee) drawMarquee(ctx, this.#marquee.rect, unit);
+
     const region = this.#activeRegion();
-    if (region) drawRegionOverlay(ctx, region, this.#regionHandleSize());
+    if (region) drawRegionOverlay(ctx, region, HANDLE_CSS_PX * unit);
     // canvas.width/height just changed the wrap's target size (#canvasWrapStyle
     // reads it) — re-render once so the wrap picks up the new box on first load.
     if (sizeChanged) this.requestUpdate();
   }
 
-  #canvasPoint(e: PointerEvent): Point {
+  /** Resize-handle positions for a shape: two endpoints for arrows/lines, 8 box handles for box-like shapes, none for text/steps (sized via font size). */
+  #handlePoints(shape: Shape): Point[] {
+    if (shape.type === 'arrow' || shape.type === 'line') return shape.points.slice(0, 2);
+    if (BOX_RESIZABLE.includes(shape.type)) return boxHandlePoints(boundsRect(shape));
+    return [];
+  }
+
+  /** Which resize handle of `shape` is under `pt`, if any: an endpoint index for arrows/lines, a box edge/corner otherwise. */
+  #shapeHandleAt(shape: Shape, pt: Point): BoxGrab | 0 | 1 | null {
+    const tol = this.#handleTolerance();
+    if (shape.type === 'arrow' || shape.type === 'line') {
+      const i = shape.points.slice(0, 2).findIndex((p) => Math.hypot(p.x - pt.x, p.y - pt.y) <= tol);
+      return i === 0 || i === 1 ? i : null;
+    }
+    if (!BOX_RESIZABLE.includes(shape.type)) return null;
+    const grab = boxGrabAt(boundsRect(shape), pt, tol);
+    return grab === 'move' ? null : grab;
+  }
+
+  #handleTolerance(): number {
+    return HANDLE_CSS_PX / this.#displayScale();
+  }
+
+  #canvasPoint(e: PointerEvent | MouseEvent): Point {
     const canvas = this.#canvasRef.value!;
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
@@ -701,93 +631,218 @@ export class ScreenMarker extends LitElement {
     return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
   }
 
-  /** A pointerdown directly on the .stage padding (not bubbled from the canvas) means the user clicked outside the image — clear any selection. */
+  // ---------- pointer handling ----------
+
+  /** Stage-level pointerdown: Space+drag pans from anywhere; a click on the stage padding (not bubbled from the canvas) clears the selection. */
   #onStagePointerDown = (e: PointerEvent) => {
-    if (e.target === e.currentTarget && this.#store.selection.value) {
-      this.#store.selection.set(null);
-      this.#redraw();
+    if (this.#spaceHeld) {
+      const stage = this.#stageRef.value!;
+      this.#pan = { x: e.clientX, y: e.clientY, left: stage.scrollLeft, top: stage.scrollTop };
+      this.#spacePanned = true;
+      stage.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      this.requestUpdate();
+      return;
+    }
+    if (e.target === e.currentTarget) {
+      this.#commitTextEdit();
+      if (this.#store.selection.value) this.#store.selection.set(null);
     }
   };
 
+  #onStagePointerMove = (e: PointerEvent) => {
+    if (!this.#pan) return;
+    const stage = this.#stageRef.value!;
+    stage.scrollLeft = this.#pan.left - (e.clientX - this.#pan.x);
+    stage.scrollTop = this.#pan.top - (e.clientY - this.#pan.y);
+  };
+
+  #onStagePointerUp = () => {
+    if (!this.#pan) return;
+    this.#pan = null;
+    this.requestUpdate();
+  };
+
+  /** Cmd/Ctrl+wheel and trackpad pinch (which browsers report as ctrl+wheel) zoom around the cursor. */
+  #onWheel = (e: WheelEvent) => {
+    if (!(e.ctrlKey || e.metaKey) || !this.#canvasRef.value) return;
+    e.preventDefault();
+    const factor = Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0025));
+    void this.#zoomAt(this.#store.zoom.value * factor, e.clientX, e.clientY);
+  };
+
+  /** Sets zoom while keeping the image point under (clientX, clientY) fixed on screen. */
+  async #zoomAt(zoom: number, clientX: number, clientY: number): Promise<void> {
+    const canvas = this.#canvasRef.value;
+    const stage = this.#stageRef.value;
+    if (!canvas || !stage) return;
+    const before = canvas.getBoundingClientRect();
+    const fx = (clientX - before.left) / before.width;
+    const fy = (clientY - before.top) / before.height;
+    this.#store.setZoom(zoom);
+    await this.updateComplete;
+    const after = canvas.getBoundingClientRect();
+    stage.scrollLeft += after.left + fx * after.width - clientX;
+    stage.scrollTop += after.top + fy * after.height - clientY;
+  }
+
+  /** Zooms so the whole image fits in the stage, never above 100%. */
+  #fitToWindow(): void {
+    const canvas = this.#canvasRef.value;
+    const stage = this.#stageRef.value;
+    if (!canvas || !stage || !canvas.width || !this.#store.activePage.imageDataUrl) return;
+    const dpr = window.devicePixelRatio || 1;
+    const availW = stage.clientWidth - 32;
+    const availH = stage.clientHeight - 32;
+    if (availW <= 0 || availH <= 0) return;
+    this.#store.setZoom(Math.min(1, (availW * dpr) / canvas.width, (availH * dpr) / canvas.height));
+  }
+
   #onPointerDown = (e: PointerEvent) => {
-    if (!this.#store.activePage.imageDataUrl) return;
+    if (this.#spaceHeld || !this.#store.activePage.imageDataUrl || e.button !== 0) return;
+    this.#commitTextEdit();
     const tool = this.#store.activeTool.value;
     const pt = this.#canvasPoint(e);
+    const capture = () => (e.target as Element).setPointerCapture(e.pointerId);
 
     if (tool === 'region') {
       const current = this.#activeRegion();
-      const grab = current ? this.#regionGrabAt(current, pt) : null;
+      const grab = current ? boxGrabAt(current, pt, this.#handleTolerance()) : null;
       this.#regionDrag =
         current && grab
           ? { grab, start: pt, orig: current }
           : { grab: 'create', start: pt, orig: { x: pt.x, y: pt.y, w: 0, h: 0 } };
       if (this.#store.selection.value) this.#store.selection.set(null);
-      (e.target as Element).setPointerCapture(e.pointerId);
+      capture();
       return;
     }
 
     if (tool === 'select') {
-      const hit = hitTestShapes(this.#store.activePage.shapes, pt);
-      this.#store.selection.set(hit ? { type: 'shape', id: hit.id } : { type: 'image' });
-      if (hit) {
-        // Arm a potential drag-to-move; #onPointerUp decides whether it was
-        // a real drag (commit the move) or just a click (leave it selected).
-        this.#movingShapeId = hit.id;
-        this.#dragStart = pt;
-        this.#moveDelta = { x: 0, y: 0 };
-        (e.target as Element).setPointerCapture(e.pointerId);
+      const selected = this.#store.selectedShapes;
+      if (selected.length === 1) {
+        const handle = this.#shapeHandleAt(selected[0]!, pt);
+        if (handle !== null) {
+          this.#shapeDrag = { kind: 'resize', orig: selected[0]!, grab: handle, start: pt, draft: null };
+          capture();
+          return;
+        }
       }
-      this.#redraw();
+      const hit = hitTestShapes(this.#store.activePage.shapes, pt);
+      if (hit) {
+        const wasSelected = this.#store.selectedIds.includes(hit.id);
+        if (e.shiftKey) this.#store.toggleShapeSelected(hit.id);
+        else if (!wasSelected) this.#store.selectShapes([hit.id]);
+        const ids = this.#store.selectedIds;
+        if (ids.includes(hit.id)) {
+          // Arm a potential drag-to-move of the whole selection; a plain click
+          // on one member of a multi-selection narrows it to just that shape.
+          this.#shapeDrag = {
+            kind: 'move',
+            ids,
+            start: pt,
+            delta: { x: 0, y: 0 },
+            selectOnlyOnClick: !e.shiftKey && wasSelected && ids.length > 1 ? hit.id : null,
+          };
+          capture();
+        }
+        return;
+      }
+      this.#marquee = { start: pt, rect: { x: pt.x, y: pt.y, w: 0, h: 0 }, additive: e.shiftKey };
+      capture();
       return;
     }
 
     if (tool === 'text') {
-      const label = window.prompt('Annotation text:');
-      if (label) {
-        this.#store.addShape({
-          id: makeId(),
-          type: 'text',
-          color: this.#store.activeColor.value,
-          lineWidth: this.#store.activeLineWidth.value,
-          fontSize: this.#store.activeFontSize.value,
-          points: [pt],
-          label,
-        });
-        this.#redraw();
-      }
+      // Suppress the compat mousedown, whose default focus change would
+      // immediately blur (and so commit/close) the editor opened below.
+      e.preventDefault();
+      const hit = hitTestShapes(this.#store.activePage.shapes, pt);
+      if (hit?.type === 'text') this.#startTextEdit(hit);
+      else this.#startTextEdit(null, pt);
+      return;
+    }
+
+    if (tool === 'step') {
+      const step = this.#newShape('step', [pt]);
+      step.stepNumber = this.#store.nextStepNumber();
+      this.#store.addShape(step);
       return;
     }
 
     this.#drawing = true;
     this.#dragStart = pt;
     this.#currentPoints = [pt];
-    (e.target as Element).setPointerCapture(e.pointerId);
+    capture();
   };
 
   #onPointerMove = (e: PointerEvent) => {
-    if (this.#store.activeTool.value === 'region') {
-      this.#onRegionPointerMove(e);
-      return;
-    }
-
-    if (this.#movingShapeId && this.#dragStart) {
-      const pt = this.#canvasPoint(e);
-      this.#moveDelta = { x: pt.x - this.#dragStart.x, y: pt.y - this.#dragStart.y };
-      this.#previewMove();
-      return;
-    }
-
-    if (!this.#drawing) return;
+    if (this.#spaceHeld) return;
     const tool = this.#store.activeTool.value;
     const pt = this.#canvasPoint(e);
 
-    if (tool === 'pen') {
-      this.#currentPoints.push(pt);
-    } else {
-      this.#currentPoints = [this.#currentPoints[0]!, pt];
+    if (tool === 'region') {
+      this.#onRegionPointerMove(pt);
+      return;
     }
-    this.#previewDraw();
+
+    const drag = this.#shapeDrag;
+    if (drag?.kind === 'move') {
+      drag.delta = { x: pt.x - drag.start.x, y: pt.y - drag.start.y };
+      void this.#redraw();
+      return;
+    }
+    if (drag?.kind === 'resize') {
+      drag.draft = this.#resizedShape(drag, pt);
+      void this.#redraw();
+      return;
+    }
+    if (this.#marquee) {
+      const m = this.#marquee;
+      m.rect = sortedRect(m.start.x, m.start.y, pt.x, pt.y);
+      void this.#redraw();
+      return;
+    }
+
+    if (this.#drawing) {
+      if (tool === 'pen') this.#currentPoints.push(pt);
+      else this.#currentPoints = [this.#currentPoints[0]!, pt];
+      void this.#redraw();
+      return;
+    }
+
+    this.#updateHoverCursor(pt);
   };
+
+  #resizedShape(drag: Extract<ShapeDrag, { kind: 'resize' }>, pt: Point): Shape {
+    const o = drag.orig;
+    if (drag.grab === 0 || drag.grab === 1) {
+      const points = [...o.points];
+      points[drag.grab] = pt;
+      return { ...o, points };
+    }
+    if (drag.grab === 'move') return o;
+    const from = boundsRect(o);
+    const [l, t, r, b] = resizeBox(from, drag.grab, pt.x - drag.start.x, pt.y - drag.start.y);
+    return mapShapeToBox(o, from, sortedRect(l, t, r, b));
+  }
+
+  #updateHoverCursor(pt: Point): void {
+    let cursor = 'crosshair';
+    if (this.#store.activeTool.value === 'select') {
+      cursor = 'default';
+      const selected = this.#store.selectedShapes;
+      const handle = selected.length === 1 ? this.#shapeHandleAt(selected[0]!, pt) : null;
+      if (handle === 0 || handle === 1) cursor = 'grab';
+      else if (handle) cursor = GRAB_CURSOR[handle];
+      else if (hitTestShapes(this.#store.activePage.shapes, pt)) cursor = 'move';
+    } else if (this.#store.activeTool.value === 'text') {
+      cursor = 'text';
+    }
+    if (cursor !== this.#canvasCursor) {
+      this.#canvasCursor = cursor;
+      this.requestUpdate();
+    }
+  }
 
   #onPointerUp = (e: PointerEvent) => {
     if (this.#regionDrag) {
@@ -798,16 +853,30 @@ export class ScreenMarker extends LitElement {
       return;
     }
 
-    if (this.#movingShapeId) {
-      const id = this.#movingShapeId;
-      const { x: dx, y: dy } = this.#moveDelta;
-      this.#movingShapeId = null;
-      this.#dragStart = null;
-      this.#moveDelta = { x: 0, y: 0 };
-      if (Math.hypot(dx, dy) >= CLICK_THRESHOLD) {
-        this.#store.moveShape(id, dx, dy);
+    const drag = this.#shapeDrag;
+    if (drag) {
+      this.#shapeDrag = null;
+      if (drag.kind === 'move') {
+        const { x: dx, y: dy } = drag.delta;
+        if (Math.hypot(dx, dy) >= CLICK_THRESHOLD) this.#store.moveShapes(drag.ids, dx, dy);
+        else if (drag.selectOnlyOnClick) this.#store.selectShapes([drag.selectOnlyOnClick]);
+      } else if (drag.draft) {
+        this.#store.replaceShape(drag.draft);
       }
-      this.#redraw();
+      void this.#redraw();
+      return;
+    }
+
+    if (this.#marquee) {
+      const { rect, additive } = this.#marquee;
+      this.#marquee = null;
+      if (rect.w < CLICK_THRESHOLD && rect.h < CLICK_THRESHOLD) {
+        if (!additive) this.#store.selection.set({ type: 'image' });
+      } else {
+        const hits = shapesInRect(this.#store.activePage.shapes, rect).map((s) => s.id);
+        this.#store.selectShapes(additive ? [...new Set([...this.#store.selectedIds, ...hits])] : hits);
+      }
+      void this.#redraw();
       return;
     }
 
@@ -817,76 +886,128 @@ export class ScreenMarker extends LitElement {
     const pt = this.#canvasPoint(e);
     const start = this.#dragStart;
     const dragDistance = start ? Math.hypot(pt.x - start.x, pt.y - start.y) : Infinity;
+    const points = this.#currentPoints;
+    this.#currentPoints = [];
+    this.#dragStart = null;
 
-    // #drawing is only ever set true for draw tools (select/text return early
-    // in #onPointerDown before reaching setPointerCapture), so tool here is
-    // always a real ShapeType — but narrow explicitly rather than casting.
-    if (tool === 'select' || tool === 'region') {
-      // Unreachable (#drawing is only set for draw tools); narrows `tool` to ShapeType below.
-    } else if (dragDistance < CLICK_THRESHOLD) {
+    if (!this.#isShapeTool(tool)) return;
+    if (dragDistance < CLICK_THRESHOLD) {
       // A click (no real drag) with a draw tool active would only produce a
       // degenerate zero-size shape — treat it as "select whatever's under
       // the cursor" instead, same as the Select tool would.
       const hit = start ? hitTestShapes(this.#store.activePage.shapes, start) : null;
-      this.#store.selection.set(hit ? { type: 'shape', id: hit.id } : { type: 'image' });
-    } else if (this.#currentPoints.length >= 2) {
-      this.#store.addShape({
-        id: makeId(),
-        type: tool,
-        color: this.#store.activeColor.value,
-        lineWidth: this.#store.activeLineWidth.value,
-        points: this.#currentPoints,
-      });
+      if (hit && e.shiftKey) this.#store.toggleShapeSelected(hit.id);
+      else this.#store.selection.set(hit ? { type: 'shapes', ids: [hit.id] } : { type: 'image' });
+    } else if (points.length >= 2) {
+      this.#store.addShape(this.#newShape(tool, points));
     }
-    this.#currentPoints = [];
-    this.#dragStart = null;
-    this.#redraw();
+    void this.#redraw();
   };
 
-  async #previewDraw(): Promise<void> {
-    const page = this.#store.activePage;
-    const canvas = this.#canvasRef.value;
-    const tool = this.#store.activeTool.value;
-    if (!canvas || !page.imageDataUrl || tool === 'select' || tool === 'region') return;
-    const img = new Image();
-    img.src = page.imageDataUrl;
-    await img.decode();
-    const ctx = canvas.getContext('2d')!;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0);
-    drawShapes(ctx, page.shapes);
-    const previewShape: Shape = {
-      id: 'preview',
-      type: tool,
-      color: this.#store.activeColor.value,
-      lineWidth: this.#store.activeLineWidth.value,
-      points: this.#currentPoints,
-    };
-    drawShape(ctx, previewShape);
+  #onDoubleClick = (e: MouseEvent) => {
+    if (!this.#store.activePage.imageDataUrl) return;
+    const hit = hitTestShapes(this.#store.activePage.shapes, this.#canvasPoint(e));
+    if (hit?.type === 'text') this.#startTextEdit(hit);
+  };
+
+  // ---------- inline text editing ----------
+
+  #startTextEdit(shape: Shape | null, anchor?: Point): void {
+    this.#commitTextEdit();
+    this.#textEdit = shape
+      ? {
+          id: shape.id,
+          anchor: shape.points[0]!,
+          value: shape.label ?? '',
+          color: shape.color,
+          fontSize: shape.fontSize ?? 18,
+          fill: !!shape.fill,
+        }
+      : {
+          id: null,
+          anchor: anchor!,
+          value: '',
+          color: this.#store.activeColor.value,
+          fontSize: this.#store.activeFontSize.value,
+          fill: this.#store.activeFill.value,
+        };
+    if (shape) this.#store.selectShapes([shape.id]);
+    this.#focusTextEdit = true;
+    this.requestUpdate();
   }
 
-  async #previewMove(): Promise<void> {
-    const page = this.#store.activePage;
-    const canvas = this.#canvasRef.value;
-    if (!canvas || !page.imageDataUrl || !this.#movingShapeId) return;
-    const img = new Image();
-    img.src = page.imageDataUrl;
-    await img.decode();
-    const ctx = canvas.getContext('2d')!;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0);
-
-    const { x: dx, y: dy } = this.#moveDelta;
-    for (const shape of page.shapes) {
-      if (shape.id !== this.#movingShapeId) {
-        drawShape(ctx, shape);
-        continue;
-      }
-      const moved: Shape = { ...shape, points: shape.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
-      drawShape(ctx, moved);
-      drawSelectionOutline(ctx, moved);
+  /** Saves the open text editor (if any). An emptied existing label deletes that text shape. */
+  #commitTextEdit(): void {
+    const edit = this.#textEdit;
+    if (!edit) return;
+    this.#textEdit = null;
+    const label = edit.value.trim();
+    if (edit.id) {
+      const shape = this.#store.activePage.shapes.find((s) => s.id === edit.id);
+      if (shape && !label) this.#store.deleteShapes([edit.id]);
+      else if (shape && label !== shape.label) this.#store.replaceShape({ ...shape, label });
+    } else if (label) {
+      const shape = this.#newShape('text', [edit.anchor]);
+      shape.label = label;
+      shape.color = edit.color;
+      shape.fontSize = edit.fontSize;
+      shape.fill = edit.fill;
+      this.#store.addShape(shape);
     }
+    this.requestUpdate();
   }
+
+  #cancelTextEdit(): void {
+    this.#textEdit = null;
+    this.requestUpdate();
+  }
+
+  #onTextKeydown = (e: KeyboardEvent) => {
+    // Keep global shortcuts (tool keys, Delete, Cmd+Z…) out of the text field.
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      this.#commitTextEdit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      this.#cancelTextEdit();
+    }
+  };
+
+  #textEditor() {
+    const edit = this.#textEdit;
+    if (!edit) return '';
+    const scale = this.#displayScale();
+    const fontPx = edit.fontSize * scale;
+    const pad = edit.fill ? edit.fontSize * 0.25 * scale : 0;
+    const style = [
+      `left:${edit.anchor.x * scale - pad}px`,
+      `top:${edit.anchor.y * scale - pad}px`,
+      `font-size:${fontPx}px`,
+      `padding:${pad}px`,
+      `width:calc(${Math.max(2, edit.value.length + 1)}ch + ${pad * 2}px)`,
+      `color:${edit.fill ? contrastColor(edit.color) : edit.color}`,
+      edit.fill ? `background:${edit.color}` : '',
+    ].join(';');
+    return html`
+      <input
+        ${ref(this.#textInputRef)}
+        class="text-editor"
+        style=${style}
+        .value=${live(edit.value)}
+        placeholder="Text"
+        @input=${(e: Event) => {
+          edit.value = (e.target as HTMLInputElement).value;
+          this.requestUpdate();
+        }}
+        @keydown=${this.#onTextKeydown}
+        @blur=${() => this.#commitTextEdit()}
+        @pointerdown=${(e: Event) => e.stopPropagation()}
+      />
+    `;
+  }
+
+  // ---------- region select ----------
 
   /** The region on the active page, only while the Region tool is active. */
   #activeRegion(): Rect | null {
@@ -902,32 +1023,15 @@ export class ScreenMarker extends LitElement {
     this.requestUpdate();
   }
 
-  /** Handle size in canvas pixels, so handles stay ~REGION_HANDLE_CSS_PX on screen at any zoom. */
-  #regionHandleSize(): number {
-    return REGION_HANDLE_CSS_PX / this.#displayScale();
-  }
-
-  /** What part of region `r` is under `pt`: a corner, an edge, the body, or nothing. */
-  #regionGrabAt(r: Rect, pt: Point): RegionGrab | null {
-    const tol = this.#regionHandleSize();
-    const inX = pt.x >= r.x - tol && pt.x <= r.x + r.w + tol;
-    const inY = pt.y >= r.y - tol && pt.y <= r.y + r.h + tol;
-    if (!inX || !inY) return null;
-    const v = Math.abs(pt.y - r.y) <= tol ? 'n' : Math.abs(pt.y - (r.y + r.h)) <= tol ? 's' : '';
-    const h = Math.abs(pt.x - r.x) <= tol ? 'w' : Math.abs(pt.x - (r.x + r.w)) <= tol ? 'e' : '';
-    return v || h ? ((v + h) as RegionGrab) : 'move';
-  }
-
-  #onRegionPointerMove(e: PointerEvent): void {
+  #onRegionPointerMove(pt: Point): void {
     const canvas = this.#canvasRef.value;
     if (!canvas) return;
-    const pt = this.#canvasPoint(e);
     const drag = this.#regionDrag;
 
     if (!drag) {
       const current = this.#activeRegion();
-      const grab = current ? this.#regionGrabAt(current, pt) : null;
-      const cursor = grab ? REGION_CURSOR[grab] : 'crosshair';
+      const grab = current ? boxGrabAt(current, pt, this.#handleTolerance()) : null;
+      const cursor = grab ? GRAB_CURSOR[grab] : 'crosshair';
       if (cursor !== this.#canvasCursor) {
         this.#canvasCursor = cursor;
         this.requestUpdate();
@@ -943,7 +1047,7 @@ export class ScreenMarker extends LitElement {
     let rect: Rect;
 
     if (drag.grab === 'create') {
-      rect = normalizeRect(drag.start.x, drag.start.y, pt.x, pt.y, W, H);
+      rect = clampedRect(drag.start.x, drag.start.y, pt.x, pt.y, W, H);
     } else if (drag.grab === 'move') {
       rect = {
         x: Math.round(Math.max(0, Math.min(W - o.w, o.x + dx))),
@@ -952,16 +1056,7 @@ export class ScreenMarker extends LitElement {
         h: o.h,
       };
     } else {
-      // Dragging an edge past the opposite one flips the rect (normalizeRect re-sorts the sides).
-      let left = o.x;
-      let top = o.y;
-      let right = o.x + o.w;
-      let bottom = o.y + o.h;
-      if (drag.grab.includes('w')) left += dx;
-      if (drag.grab.includes('e')) right += dx;
-      if (drag.grab.includes('n')) top += dy;
-      if (drag.grab.includes('s')) bottom += dy;
-      rect = normalizeRect(left, top, right, bottom, W, H);
+      rect = clampedRect(...resizeBox(o, drag.grab, dx, dy), W, H);
     }
 
     this.#region = { pageId: this.#store.activePageId.value, rect };
@@ -988,8 +1083,6 @@ export class ScreenMarker extends LitElement {
       const cropped = await cropImageDataUrl(page.imageDataUrl, r);
       this.#store.cropActivePage(cropped, r.x, r.y);
       this.#clearRegion();
-      await this.updateComplete;
-      this.#redraw();
       this.#flashStatus('Cropped (Cmd/Ctrl+Z to undo)');
     } catch (err) {
       this.#flashStatus(`Crop failed: ${(err as Error).message}`);
@@ -1023,10 +1116,35 @@ export class ScreenMarker extends LitElement {
     `;
   }
 
+  // ---------- image transforms ----------
+
+  /** Rotates or flips the active page's image, carrying every annotation along. Undoable. */
+  async #transformImage(transform: ImageTransform): Promise<void> {
+    const page = this.#store.activePage;
+    if (!page.imageDataUrl) return;
+    this.#commitTextEdit();
+    try {
+      const img = await this.#loadPageImage(page.imageDataUrl);
+      const W = img.naturalWidth;
+      const H = img.naturalHeight;
+      const { dataUrl } = await transformImageDataUrl(page.imageDataUrl, transform);
+      this.#store.replaceActivePageContent(
+        dataUrl,
+        page.shapes.map((s) => transformShape(s, transform, W, H))
+      );
+      this.#clearRegion();
+    } catch (err) {
+      this.#flashStatus(`Transform failed: ${(err as Error).message}`);
+    }
+  }
+
+  // ---------- styling ----------
+
   async #flashStatus(msg: string): Promise<void> {
     this.#statusMsg = msg;
     this.requestUpdate();
     setTimeout(() => {
+      if (this.#statusMsg !== msg) return;
       this.#statusMsg = '';
       this.requestUpdate();
     }, 2000);
@@ -1036,46 +1154,63 @@ export class ScreenMarker extends LitElement {
     return this.#store.pages.value.filter((p) => p.imageDataUrl !== null);
   }
 
-  /** The currently-selected shape, if the selection is a shape (not the image, not nothing). */
-  #selectedShape(): Shape | null {
-    const sel = this.#store.selection.value;
-    if (sel?.type !== 'shape') return null;
-    return this.#store.activePage.shapes.find((s) => s.id === sel.id) ?? null;
-  }
-
   /**
-   * Whether the line-width/font-size controls (toolbar dropdowns and [ / ]
-   * shortcuts) should currently act on text (font size) or on stroke width.
-   * Selecting a shape overrides the active tool: editing a selected text
-   * shape's size shouldn't require switching to the Text tool first.
+   * Whether the size controls (toolbar dropdown and [ / ] shortcuts) act on
+   * font size (text, steps) or stroke width. A selection overrides the
+   * active tool, so a selected label can be resized without switching tools.
    */
   #styleContextIsText(): boolean {
-    const selected = this.#selectedShape();
-    if (selected) return selected.type === 'text';
-    return this.#store.activeTool.value === 'text';
+    const selected = this.#store.selectedShapes;
+    if (selected.length) return selected.every((s) => SIZED_BY_FONT.includes(s.type));
+    return SIZED_BY_FONT.includes(this.#store.activeTool.value as ShapeType);
+  }
+
+  /** The style value the toolbar should show: from the first selected shape, else the tool default. */
+  #currentStyle() {
+    const first = this.#store.selectedShapes[0];
+    return {
+      color: first?.color ?? this.#store.activeColor.value,
+      lineWidth: first && !SIZED_BY_FONT.includes(first.type) ? first.lineWidth : this.#store.activeLineWidth.value,
+      fontSize: first?.fontSize ?? this.#store.activeFontSize.value,
+      fill: first && FILLABLE.includes(first.type) ? !!first.fill : this.#store.activeFill.value,
+    };
+  }
+
+  /** Sets the tool default(s) and restyles every selected shape (and the open text editor) to match. */
+  #applyStyle(style: ShapeStyle): void {
+    if (style.color !== undefined) this.#store.activeColor.set(style.color);
+    if (style.lineWidth !== undefined) this.#store.activeLineWidth.set(style.lineWidth);
+    if (style.fontSize !== undefined) this.#store.activeFontSize.set(style.fontSize);
+    if (style.fill !== undefined) this.#store.activeFill.set(style.fill);
+    const edit = this.#textEdit;
+    if (edit) {
+      if (style.color !== undefined) edit.color = style.color;
+      if (style.fontSize !== undefined) edit.fontSize = style.fontSize;
+      if (style.fill !== undefined) edit.fill = style.fill;
+      this.requestUpdate();
+    }
+    this.#store.updateShapesStyle(this.#store.selectedIds, style);
   }
 
   #adjustLineWidth(delta: number): void {
-    const selected = this.#selectedShape();
-    const current = selected ? selected.lineWidth : this.#store.activeLineWidth.value;
-    const next = Math.max(1, Math.min(30, current + delta));
-    this.#store.activeLineWidth.set(next);
-    if (selected) {
-      this.#store.updateShapeStyle(selected.id, { lineWidth: next });
-      this.#redraw();
-    }
+    this.#applyStyle({ lineWidth: Math.max(1, Math.min(30, this.#currentStyle().lineWidth + delta)) });
   }
 
   #adjustFontSize(delta: number): void {
-    const selected = this.#selectedShape();
-    const current = selected ? (selected.fontSize ?? 18) : this.#store.activeFontSize.value;
-    const next = Math.max(8, Math.min(96, current + delta));
-    this.#store.activeFontSize.set(next);
-    if (selected) {
-      this.#store.updateShapeStyle(selected.id, { fontSize: next });
-      this.#redraw();
-    }
+    this.#applyStyle({ fontSize: Math.max(8, Math.min(96, this.#currentStyle().fontSize + delta)) });
   }
+
+  #pickColorFromScreen = async () => {
+    if (!EyeDropperCtor) return;
+    try {
+      const { sRGBHex } = await new EyeDropperCtor().open();
+      this.#applyStyle({ color: sRGBHex });
+    } catch {
+      // user cancelled (Esc)
+    }
+  };
+
+  // ---------- copy / export ----------
 
   #copyImage = async () => {
     try {
@@ -1128,6 +1263,8 @@ export class ScreenMarker extends LitElement {
     return `width:${this.#previewSize.width * scale}px; height:${this.#previewSize.height * scale}px;`;
   }
 
+  // ---------- pages ----------
+
   #newDocument = () => {
     const hasContent =
       this.#store.pages.value.length > 1 ||
@@ -1138,12 +1275,14 @@ export class ScreenMarker extends LitElement {
     }
     this.#store.newDocument();
     this.#store.zoomReset();
-    this.updateComplete.then(() => this.#redraw());
   };
 
-  #switchPage(id: string): void {
+  async #switchPage(id: string): Promise<void> {
+    this.#commitTextEdit();
     this.#store.setActivePage(id);
-    this.updateComplete.then(() => this.#redraw());
+    await this.updateComplete;
+    await this.#redraw();
+    this.#fitToWindow();
   }
 
   #gotoAdjacentPage(direction: -1 | 1): void {
@@ -1151,12 +1290,12 @@ export class ScreenMarker extends LitElement {
     if (pages.length < 2) return;
     const currentIndex = pages.findIndex((p) => p.id === this.#store.activePageId.value);
     const nextIndex = (currentIndex + direction + pages.length) % pages.length;
-    this.#switchPage(pages[nextIndex]!.id);
+    void this.#switchPage(pages[nextIndex]!.id);
   }
 
   #addPage(): void {
+    this.#commitTextEdit();
     this.#store.addPage();
-    this.updateComplete.then(() => this.#redraw());
   }
 
   /** Pages have no stored name — tabs are always labeled by current position, so reordering/closing/adding can never produce out-of-sequence numbers. */
@@ -1174,7 +1313,6 @@ export class ScreenMarker extends LitElement {
     }
     this.#store.closePage(id);
     this.#store.zoomReset();
-    this.updateComplete.then(() => this.#redraw());
   }
 
   #closePage(e: Event, id: string): void {
@@ -1252,7 +1390,12 @@ export class ScreenMarker extends LitElement {
   }
 
   updated(): void {
-    this.#redraw();
+    void this.#redraw();
+    if (this.#focusTextEdit && this.#textInputRef.value) {
+      this.#focusTextEdit = false;
+      this.#textInputRef.value.focus();
+      this.#textInputRef.value.select();
+    }
   }
 
   /**
@@ -1270,13 +1413,19 @@ export class ScreenMarker extends LitElement {
     const canvas = this.#canvasRef.value;
     if (!canvas || !canvas.width) return '';
     const scale = this.#displayScale();
-    const width = canvas.width * scale;
-    const height = canvas.height * scale;
-    return `width:${width}px; height:${height}px;`;
+    return `width:${canvas.width * scale}px; height:${canvas.height * scale}px;`;
+  }
+
+  #canvasCursorCss(): string {
+    if (this.#spaceHeld) return this.#pan ? 'grabbing' : 'grab';
+    return this.#canvasCursor || (this.#store.activeTool.value === 'select' ? 'default' : 'crosshair');
   }
 
   render() {
     const page = this.#store.activePage;
+    const style = this.#currentStyle();
+    const hasShapes = this.#store.selectedIds.length > 0;
+    const noImage = !page.imageDataUrl;
 
     return html`
       <button
@@ -1339,89 +1488,91 @@ export class ScreenMarker extends LitElement {
             <button
               class=${this.#store.activeTool.value === t.type ? 'active' : ''}
               title="${t.label} (${t.key.toUpperCase()})"
-              @click=${() => this.#store.activeTool.set(t.type)}
+              @click=${() => this.#setTool(t.type)}
             >
               ${t.icon} ${t.label} (${t.key})
             </button>
           `
         )}
         <div class="spacer" style="width:8px; flex:0"></div>
-        <button
-          ?disabled=${this.#store.selection.value?.type !== 'shape'}
-          @click=${() => {
-            this.#store.deleteSelectedShape();
-            this.#redraw();
-          }}
-          title="Delete selected shape (Delete/Backspace)"
-        >
-          🗑 Delete
-        </button>
+        <div class="group">
+          <button ?disabled=${!hasShapes} @click=${() => this.#store.deleteSelectedShapes()} title="Delete selected shapes (Delete/Backspace)">
+            🗑 Delete
+          </button>
+          <button ?disabled=${!hasShapes} @click=${() => this.#store.duplicateSelectedShapes()} title="Duplicate selected shapes (Cmd/Ctrl+D)">
+            ⧉
+          </button>
+          <button ?disabled=${!hasShapes} @click=${() => this.#store.reorderSelectedShapes('front')} title="Bring to front (Cmd/Ctrl+])">
+            ⤒
+          </button>
+          <button ?disabled=${!hasShapes} @click=${() => this.#store.reorderSelectedShapes('back')} title="Send to back (Cmd/Ctrl+[)">
+            ⤓
+          </button>
+        </div>
         <div class="spacer" style="width:8px; flex:0"></div>
-        ${COLORS.map((c) => {
-          const current = this.#selectedShape()?.color ?? this.#store.activeColor.value;
-          return html`
+        ${COLORS.map(
+          (c) => html`
             <button
-              class="swatch ${current === c ? 'active' : ''}"
+              class="swatch ${style.color.toLowerCase() === c ? 'active' : ''}"
               style="background:${c}"
               title=${c}
-              @click=${() => {
-                const selected = this.#selectedShape();
-                this.#store.activeColor.set(c);
-                if (selected) {
-                  this.#store.updateShapeStyle(selected.id, { color: c });
-                  this.#redraw();
-                }
-              }}
+              @click=${() => this.#applyStyle({ color: c })}
             ></button>
-          `;
-        })}
+          `
+        )}
+        <input
+          class="color-input"
+          type="color"
+          title="Custom color"
+          .value=${live(style.color)}
+          @change=${(e: Event) => this.#applyStyle({ color: (e.target as HTMLInputElement).value })}
+        />
+        ${EyeDropperCtor
+          ? html`<button @click=${this.#pickColorFromScreen} title="Pick a color from the screen">💧</button>`
+          : ''}
         <div class="spacer" style="width:8px; flex:0"></div>
         ${this.#styleContextIsText()
           ? html`
               <select
                 title="Font size ([ / ])"
-                @change=${(e: Event) => {
-                  const size = Number((e.target as HTMLSelectElement).value);
-                  const selected = this.#selectedShape();
-                  this.#store.activeFontSize.set(size);
-                  if (selected) {
-                    this.#store.updateShapeStyle(selected.id, { fontSize: size });
-                    this.#redraw();
-                  }
-                }}
+                @change=${(e: Event) => this.#applyStyle({ fontSize: Number((e.target as HTMLSelectElement).value) })}
               >
-                ${FONT_SIZES.map((s) => {
-                  const current = this.#selectedShape()?.fontSize ?? this.#store.activeFontSize.value;
-                  return html`<option value=${s} ?selected=${current === s}>${s}px</option>`;
-                })}
+                ${[...new Set([...FONT_SIZES, style.fontSize])].sort((a, b) => a - b).map(
+                  (s) => html`<option value=${s} ?selected=${style.fontSize === s}>${s}px</option>`
+                )}
               </select>
             `
           : html`
               <select
                 title="Line thickness ([ / ])"
-                @change=${(e: Event) => {
-                  const width = Number((e.target as HTMLSelectElement).value);
-                  const selected = this.#selectedShape();
-                  this.#store.activeLineWidth.set(width);
-                  if (selected) {
-                    this.#store.updateShapeStyle(selected.id, { lineWidth: width });
-                    this.#redraw();
-                  }
-                }}
+                @change=${(e: Event) => this.#applyStyle({ lineWidth: Number((e.target as HTMLSelectElement).value) })}
               >
-                ${LINE_WIDTHS.map((w) => {
-                  const current = this.#selectedShape()?.lineWidth ?? this.#store.activeLineWidth.value;
-                  return html`<option value=${w} ?selected=${current === w}>${w}px</option>`;
-                })}
+                ${[...new Set([...LINE_WIDTHS, style.lineWidth])].sort((a, b) => a - b).map(
+                  (w) => html`<option value=${w} ?selected=${style.lineWidth === w}>${w}px</option>`
+                )}
               </select>
             `}
+        <button
+          class=${style.fill ? 'active' : ''}
+          title="Fill rectangles/ellipses; solid background behind text"
+          @click=${() => this.#applyStyle({ fill: !style.fill })}
+        >
+          ◼ Fill
+        </button>
         <div class="spacer"></div>
+        <div class="group">
+          <button ?disabled=${noImage} @click=${() => this.#transformImage('rotate-ccw')} title="Rotate left">⟲</button>
+          <button ?disabled=${noImage} @click=${() => this.#transformImage('rotate-cw')} title="Rotate right">⟳</button>
+          <button ?disabled=${noImage} @click=${() => this.#transformImage('flip-h')} title="Flip horizontally">⇋</button>
+          <button ?disabled=${noImage} @click=${() => this.#transformImage('flip-v')} title="Flip vertically">⇵</button>
+        </div>
         <div class="zoom-controls">
-          <button @click=${() => this.#store.zoomOut()} title="Zoom out (Cmd/Ctrl+-)">−</button>
+          <button @click=${() => this.#store.zoomOut()} title="Zoom out (Cmd/Ctrl+-, Cmd/Ctrl+scroll, pinch)">−</button>
           <span class="zoom-level" @dblclick=${() => this.#store.zoomReset()} title="Double-click to reset">
             ${Math.round(this.#store.zoom.value * 100)}%
           </span>
-          <button @click=${() => this.#store.zoomIn()} title="Zoom in (Cmd/Ctrl+=)">+</button>
+          <button @click=${() => this.#store.zoomIn()} title="Zoom in (Cmd/Ctrl+=, Cmd/Ctrl+scroll, pinch)">+</button>
+          <button @click=${() => this.#fitToWindow()} title="Fit to window (F)">Fit</button>
         </div>
         <button @click=${() => this.#store.undo()} title="Undo (Cmd/Ctrl+Z)">↶ Undo</button>
         <button @click=${() => this.#store.redo()} title="Redo (Shift+Cmd/Ctrl+Z)">↷ Redo</button>
@@ -1442,29 +1593,32 @@ export class ScreenMarker extends LitElement {
           <input type="file" accept="image/*" style="display:none" @change=${this.#onFilePick} />
           Open image…
         </label>
-        <button class="button-primary" ?disabled=${!page.imageDataUrl} @click=${this.#copyImage}>📋 Copy Image</button>
-        <button class="button-primary" ?disabled=${!page.imageDataUrl} @click=${this.#copyCurrentPage}>📋 Copy Current Page</button>
-        <button ?disabled=${!page.imageDataUrl} @click=${this.#openPreview}>Preview</button>
-        <button ?disabled=${!page.imageDataUrl} @click=${this.#download}>Download</button>
+        <button class="button-primary" ?disabled=${noImage} @click=${this.#copyImage}>📋 Copy Image</button>
+        <button class="button-primary" ?disabled=${noImage} @click=${this.#copyCurrentPage}>📋 Copy Current Page</button>
+        <button ?disabled=${noImage} @click=${this.#openPreview}>Preview</button>
+        <button ?disabled=${noImage} @click=${this.#download}>Download</button>
       </div>
 
-      <div class="stage" @pointerdown=${this.#onStagePointerDown}>
+      <div
+        class="stage"
+        ${ref(this.#stageRef)}
+        @pointerdown=${this.#onStagePointerDown}
+        @pointermove=${this.#onStagePointerMove}
+        @pointerup=${this.#onStagePointerUp}
+        @wheel=${this.#onWheel}
+      >
         ${page.imageDataUrl
           ? html`
-              <div
-                class="canvas-wrap"
-                style=${this.#canvasWrapStyle()}
-              >
+              <div class="canvas-wrap ${this.#spaceHeld ? 'panning' : ''}" style=${this.#canvasWrapStyle()}>
                 <canvas
                   ${ref(this.#canvasRef)}
-                  style="transform: scale(${this.#displayScale()}); cursor: ${
-                    this.#store.activeTool.value === 'region' ? this.#canvasCursor || 'crosshair' : 'default'
-                  }"
+                  style="transform: scale(${this.#displayScale()}); cursor: ${this.#canvasCursorCss()}"
                   @pointerdown=${this.#onPointerDown}
                   @pointermove=${this.#onPointerMove}
                   @pointerup=${this.#onPointerUp}
+                  @dblclick=${this.#onDoubleClick}
                 ></canvas>
-                ${this.#regionActions()}
+                ${this.#regionActions()} ${this.#textEditor()}
               </div>
             `
           : html`<div class="empty">Paste a screenshot (Cmd/Ctrl+V), drag one in, or use "Open image…" above.</div>`}

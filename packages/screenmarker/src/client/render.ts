@@ -1,6 +1,40 @@
 import type { Page, Point, Rect, Shape } from './types.js';
 
-function drawArrowhead(ctx: CanvasRenderingContext2D, from: { x: number; y: number }, to: { x: number; y: number }, lineWidth: number): void {
+const DEFAULT_FONT_SIZE = 18;
+const TEXT_PAD_RATIO = 0.25;
+
+function textFont(fontSize: number): string {
+  return `bold ${fontSize}px system-ui, sans-serif`;
+}
+
+// One shared offscreen context for text measurement — shapeBounds runs
+// on every hit test, so don't allocate a canvas per call.
+let measureCtx: CanvasRenderingContext2D | null = null;
+function measureTextWidth(label: string, fontSize: number): number {
+  measureCtx ??= document.createElement('canvas').getContext('2d')!;
+  measureCtx.font = textFont(fontSize);
+  return measureCtx.measureText(label).width;
+}
+
+/** Black or white, whichever reads better on `color` (a #rrggbb hex). */
+export function contrastColor(color: string): string {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(color);
+  if (!m) return '#ffffff';
+  const [r, g, b] = [m[1]!, m[2]!, m[3]!].map((h) => parseInt(h, 16));
+  const luminance = (0.299 * r! + 0.587 * g! + 0.114 * b!) / 255;
+  return luminance > 0.6 ? '#000000' : '#ffffff';
+}
+
+export function stepRadius(shape: Shape): number {
+  return (shape.fontSize ?? DEFAULT_FONT_SIZE) * 0.85;
+}
+
+/** The normalized box spanned by a two-point shape's corners. */
+function cornerBox(a: Point, b: Point): Rect {
+  return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
+}
+
+function drawArrowhead(ctx: CanvasRenderingContext2D, from: Point, to: Point, lineWidth: number): void {
   const angle = Math.atan2(to.y - from.y, to.x - from.x);
   const headLen = 10 + lineWidth * 2.5;
   ctx.beginPath();
@@ -9,6 +43,29 @@ function drawArrowhead(ctx: CanvasRenderingContext2D, from: { x: number; y: numb
   ctx.moveTo(to.x, to.y);
   ctx.lineTo(to.x - headLen * Math.cos(angle + Math.PI / 6), to.y - headLen * Math.sin(angle + Math.PI / 6));
   ctx.stroke();
+}
+
+/**
+ * Pixelates box `r` of whatever is already painted on ctx's canvas (the
+ * image plus any shapes drawn before this one): downscale into a tiny
+ * canvas, then scale back up with smoothing off so each source block
+ * becomes one flat square.
+ */
+function pixelate(ctx: CanvasRenderingContext2D, r: Rect, blockSize: number): void {
+  const x = Math.max(0, Math.floor(r.x));
+  const y = Math.max(0, Math.floor(r.y));
+  const w = Math.min(ctx.canvas.width - x, Math.ceil(r.w));
+  const h = Math.min(ctx.canvas.height - y, Math.ceil(r.h));
+  if (w < 1 || h < 1) return;
+  const small = document.createElement('canvas');
+  small.width = Math.max(1, Math.ceil(w / blockSize));
+  small.height = Math.max(1, Math.ceil(h / blockSize));
+  const sctx = small.getContext('2d')!;
+  sctx.drawImage(ctx.canvas, x, y, w, h, 0, 0, small.width, small.height);
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(small, 0, 0, small.width, small.height, x, y, w, h);
+  ctx.restore();
 }
 
 export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
@@ -23,17 +80,29 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
     case 'rect': {
       const [a, b] = shape.points;
       if (!a || !b) break;
-      ctx.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
+      if (shape.fill) ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
+      else ctx.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
       break;
     }
-    case 'arrow': {
+    case 'ellipse': {
+      const [a, b] = shape.points;
+      if (!a || !b) break;
+      const r = cornerBox(a, b);
+      ctx.beginPath();
+      ctx.ellipse(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2, 0, 0, Math.PI * 2);
+      if (shape.fill) ctx.fill();
+      else ctx.stroke();
+      break;
+    }
+    case 'arrow':
+    case 'line': {
       const [a, b] = shape.points;
       if (!a || !b) break;
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
-      drawArrowhead(ctx, a, b, shape.lineWidth);
+      if (shape.type === 'arrow') drawArrowhead(ctx, a, b, shape.lineWidth);
       break;
     }
     case 'highlight': {
@@ -41,6 +110,12 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
       if (!a || !b) break;
       ctx.globalAlpha = 0.35;
       ctx.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
+      break;
+    }
+    case 'blur': {
+      const [a, b] = shape.points;
+      if (!a || !b) break;
+      pixelate(ctx, cornerBox(a, b), Math.max(6, shape.lineWidth * 4));
       break;
     }
     case 'pen': {
@@ -54,9 +129,34 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
     case 'text': {
       const [a] = shape.points;
       if (!a || !shape.label) break;
-      ctx.font = `bold ${shape.fontSize ?? 18}px system-ui, sans-serif`;
+      const fontSize = shape.fontSize ?? DEFAULT_FONT_SIZE;
+      ctx.font = textFont(fontSize);
       ctx.textBaseline = 'top';
+      if (shape.fill) {
+        const b = shapeBounds(shape);
+        ctx.beginPath();
+        ctx.roundRect(b.x, b.y, b.width, b.height, fontSize * 0.2);
+        ctx.fill();
+        ctx.fillStyle = contrastColor(shape.color);
+      }
       ctx.fillText(shape.label, a.x, a.y);
+      break;
+    }
+    case 'step': {
+      const [c] = shape.points;
+      if (!c) break;
+      const r = stepRadius(shape);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = Math.max(1.5, r * 0.12);
+      ctx.strokeStyle = contrastColor(shape.color);
+      ctx.stroke();
+      ctx.fillStyle = contrastColor(shape.color);
+      ctx.font = textFont(r * 1.1);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(shape.stepNumber ?? 1), c.x, c.y + r * 0.06);
       break;
     }
   }
@@ -82,26 +182,34 @@ function distanceToSegment(p: Point, a: Point, b: Point): number {
 }
 
 export function shapeBounds(shape: Shape): { x: number; y: number; width: number; height: number } {
+  if (shape.type === 'text') {
+    const a = shape.points[0] ?? { x: 0, y: 0 };
+    const fontSize = shape.fontSize ?? DEFAULT_FONT_SIZE;
+    const width = Math.max(fontSize, measureTextWidth(shape.label ?? '', fontSize));
+    if (!shape.fill) return { x: a.x, y: a.y, width, height: fontSize * 1.2 };
+    const pad = fontSize * TEXT_PAD_RATIO;
+    return { x: a.x - pad, y: a.y - pad, width: width + pad * 2, height: fontSize * 1.2 + pad * 2 };
+  }
+  if (shape.type === 'step') {
+    const c = shape.points[0] ?? { x: 0, y: 0 };
+    const r = stepRadius(shape);
+    return { x: c.x - r, y: c.y - r, width: r * 2, height: r * 2 };
+  }
   const xs = shape.points.map((p) => p.x);
   const ys = shape.points.map((p) => p.y);
   const minX = Math.min(...xs);
   const minY = Math.min(...ys);
-  const maxX = Math.max(...xs);
-  const maxY = Math.max(...ys);
-
-  if (shape.type === 'text') {
-    const fontSize = shape.fontSize ?? 18;
-    const width = Math.max(40, (shape.label?.length ?? 8) * fontSize * 0.6);
-    return { x: minX, y: minY, width, height: fontSize * 1.3 };
-  }
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  return { x: minX, y: minY, width: Math.max(...xs) - minX, height: Math.max(...ys) - minY };
 }
 
 export function hitTestShape(shape: Shape, point: Point): boolean {
   switch (shape.type) {
     case 'rect':
+    case 'ellipse':
     case 'highlight':
-    case 'text': {
+    case 'blur':
+    case 'text':
+    case 'step': {
       const b = shapeBounds(shape);
       return (
         point.x >= b.x - HIT_PADDING &&
@@ -110,14 +218,17 @@ export function hitTestShape(shape: Shape, point: Point): boolean {
         point.y <= b.y + b.height + HIT_PADDING
       );
     }
-    case 'arrow': {
+    case 'arrow':
+    case 'line': {
       const [a, b] = shape.points;
       if (!a || !b) return false;
-      return distanceToSegment(point, a, b) <= HIT_PADDING;
+      return distanceToSegment(point, a, b) <= HIT_PADDING + shape.lineWidth / 2;
     }
     case 'pen': {
       for (let i = 0; i < shape.points.length - 1; i++) {
-        if (distanceToSegment(point, shape.points[i]!, shape.points[i + 1]!) <= HIT_PADDING) return true;
+        if (distanceToSegment(point, shape.points[i]!, shape.points[i + 1]!) <= HIT_PADDING + shape.lineWidth / 2) {
+          return true;
+        }
       }
       return false;
     }
@@ -130,6 +241,14 @@ export function hitTestShapes(shapes: Shape[], point: Point): Shape | null {
     if (hitTestShape(shapes[i]!, point)) return shapes[i]!;
   }
   return null;
+}
+
+/** Shapes whose bounds intersect box `r` — the rubber-band multi-select test. */
+export function shapesInRect(shapes: Shape[], r: Rect): Shape[] {
+  return shapes.filter((s) => {
+    const b = shapeBounds(s);
+    return b.x <= r.x + r.w && b.x + b.width >= r.x && b.y <= r.y + r.h && b.y + b.height >= r.y;
+  });
 }
 
 /**
@@ -154,13 +273,48 @@ function strokeZebraDashes(ctx: CanvasRenderingContext2D, draw: () => void, line
   ctx.restore();
 }
 
-export function drawSelectionOutline(ctx: CanvasRenderingContext2D, shape: Shape): void {
+/** `unit` is one CSS pixel in canvas pixels, so the outline stays the same on-screen weight at any zoom. */
+export function drawSelectionOutline(ctx: CanvasRenderingContext2D, shape: Shape, unit = 1): void {
   const b = shapeBounds(shape);
-  const x = b.x - HIT_PADDING;
-  const y = b.y - HIT_PADDING;
-  const w = b.width + HIT_PADDING * 2;
-  const h = b.height + HIT_PADDING * 2;
-  strokeZebraDashes(ctx, () => ctx.strokeRect(x, y, w, h), 1.5, 6, 6);
+  const pad = HIT_PADDING;
+  strokeZebraDashes(
+    ctx,
+    () => ctx.strokeRect(b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2),
+    1.5 * unit,
+    6 * unit,
+    6 * unit
+  );
+}
+
+/** Zebra-dashed box with no handles — the in-progress rubber-band selection. */
+export function drawMarquee(ctx: CanvasRenderingContext2D, r: Rect, unit = 1): void {
+  strokeZebraDashes(ctx, () => ctx.strokeRect(r.x, r.y, r.w, r.h), 1.5 * unit, 5 * unit, 5 * unit);
+}
+
+/** Square handles (white fill, black outline) centered on each point. `size` is in canvas pixels. */
+export function drawHandles(ctx: CanvasRenderingContext2D, points: Point[], size: number): void {
+  ctx.save();
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#000000';
+  ctx.lineWidth = size / 5;
+  const half = size / 2;
+  for (const p of points) {
+    ctx.fillRect(p.x - half, p.y - half, size, size);
+    ctx.strokeRect(p.x - half, p.y - half, size, size);
+  }
+  ctx.restore();
+}
+
+/** The 8 resize-handle positions (corners + edge midpoints) of a box. */
+export function boxHandlePoints(r: Rect): Point[] {
+  const pts: Point[] = [];
+  for (const hx of [r.x, r.x + r.w / 2, r.x + r.w]) {
+    for (const hy of [r.y, r.y + r.h / 2, r.y + r.h]) {
+      if (hx === r.x + r.w / 2 && hy === r.y + r.h / 2) continue;
+      pts.push({ x: hx, y: hy });
+    }
+  }
+  return pts;
 }
 
 export function drawImageSelectionOutline(ctx: CanvasRenderingContext2D, width: number, height: number): void {
@@ -192,27 +346,19 @@ export function drawRegionOverlay(ctx: CanvasRenderingContext2D, r: Rect, handle
 
   const lineWidth = handleSize / 5;
   strokeZebraDashes(ctx, () => ctx.strokeRect(r.x, r.y, r.w, r.h), lineWidth, lineWidth * 4, lineWidth * 4);
+  drawHandles(ctx, boxHandlePoints(r), handleSize);
+}
 
-  ctx.save();
-  ctx.fillStyle = '#ffffff';
-  ctx.strokeStyle = '#000000';
-  ctx.lineWidth = lineWidth;
-  const half = handleSize / 2;
-  for (const hx of [r.x, r.x + r.w / 2, r.x + r.w]) {
-    for (const hy of [r.y, r.y + r.h / 2, r.y + r.h]) {
-      if (hx === r.x + r.w / 2 && hy === r.y + r.h / 2) continue;
-      ctx.fillRect(hx - half, hy - half, handleSize, handleSize);
-      ctx.strokeRect(hx - half, hy - half, handleSize, handleSize);
-    }
-  }
-  ctx.restore();
+async function loadImage(dataUrl: string): Promise<HTMLImageElement> {
+  const img = new Image();
+  img.src = dataUrl;
+  await img.decode();
+  return img;
 }
 
 /** Returns a PNG data URL of just the background image cut to `r` — no annotations baked in. */
 export async function cropImageDataUrl(imageDataUrl: string, r: Rect): Promise<string> {
-  const img = new Image();
-  img.src = imageDataUrl;
-  await img.decode();
+  const img = await loadImage(imageDataUrl);
   const canvas = document.createElement('canvas');
   canvas.width = r.w;
   canvas.height = r.h;
@@ -220,11 +366,73 @@ export async function cropImageDataUrl(imageDataUrl: string, r: Rect): Promise<s
   return canvas.toDataURL('image/png');
 }
 
-export async function flattenToCanvas(imageDataUrl: string, shapes: Shape[]): Promise<HTMLCanvasElement> {
-  const img = new Image();
-  img.src = imageDataUrl;
-  await img.decode();
+export type ImageTransform = 'rotate-cw' | 'rotate-ccw' | 'flip-h' | 'flip-v';
 
+/** Rotates or flips the background image only; returns the new data URL and its size. */
+export async function transformImageDataUrl(
+  imageDataUrl: string,
+  transform: ImageTransform
+): Promise<{ dataUrl: string; width: number; height: number }> {
+  const img = await loadImage(imageDataUrl);
+  const W = img.naturalWidth;
+  const H = img.naturalHeight;
+  const rotates = transform === 'rotate-cw' || transform === 'rotate-ccw';
+  const canvas = document.createElement('canvas');
+  canvas.width = rotates ? H : W;
+  canvas.height = rotates ? W : H;
+  const ctx = canvas.getContext('2d')!;
+  switch (transform) {
+    case 'rotate-cw':
+      ctx.setTransform(0, 1, -1, 0, H, 0);
+      break;
+    case 'rotate-ccw':
+      ctx.setTransform(0, -1, 1, 0, 0, W);
+      break;
+    case 'flip-h':
+      ctx.setTransform(-1, 0, 0, 1, W, 0);
+      break;
+    case 'flip-v':
+      ctx.setTransform(1, 0, 0, -1, 0, H);
+      break;
+  }
+  ctx.drawImage(img, 0, 0);
+  return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height };
+}
+
+/** Maps one point through the same transform transformImageDataUrl applies to an image of size W×H. */
+export function transformPoint(p: Point, transform: ImageTransform, W: number, H: number): Point {
+  switch (transform) {
+    case 'rotate-cw':
+      return { x: H - p.y, y: p.x };
+    case 'rotate-ccw':
+      return { x: p.y, y: W - p.x };
+    case 'flip-h':
+      return { x: W - p.x, y: p.y };
+    case 'flip-v':
+      return { x: p.x, y: H - p.y };
+  }
+}
+
+/**
+ * Moves a shape along with its image under `transform`. Text stays
+ * upright, so its anchor is re-derived from the transformed center of its
+ * box (mapping the top-left corner directly would shift the label).
+ */
+export function transformShape(shape: Shape, transform: ImageTransform, W: number, H: number): Shape {
+  if (shape.type === 'text') {
+    const b = shapeBounds(shape);
+    const a = shape.points[0]!;
+    const c = transformPoint({ x: b.x + b.width / 2, y: b.y + b.height / 2 }, transform, W, H);
+    // Offset from box center back to the anchor is unchanged by an upright move.
+    const ox = a.x - (b.x + b.width / 2);
+    const oy = a.y - (b.y + b.height / 2);
+    return { ...shape, points: [{ x: c.x + ox, y: c.y + oy }] };
+  }
+  return { ...shape, points: shape.points.map((p) => transformPoint(p, transform, W, H)) };
+}
+
+export async function flattenToCanvas(imageDataUrl: string, shapes: Shape[]): Promise<HTMLCanvasElement> {
+  const img = await loadImage(imageDataUrl);
   const canvas = document.createElement('canvas');
   canvas.width = img.naturalWidth;
   canvas.height = img.naturalHeight;
