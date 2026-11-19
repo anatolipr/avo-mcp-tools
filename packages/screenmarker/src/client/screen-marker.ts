@@ -236,6 +236,7 @@ export class ScreenMarker extends LitElement {
   #regionDrag: { grab: BoxGrab | 'create'; start: Point; orig: Rect; additive: boolean } | null = null;
   #textEdit: TextEdit | null = null;
   #focusTextEdit = false;
+  #selectOnFocus = true;
   #spaceHeld = false;
   #spacePanned = false;
   #pan: { x: number; y: number; left: number; top: number } | null = null;
@@ -398,6 +399,23 @@ export class ScreenMarker extends LitElement {
     }
 
     const selectedIds = this.#store.selectedIds;
+    const single = selectedIds.length === 1 ? this.#store.selectedShapes[0]! : null;
+    const editable = single && (single.type === 'text' || single.type === 'tag' || single.type === 'step') ? single : null;
+
+    // Enter edits the one selected label / tag / step marker (as double-click does);
+    // with a step marker selected, typing a digit starts editing its number.
+    if (editable && !mod && !e.altKey) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.#startTextEdit(editable);
+        return;
+      }
+      if (editable.type === 'step' && /^[0-9]$/.test(e.key)) {
+        e.preventDefault();
+        this.#startTextEdit(editable, undefined, 'text', e.key);
+        return;
+      }
+    }
 
     if (e.key === 'Escape' && this.#store.selection.value) {
       e.preventDefault();
@@ -912,8 +930,9 @@ export class ScreenMarker extends LitElement {
     if (tool === 'step') {
       const hit = hitTestShapes(this.#store.activePage.shapes, pt);
       if (hit?.type === 'step') {
-        // Clicking an existing marker selects it (double-click edits its number).
-        this.#store.selectShapes([hit.id]);
+        // Like the Text tool on a label: clicking an existing marker edits its number.
+        e.preventDefault();
+        this.#startTextEdit(hit);
         return;
       }
       const step = this.#newShape('step', [pt]);
@@ -1074,7 +1093,7 @@ export class ScreenMarker extends LitElement {
 
   // ---------- inline text editing ----------
 
-  #startTextEdit(shape: Shape | null, anchor?: Point, kind: 'text' | 'tag' = 'text'): void {
+  #startTextEdit(shape: Shape | null, anchor?: Point, kind: 'text' | 'tag' = 'text', initialValue?: string): void {
     this.#commitTextEdit();
     this.#textEdit = shape
       ? {
@@ -1097,8 +1116,11 @@ export class ScreenMarker extends LitElement {
           fill: this.#store.activeFill.value,
           tagArrow: this.#store.activeTagArrow.value,
         };
+    if (initialValue !== undefined) this.#textEdit.value = initialValue;
     if (shape) this.#store.selectShapes([shape.id]);
     this.#focusTextEdit = true;
+    // Typing straight into a selected marker shouldn't select (and so overwrite) the first digit.
+    this.#selectOnFocus = initialValue === undefined;
     this.requestUpdate();
   }
 
@@ -1879,8 +1901,10 @@ export class ScreenMarker extends LitElement {
     void this.#redraw();
     if (this.#focusTextEdit && this.#textInputRef.value) {
       this.#focusTextEdit = false;
-      this.#textInputRef.value.focus();
-      this.#textInputRef.value.select();
+      const input = this.#textInputRef.value;
+      input.focus();
+      if (this.#selectOnFocus) input.select();
+      else input.setSelectionRange(input.value.length, input.value.length);
     }
   }
 
