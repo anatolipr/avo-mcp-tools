@@ -173,8 +173,6 @@ export const screenMarkerStyles = css`
     .canvas-wrap {
       position: relative;
       margin: auto;
-      box-shadow: 0 2px 16px rgba(0, 0, 0, 0.15);
-      background: var(--panel);
       flex: none;
       overflow: hidden;
     }
@@ -319,6 +317,62 @@ export const screenMarkerStyles = css`
       text-overflow: ellipsis;
       max-width: 40vw;
       padding-bottom: 6px;
+    }
+    .step-editor {
+      border: none;
+      border-radius: 50%;
+      text-align: center;
+      padding: 0;
+      field-sizing: fixed;
+      box-sizing: border-box;
+    }
+    .next-step {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 13px;
+    }
+    .next-step input {
+      width: 56px;
+      font: inherit;
+      padding: 5px 6px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+    }
+    .tag-panel {
+      position: absolute;
+      z-index: 4;
+      padding: 6px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .tag-panel-title {
+      font-size: 11px;
+      opacity: 0.6;
+      padding: 0 2px 2px;
+    }
+    .tag-grid-row {
+      display: flex;
+      gap: 3px;
+    }
+    .tag-cell {
+      display: flex;
+      width: 26px;
+      height: 24px;
+      padding: 1px 3px;
+      font-size: 12px;
+      line-height: 1;
+    }
+    .tag-none {
+      padding: 3px 6px;
+      font-size: 11px;
     }
     .color-input {
       width: 26px;

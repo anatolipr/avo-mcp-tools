@@ -9,7 +9,6 @@ import {
   cropImageDataUrl,
   drawHandles,
   drawImageSelectionOutline,
-  drawMarquee,
   drawRegionOverlay,
   drawSelectionOutline,
   drawShapes,
@@ -43,7 +42,6 @@ import { TAG_ARROWS, type Page, type Point, type Rect, type Shape, type ShapeTyp
 
 const TOOLS: { type: Tool; label: string; icon: string; key: string }[] = [
   { type: 'select', label: 'Select', icon: '↖', key: 'v' },
-  { type: 'region', label: 'Region', icon: '⬚', key: 'm' },
   { type: 'rect', label: 'Rectangle', icon: '▭', key: 'r' },
   { type: 'ellipse', label: 'Ellipse', icon: '◯', key: 'o' },
   { type: 'arrow', label: 'Arrow', icon: '↗', key: 'a' },
@@ -91,14 +89,9 @@ const TAG_ARROW_LABEL: Record<TagArrow, string> = {
   none: 'No pointer (note)',
 };
 
-/**
- * Editable margin around the image, in image pixels: room to place tags
- * and other shapes off the image, explaining parts of it from the side.
- * The scene grows further as content extends past this.
- */
-function sceneMargin(imageW: number, imageH: number): number {
-  return Math.round(Math.max(160, Math.max(imageW, imageH) * 0.2));
-}
+/** Largest editor canvas side, in image pixels (keeps very low zoom levels from allocating huge canvases). */
+const MAX_AREA_SIDE = 8192;
+
 const BOX_RESIZABLE: ShapeType[] = ['rect', 'ellipse', 'highlight', 'blur', 'pen'];
 
 /** Which part of a box a drag grabbed: an edge/corner (compass letters) or the body. */
@@ -121,7 +114,7 @@ type ShapeDrag =
   | { kind: 'resize'; orig: Shape; grab: BoxGrab | 0 | 1; start: Point; draft: Shape | null };
 
 type TextEdit = {
-  kind: 'text' | 'tag';
+  kind: 'text' | 'tag' | 'step';
   id: string | null;
   anchor: Point;
   value: string;
@@ -133,16 +126,6 @@ type TextEdit = {
 
 function sortedRect(x1: number, y1: number, x2: number, y2: number): Rect {
   return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
-}
-
-function clampedRect(x1: number, y1: number, x2: number, y2: number, maxW: number, maxH: number): Rect {
-  const r = sortedRect(
-    Math.max(0, Math.min(maxW, x1)),
-    Math.max(0, Math.min(maxH, y1)),
-    Math.max(0, Math.min(maxW, x2)),
-    Math.max(0, Math.min(maxH, y2))
-  );
-  return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.w), h: Math.round(r.h) };
 }
 
 /** Applies an edge/corner drag of (dx, dy) to box `o`. Dragging past the opposite side flips it. */
@@ -248,16 +231,16 @@ export class ScreenMarker extends LitElement {
   #currentPoints: Point[] = [];
   #dragStart: Point | null = null;
   #shapeDrag: ShapeDrag | null = null;
-  #marquee: { start: Point; rect: Rect; additive: boolean } | null = null;
   // Region select is tied to a page id so it never leaks onto another page after switching tabs.
   #region: { pageId: string; rect: Rect } | null = null;
-  #regionDrag: { grab: BoxGrab | 'create'; start: Point; orig: Rect } | null = null;
+  #regionDrag: { grab: BoxGrab | 'create'; start: Point; orig: Rect; additive: boolean } | null = null;
   #textEdit: TextEdit | null = null;
   #focusTextEdit = false;
   #spaceHeld = false;
   #spacePanned = false;
   #pan: { x: number; y: number; left: number; top: number } | null = null;
   #canvasCursor = '';
+  #stageObserver = new ResizeObserver(() => this.requestUpdate());
 
   #statusMsg = '';
   #previewUrl: string | null = null;
@@ -305,6 +288,7 @@ export class ScreenMarker extends LitElement {
     this.#store.restore().then(async () => {
       this.requestUpdate();
       await this.updateComplete;
+      if (this.#stageRef.value) this.#stageObserver.observe(this.#stageRef.value);
       await this.#redraw();
       this.#fitToWindow();
       const name = cloudNameFromHash();
@@ -319,6 +303,7 @@ export class ScreenMarker extends LitElement {
     window.removeEventListener('keyup', this.#onKeyup);
     window.removeEventListener('blur', this.#onWindowBlur);
     document.removeEventListener('folderfoo-file-open', this.#onCloudFileChosen);
+    this.#stageObserver.disconnect();
   }
 
   #onDragOver = (e: DragEvent) => {
@@ -642,7 +627,7 @@ export class ScreenMarker extends LitElement {
   }
 
   #isShapeTool(tool: Tool): tool is ShapeType {
-    return tool !== 'select' && tool !== 'region';
+    return tool !== 'select';
   }
 
   #newShape(type: ShapeType, points: Point[]): Shape {
@@ -669,8 +654,7 @@ export class ScreenMarker extends LitElement {
     const H = img.naturalHeight;
     const shapes = this.#displayShapes();
     const content = sceneBounds(W, H, shapes);
-    const m = sceneMargin(W, H);
-    const area: Rect = { x: content.x - m, y: content.y - m, w: content.w + m * 2, h: content.h + m * 2 };
+    const area = this.#editorArea(W, H, content);
     const prev = this.#area;
     const sizeChanged = prev.x !== area.x || prev.y !== area.y || canvas.width !== area.w || canvas.height !== area.h;
     this.#area = area;
@@ -682,15 +666,15 @@ export class ScreenMarker extends LitElement {
     const ctx = canvas.getContext('2d')!;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // Off-image margin: a faint tint so it reads as scene, not image.
-    ctx.fillStyle = 'rgba(128, 128, 128, 0.14)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.translate(-area.x, -area.y);
-    if (content.x < 0 || content.y < 0 || content.w > W || content.h > H) {
-      // What exports will include beyond the image (it's white there).
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
-      ctx.fillRect(content.x, content.y, content.w, content.h);
-    }
+    // The empty space around the image stays transparent (the stage shows
+    // through); only the image itself gets a drop shadow to stand out.
+    ctx.save();
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
+    ctx.shadowBlur = 16 / this.#displayScale();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
     ctx.drawImage(img, 0, 0);
     drawShapes(ctx, shapes);
 
@@ -704,7 +688,6 @@ export class ScreenMarker extends LitElement {
       if (pts.length) drawHandles(ctx, pts, HANDLE_CSS_PX * unit);
     }
     if (this.#store.selection.value?.type === 'image') drawImageSelectionOutline(ctx, W, H);
-    if (this.#marquee) drawMarquee(ctx, this.#marquee.rect, unit);
 
     const region = this.#activeRegion();
     if (region) drawRegionOverlay(ctx, region, HANDLE_CSS_PX * unit, area);
@@ -730,6 +713,32 @@ export class ScreenMarker extends LitElement {
     if (!BOX_RESIZABLE.includes(shape.type)) return null;
     const grab = boxGrabAt(boundsRect(shape), pt, tol);
     return grab === 'move' ? null : grab;
+  }
+
+  /**
+   * The scene box the editor canvas covers, in image coordinates: at least
+   * the whole visible stage (centered on the image, so empty space all
+   * around is usable for tags and shapes without the image moving), grown
+   * to fit any content drawn beyond it.
+   */
+  #editorArea(W: number, H: number, content: Rect): Rect {
+    const stage = this.#stageRef.value;
+    const scale = this.#displayScale();
+    const viewW = Math.min(MAX_AREA_SIDE, Math.max(W, ((stage?.clientWidth ?? 0) - 32) / scale));
+    const viewH = Math.min(MAX_AREA_SIDE, Math.max(H, ((stage?.clientHeight ?? 0) - 32) / scale));
+    const edge = 24 / scale;
+    const x1 = Math.floor(Math.min(W / 2 - viewW / 2, content.x - edge));
+    const y1 = Math.floor(Math.min(H / 2 - viewH / 2, content.y - edge));
+    const x2 = Math.ceil(Math.max(W / 2 + viewW / 2, content.x + content.w + edge));
+    const y2 = Math.ceil(Math.max(H / 2 + viewH / 2, content.y + content.h + edge));
+    return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  }
+
+  /** Lets an image point land at a given screen position after a zoom/area change (only possible where the stage can scroll). */
+  async #settleLayout(): Promise<void> {
+    await this.updateComplete;
+    await this.#redraw();
+    await this.updateComplete;
   }
 
   #handleTolerance(): number {
@@ -790,13 +799,13 @@ export class ScreenMarker extends LitElement {
     const stage = this.#stageRef.value;
     if (!canvas || !stage) return;
     const before = canvas.getBoundingClientRect();
-    const fx = (clientX - before.left) / before.width;
-    const fy = (clientY - before.top) / before.height;
+    const ix = this.#area.x + ((clientX - before.left) / before.width) * canvas.width;
+    const iy = this.#area.y + ((clientY - before.top) / before.height) * canvas.height;
     this.#store.setZoom(zoom);
-    await this.updateComplete;
+    await this.#settleLayout();
     const after = canvas.getBoundingClientRect();
-    stage.scrollLeft += after.left + fx * after.width - clientX;
-    stage.scrollTop += after.top + fy * after.height - clientY;
+    stage.scrollLeft += after.left + ((ix - this.#area.x) / canvas.width) * after.width - clientX;
+    stage.scrollTop += after.top + ((iy - this.#area.y) / canvas.height) * after.height - clientY;
   }
 
   /**
@@ -813,7 +822,7 @@ export class ScreenMarker extends LitElement {
     const availH = stage.clientHeight - 32;
     if (availW <= 0 || availH <= 0) return;
     this.#store.setZoom(Math.min(1, (availW * dpr) / c.w, (availH * dpr) / c.h));
-    await this.updateComplete;
+    await this.#settleLayout();
     const rect = canvas.getBoundingClientRect();
     const stageRect = stage.getBoundingClientRect();
     const scale = rect.width / canvas.width;
@@ -830,19 +839,10 @@ export class ScreenMarker extends LitElement {
     const pt = this.#canvasPoint(e);
     const capture = () => (e.target as Element).setPointerCapture(e.pointerId);
 
-    if (tool === 'region') {
-      const current = this.#activeRegion();
-      const grab = current ? boxGrabAt(current, pt, this.#handleTolerance()) : null;
-      this.#regionDrag =
-        current && grab
-          ? { grab, start: pt, orig: current }
-          : { grab: 'create', start: pt, orig: { x: pt.x, y: pt.y, w: 0, h: 0 } };
-      if (this.#store.selection.value) this.#store.selection.set(null);
-      capture();
-      return;
-    }
-
     if (tool === 'select') {
+      // Priority: the selected shape's handles, then the region's edges and
+      // corners, then any shape, then the region's body; anything else
+      // starts a new region (which also selects the shapes it touches).
       const selected = this.#store.selectedShapes;
       if (selected.length === 1) {
         const handle = this.#shapeHandleAt(selected[0]!, pt);
@@ -852,11 +852,19 @@ export class ScreenMarker extends LitElement {
           return;
         }
       }
+      const region = this.#activeRegion();
+      const regionGrab = region ? boxGrabAt(region, pt, this.#handleTolerance()) : null;
+      if (region && regionGrab && regionGrab !== 'move') {
+        this.#regionDrag = { grab: regionGrab, start: pt, orig: region, additive: false };
+        capture();
+        return;
+      }
       const hit = hitTestShapes(this.#store.activePage.shapes, pt);
       if (hit) {
         const wasSelected = this.#store.selectedIds.includes(hit.id);
         if (e.shiftKey) this.#store.toggleShapeSelected(hit.id);
         else if (!wasSelected) this.#store.selectShapes([hit.id]);
+        if (!wasSelected) this.#clearRegion();
         const ids = this.#store.selectedIds;
         if (ids.includes(hit.id)) {
           // Arm a potential drag-to-move of the whole selection; a plain click
@@ -872,7 +880,13 @@ export class ScreenMarker extends LitElement {
         }
         return;
       }
-      this.#marquee = { start: pt, rect: { x: pt.x, y: pt.y, w: 0, h: 0 }, additive: e.shiftKey };
+      if (region && regionGrab === 'move') {
+        this.#regionDrag = { grab: 'move', start: pt, orig: region, additive: false };
+        capture();
+        return;
+      }
+      this.#region = null;
+      this.#regionDrag = { grab: 'create', start: pt, orig: { x: pt.x, y: pt.y, w: 0, h: 0 }, additive: e.shiftKey };
       capture();
       return;
     }
@@ -896,8 +910,14 @@ export class ScreenMarker extends LitElement {
     }
 
     if (tool === 'step') {
+      const hit = hitTestShapes(this.#store.activePage.shapes, pt);
+      if (hit?.type === 'step') {
+        // Clicking an existing marker selects it (double-click edits its number).
+        this.#store.selectShapes([hit.id]);
+        return;
+      }
       const step = this.#newShape('step', [pt]);
-      step.stepNumber = this.#store.nextStepNumber();
+      step.stepNumber = this.#store.takeNextStepNumber();
       this.#store.addShape(step);
       return;
     }
@@ -913,8 +933,8 @@ export class ScreenMarker extends LitElement {
     const tool = this.#store.activeTool.value;
     const pt = this.#canvasPoint(e);
 
-    if (tool === 'region') {
-      this.#onRegionPointerMove(pt);
+    if (this.#regionDrag) {
+      this.#onRegionDrag(pt);
       return;
     }
 
@@ -926,12 +946,6 @@ export class ScreenMarker extends LitElement {
     }
     if (drag?.kind === 'resize') {
       drag.draft = this.#resizedShape(drag, pt);
-      void this.#redraw();
-      return;
-    }
-    if (this.#marquee) {
-      const m = this.#marquee;
-      m.rect = sortedRect(m.start.x, m.start.y, pt.x, pt.y);
       void this.#redraw();
       return;
     }
@@ -961,14 +975,19 @@ export class ScreenMarker extends LitElement {
 
   #updateHoverCursor(pt: Point): void {
     let cursor = 'crosshair';
-    if (this.#store.activeTool.value === 'select') {
+    const tool = this.#store.activeTool.value;
+    if (tool === 'select') {
       cursor = 'default';
       const selected = this.#store.selectedShapes;
       const handle = selected.length === 1 ? this.#shapeHandleAt(selected[0]!, pt) : null;
+      const region = this.#activeRegion();
+      const regionGrab = region ? boxGrabAt(region, pt, this.#handleTolerance()) : null;
       if (handle === 0 || handle === 1) cursor = 'grab';
       else if (handle) cursor = GRAB_CURSOR[handle];
+      else if (regionGrab && regionGrab !== 'move') cursor = GRAB_CURSOR[regionGrab];
       else if (hitTestShapes(this.#store.activePage.shapes, pt)) cursor = 'move';
-    } else if (this.#store.activeTool.value === 'text') {
+      else if (regionGrab === 'move') cursor = 'move';
+    } else if (tool === 'text') {
       cursor = 'text';
     }
     if (cursor !== this.#canvasCursor) {
@@ -978,11 +997,23 @@ export class ScreenMarker extends LitElement {
   }
 
   #onPointerUp = (e: PointerEvent) => {
-    if (this.#regionDrag) {
-      const r = this.#region?.rect;
+    const regionDrag = this.#regionDrag;
+    if (regionDrag) {
       this.#regionDrag = null;
-      if (!r || r.w < CLICK_THRESHOLD || r.h < CLICK_THRESHOLD) this.#clearRegion();
-      else this.requestUpdate();
+      const r = this.#region?.rect;
+      if (regionDrag.grab === 'create') {
+        if (!r || r.w < CLICK_THRESHOLD || r.h < CLICK_THRESHOLD) {
+          // A plain click on empty space: select the image (if on it), or nothing.
+          this.#region = null;
+          if (!regionDrag.additive) {
+            this.#store.selection.set(this.#insideImage(regionDrag.start) ? { type: 'image' } : null);
+          }
+        } else {
+          const hits = shapesInRect(this.#store.activePage.shapes, r).map((s) => s.id);
+          this.#store.selectShapes(regionDrag.additive ? [...new Set([...this.#store.selectedIds, ...hits])] : hits);
+        }
+      }
+      this.requestUpdate();
       return;
     }
 
@@ -995,19 +1026,6 @@ export class ScreenMarker extends LitElement {
         else if (drag.selectOnlyOnClick) this.#store.selectShapes([drag.selectOnlyOnClick]);
       } else if (drag.draft) {
         this.#store.replaceShape(drag.draft);
-      }
-      void this.#redraw();
-      return;
-    }
-
-    if (this.#marquee) {
-      const { rect, additive } = this.#marquee;
-      this.#marquee = null;
-      if (rect.w < CLICK_THRESHOLD && rect.h < CLICK_THRESHOLD) {
-        if (!additive) this.#store.selection.set(this.#insideImage(rect) ? { type: 'image' } : null);
-      } else {
-        const hits = shapesInRect(this.#store.activePage.shapes, rect).map((s) => s.id);
-        this.#store.selectShapes(additive ? [...new Set([...this.#store.selectedIds, ...hits])] : hits);
       }
       void this.#redraw();
       return;
@@ -1046,7 +1064,7 @@ export class ScreenMarker extends LitElement {
   #onDoubleClick = (e: MouseEvent) => {
     if (!this.#store.activePage.imageDataUrl) return;
     const hit = hitTestShapes(this.#store.activePage.shapes, this.#canvasPoint(e));
-    if (hit?.type === 'text' || hit?.type === 'tag') this.#startTextEdit(hit);
+    if (hit?.type === 'text' || hit?.type === 'tag' || hit?.type === 'step') this.#startTextEdit(hit);
   };
 
   #singleSelectedTag(): Shape | null {
@@ -1060,10 +1078,10 @@ export class ScreenMarker extends LitElement {
     this.#commitTextEdit();
     this.#textEdit = shape
       ? {
-          kind: shape.type === 'tag' ? 'tag' : 'text',
+          kind: shape.type === 'tag' || shape.type === 'step' ? shape.type : 'text',
           id: shape.id,
           anchor: shape.points[0]!,
-          value: shape.label ?? '',
+          value: shape.type === 'step' ? String(shape.stepNumber ?? 1) : (shape.label ?? ''),
           color: shape.color,
           fontSize: shape.fontSize ?? 18,
           fill: !!shape.fill,
@@ -1090,6 +1108,13 @@ export class ScreenMarker extends LitElement {
     if (!edit) return;
     this.#textEdit = null;
     const label = edit.value.trim();
+    if (edit.kind === 'step') {
+      const shape = this.#store.activePage.shapes.find((s) => s.id === edit.id);
+      const n = Number.parseInt(label, 10);
+      if (shape && Number.isFinite(n) && n !== shape.stepNumber) this.#store.replaceShape({ ...shape, stepNumber: n });
+      this.requestUpdate();
+      return;
+    }
     if (edit.id) {
       const shape = this.#store.activePage.shapes.find((s) => s.id === edit.id);
       if (shape && !label) this.#store.deleteShapes([edit.id]);
@@ -1131,6 +1156,34 @@ export class ScreenMarker extends LitElement {
     const scale = this.#displayScale();
     const ox = this.#area.x;
     const oy = this.#area.y;
+    if (edit.kind === 'step') {
+      const r = edit.fontSize * 0.85;
+      const style = [
+        `left:${(edit.anchor.x - r - ox) * scale}px`,
+        `top:${(edit.anchor.y - r - oy) * scale}px`,
+        `width:${r * 2 * scale}px`,
+        `height:${r * 2 * scale}px`,
+        `font-size:${r * scale}px`,
+        `color:${contrastColor(edit.color)}`,
+        `background:${edit.color}`,
+      ].join(';');
+      return html`
+        <input
+          ${ref(this.#textInputRef)}
+          class="text-editor step-editor"
+          style=${style}
+          inputmode="numeric"
+          .value=${live(edit.value)}
+          @input=${(e: Event) => {
+            edit.value = (e.target as HTMLInputElement).value.replace(/[^0-9-]/g, '');
+            this.requestUpdate();
+          }}
+          @keydown=${this.#onTextKeydown}
+          @blur=${() => this.#commitTextEdit()}
+          @pointerdown=${(e: Event) => e.stopPropagation()}
+        />
+      `;
+    }
     if (edit.kind === 'tag') {
       const L = layoutTag({
         id: '',
@@ -1202,11 +1255,88 @@ export class ScreenMarker extends LitElement {
     `;
   }
 
+  // ---------- tag pointer panel ----------
+
+  /**
+   * Floating pointer-direction picker for the tag being edited or the one
+   * selected tag: a 4×3 grid (one row per side, three spots along it, the
+   * glyph placed where the pointer sits) plus "no pointer", as in htmlpaint.
+   */
+  #tagPanel() {
+    const edit = this.#textEdit?.kind === 'tag' ? this.#textEdit : null;
+    const tag = edit ? null : this.#singleSelectedTag();
+    const tool = this.#store.activeTool.value;
+    if (!edit && (!tag || (tool !== 'select' && tool !== 'tag') || this.#shapeDrag)) return '';
+    const shape: Shape = edit
+      ? { id: '', type: 'tag', color: edit.color, lineWidth: 1, points: [edit.anchor], label: edit.value, fontSize: edit.fontSize, tagArrow: edit.tagArrow }
+      : tag!;
+    const current = shape.tagArrow ?? 'bottom-center';
+    const b = shapeBounds(shape);
+    const scale = this.#displayScale();
+    const canvas = this.#canvasRef.value;
+    const wrapH = (canvas?.height ?? 0) * scale;
+    const PANEL_H = 150;
+    let top = (b.y + b.height - this.#area.y) * scale + 10;
+    if (top + PANEL_H > wrapH) top = Math.max(4, (b.y - this.#area.y) * scale - PANEL_H - 10);
+    const left = Math.max(4, (b.x - this.#area.x) * scale);
+    const glyph = { top: '↑', right: '→', bottom: '↓', left: '←' };
+    const cellStyle = (pos: TagArrow) => {
+      const [side, part] = pos.split('-') as ['top' | 'right' | 'bottom' | 'left', string];
+      const along = part === 'center' ? 'center' : part === 'left' || part === 'top' ? 'flex-start' : 'flex-end';
+      if (side === 'top' || side === 'bottom') return `justify-content:${along};align-items:${side === 'top' ? 'flex-start' : 'flex-end'}`;
+      return `align-items:${along};justify-content:${side === 'left' ? 'flex-start' : 'flex-end'}`;
+    };
+    const rows: TagArrow[][] = [
+      ['top-left', 'top-center', 'top-right'],
+      ['right-top', 'right-center', 'right-bottom'],
+      ['bottom-right', 'bottom-center', 'bottom-left'],
+      ['left-bottom', 'left-center', 'left-top'],
+    ];
+    return html`
+      <div
+        class="tag-panel"
+        style="left:${left}px; top:${top}px"
+        @pointerdown=${(e: Event) => {
+          // Keep focus (and so the open editor) where it is; don't reach the canvas.
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+      >
+        <div class="tag-panel-title">Pointer</div>
+        ${rows.map(
+          (row) => html`
+            <div class="tag-grid-row">
+              ${row.map(
+                (pos) => html`
+                  <button
+                    class="tag-cell ${current === pos ? 'active' : ''}"
+                    style=${cellStyle(pos)}
+                    title=${TAG_ARROW_LABEL[pos]}
+                    @click=${() => this.#applyStyle({ tagArrow: pos })}
+                  >
+                    ${glyph[pos.split('-')[0] as keyof typeof glyph]}
+                  </button>
+                `
+              )}
+            </div>
+          `
+        )}
+        <button
+          class="tag-none ${current === 'none' ? 'active' : ''}"
+          title="A plain note with no pointer"
+          @click=${() => this.#applyStyle({ tagArrow: 'none' })}
+        >
+          No pointer
+        </button>
+      </div>
+    `;
+  }
+
   // ---------- region select ----------
 
-  /** The region on the active page, only while the Region tool is active. */
+  /** The selection box on the active page, only while the Select tool is active. */
   #activeRegion(): Rect | null {
-    if (this.#store.activeTool.value !== 'region') return null;
+    if (this.#store.activeTool.value !== 'select') return null;
     if (!this.#region || this.#region.pageId !== this.#store.activePageId.value) return null;
     return this.#region.rect;
   }
@@ -1218,44 +1348,40 @@ export class ScreenMarker extends LitElement {
     this.requestUpdate();
   }
 
-  #onRegionPointerMove(pt: Point): void {
-    const canvas = this.#canvasRef.value;
-    if (!canvas) return;
+  /** Creates, moves, or resizes the selection box, kept within the page content (image plus anything drawn past it). */
+  #onRegionDrag(pt: Point): void {
     const drag = this.#regionDrag;
-
-    if (!drag) {
-      const current = this.#activeRegion();
-      const grab = current ? boxGrabAt(current, pt, this.#handleTolerance()) : null;
-      const cursor = grab ? GRAB_CURSOR[grab] : 'crosshair';
-      if (cursor !== this.#canvasCursor) {
-        this.#canvasCursor = cursor;
-        this.requestUpdate();
-      }
-      return;
-    }
-
-    const img = this.#image?.img;
-    if (!img) return;
-    const W = img.naturalWidth;
-    const H = img.naturalHeight;
+    if (!drag) return;
+    const c = this.#content;
+    const minX = c.x;
+    const minY = c.y;
+    const maxX = c.x + c.w;
+    const maxY = c.y + c.h;
+    const clamp = (x1: number, y1: number, x2: number, y2: number): Rect => {
+      const r = sortedRect(
+        Math.max(minX, Math.min(maxX, x1)),
+        Math.max(minY, Math.min(maxY, y1)),
+        Math.max(minX, Math.min(maxX, x2)),
+        Math.max(minY, Math.min(maxY, y2))
+      );
+      return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.w), h: Math.round(r.h) };
+    };
     const dx = pt.x - drag.start.x;
     const dy = pt.y - drag.start.y;
     const o = drag.orig;
     let rect: Rect;
-
     if (drag.grab === 'create') {
-      rect = clampedRect(drag.start.x, drag.start.y, pt.x, pt.y, W, H);
+      rect = clamp(drag.start.x, drag.start.y, pt.x, pt.y);
     } else if (drag.grab === 'move') {
       rect = {
-        x: Math.round(Math.max(0, Math.min(W - o.w, o.x + dx))),
-        y: Math.round(Math.max(0, Math.min(H - o.h, o.y + dy))),
+        x: Math.round(Math.max(minX, Math.min(maxX - o.w, o.x + dx))),
+        y: Math.round(Math.max(minY, Math.min(maxY - o.h, o.y + dy))),
         w: o.w,
         h: o.h,
       };
     } else {
-      rect = clampedRect(...resizeBox(o, drag.grab, dx, dy), W, H);
+      rect = clamp(...resizeBox(o, drag.grab, dx, dy));
     }
-
     this.#region = { pageId: this.#store.activePageId.value, rect };
     this.requestUpdate();
   }
@@ -1273,9 +1399,20 @@ export class ScreenMarker extends LitElement {
 
   /** Crops the active page's image to the region; annotations shift with it and stay editable. Undoable. */
   #cropRegion = async () => {
-    const r = this.#activeRegion();
+    const sel = this.#activeRegion();
     const page = this.#store.activePage;
-    if (!r || !page.imageDataUrl) return;
+    const img = this.#image?.img;
+    if (!sel || !page.imageDataUrl || !img) return;
+    // Only the image can be cropped; a box reaching into the margin crops to where it overlaps the image.
+    const x1 = Math.max(0, sel.x);
+    const y1 = Math.max(0, sel.y);
+    const x2 = Math.min(img.naturalWidth, sel.x + sel.w);
+    const y2 = Math.min(img.naturalHeight, sel.y + sel.h);
+    if (x2 - x1 < 1 || y2 - y1 < 1) {
+      this.#flashStatus('The selection does not cover the image');
+      return;
+    }
+    const r: Rect = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
     try {
       const cropped = await cropImageDataUrl(page.imageDataUrl, r);
       this.#store.cropActivePage(cropped, r.x, r.y);
@@ -1909,14 +2046,19 @@ export class ScreenMarker extends LitElement {
         >
           ◼ Fill
         </button>
-        ${this.#store.activeTool.value === 'tag' || this.#store.selectedShapes.some((s) => s.type === 'tag')
+        ${this.#store.activeTool.value === 'step'
           ? html`
-              <select
-                title="Tag pointer (Shift+arrow keys jump to a side; Space cycles)"
-                @change=${(e: Event) => this.#applyStyle({ tagArrow: (e.target as HTMLSelectElement).value as TagArrow })}
-              >
-                ${TAG_ARROWS.map((a) => html`<option value=${a} ?selected=${style.tagArrow === a}>${TAG_ARROW_LABEL[a]}</option>`)}
-              </select>
+              <label class="next-step" title="Number the next step marker gets; later ones count up from the highest on the page">
+                Next #
+                <input
+                  type="number"
+                  .value=${live(String(this.#store.peekNextStepNumber()))}
+                  @change=${(e: Event) => {
+                    const n = Number.parseInt((e.target as HTMLInputElement).value, 10);
+                    this.#store.nextStepOverride.set(Number.isFinite(n) ? n : null);
+                  }}
+                />
+              </label>
             `
           : ''}
         <div class="spacer"></div>
@@ -1994,7 +2136,7 @@ export class ScreenMarker extends LitElement {
                   @pointerup=${this.#onPointerUp}
                   @dblclick=${this.#onDoubleClick}
                 ></canvas>
-                ${this.#regionActions()} ${this.#textEditor()}
+                ${this.#regionActions()} ${this.#textEditor()} ${this.#tagPanel()}
               </div>
             `
           : html`<div class="empty">Paste a screenshot (Cmd/Ctrl+V), drag one in, or use "Open image…" above.</div>`}

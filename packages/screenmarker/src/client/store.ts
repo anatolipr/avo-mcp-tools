@@ -298,10 +298,22 @@ export class AnnotatorStore {
     });
   }
 
-  /** The number the next step marker on the active page should show. */
-  nextStepNumber(): number {
+  /** A number the user typed for the next step marker (e.g. to continue from a previous slide); used once. */
+  nextStepOverride = new Signal<number | null>(null);
+
+  /** The number the next step marker will show: the override if set, else one past the highest on the page. */
+  peekNextStepNumber(): number {
+    const override = this.nextStepOverride.value;
+    if (override !== null) return override;
     const steps = this.activePage.shapes.filter((s) => s.type === 'step').map((s) => s.stepNumber ?? 0);
     return steps.length ? Math.max(...steps) + 1 : 1;
+  }
+
+  /** Like peekNextStepNumber, but consumes the override so later markers count up from the page again. */
+  takeNextStepNumber(): number {
+    const n = this.peekNextStepNumber();
+    this.nextStepOverride.set(null);
+    return n;
   }
 
   /**

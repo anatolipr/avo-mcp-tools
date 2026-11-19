@@ -1,5 +1,5 @@
 export type ShapeType = 'rect' | 'ellipse' | 'arrow' | 'line' | 'text' | 'step' | 'pen' | 'highlight' | 'blur' | 'tag';
-export type Tool = ShapeType | 'select' | 'region';
+export type Tool = ShapeType | 'select';
 
 export interface Point {
   x: number;

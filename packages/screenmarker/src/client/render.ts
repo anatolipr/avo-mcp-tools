@@ -268,10 +268,12 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
       ctx.strokeStyle = contrastColor(shape.color);
       ctx.stroke();
       ctx.fillStyle = contrastColor(shape.color);
-      ctx.font = textFont(r * 1.1);
+      const label = String(shape.stepNumber ?? 1);
+      // Shrink longer numbers so 2-3 digits still fit the circle.
+      ctx.font = textFont(r * (label.length <= 1 ? 1.1 : label.length === 2 ? 0.95 : 0.72));
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(String(shape.stepNumber ?? 1), c.x, c.y + r * 0.06);
+      ctx.fillText(label, c.x, c.y + r * 0.06);
       break;
     }
   }
