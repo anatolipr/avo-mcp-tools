@@ -13,8 +13,11 @@ import {
   drawRegionOverlay,
   drawSelectionOutline,
   drawShapes,
+  flattenPage,
   flattenPagesToCanvas,
   hitTestShapes,
+  layoutTag,
+  sceneBounds,
   shapeBounds,
   shapesInRect,
   transformImageDataUrl,
@@ -22,9 +25,21 @@ import {
   type ImageTransform,
 } from './render.js';
 import { copyImageOnly, copyRegion, downloadImage } from './export.js';
-import { downloadDocument, readDocumentFile } from './save-load.js';
+import { documentValue, downloadDocument, parseDocumentValue, readDocumentFile } from './save-load.js';
 import { screenMarkerStyles } from './styles.js';
-import type { Point, Rect, Shape, ShapeType, Tool } from './types.js';
+import {
+  cloudNameFromHash,
+  createPresentationLink,
+  loadCloudDocument,
+  loadPublicDocument,
+  mountAccountUi,
+  publicToken,
+  saveCloudDocument,
+  setCloudNameInHash,
+  showFilePicker,
+} from './cloud.js';
+import './presenter.js';
+import { TAG_ARROWS, type Page, type Point, type Rect, type Shape, type ShapeType, type TagArrow, type Tool } from './types.js';
 
 const TOOLS: { type: Tool; label: string; icon: string; key: string }[] = [
   { type: 'select', label: 'Select', icon: '↖', key: 'v' },
@@ -34,6 +49,7 @@ const TOOLS: { type: Tool; label: string; icon: string; key: string }[] = [
   { type: 'arrow', label: 'Arrow', icon: '↗', key: 'a' },
   { type: 'line', label: 'Line', icon: '╱', key: 'l' },
   { type: 'text', label: 'Text', icon: 'T', key: 't' },
+  { type: 'tag', label: 'Tag', icon: '💬', key: 'g' },
   { type: 'step', label: 'Step', icon: '①', key: 'n' },
   { type: 'pen', label: 'Pen', icon: '✎', key: 'p' },
   { type: 'highlight', label: 'Highlight', icon: '▮', key: 'h' },
@@ -52,7 +68,37 @@ const CLICK_THRESHOLD = 3;
 const HANDLE_CSS_PX = 9;
 
 const FILLABLE: ShapeType[] = ['rect', 'ellipse', 'text'];
-const SIZED_BY_FONT: ShapeType[] = ['text', 'step'];
+const SIZED_BY_FONT: ShapeType[] = ['text', 'step', 'tag'];
+const TAG_SIDE_POSITIONS: Record<'top' | 'right' | 'bottom' | 'left', TagArrow[]> = {
+  top: ['top-left', 'top-center', 'top-right'],
+  right: ['right-top', 'right-center', 'right-bottom'],
+  bottom: ['bottom-left', 'bottom-center', 'bottom-right'],
+  left: ['left-top', 'left-center', 'left-bottom'],
+};
+const TAG_ARROW_LABEL: Record<TagArrow, string> = {
+  'top-left': '↑ Top left',
+  'top-center': '↑ Top',
+  'top-right': '↑ Top right',
+  'right-top': '→ Right top',
+  'right-center': '→ Right',
+  'right-bottom': '→ Right bottom',
+  'bottom-right': '↓ Bottom right',
+  'bottom-center': '↓ Bottom',
+  'bottom-left': '↓ Bottom left',
+  'left-bottom': '← Left bottom',
+  'left-center': '← Left',
+  'left-top': '← Left top',
+  none: 'No pointer (note)',
+};
+
+/**
+ * Editable margin around the image, in image pixels: room to place tags
+ * and other shapes off the image, explaining parts of it from the side.
+ * The scene grows further as content extends past this.
+ */
+function sceneMargin(imageW: number, imageH: number): number {
+  return Math.round(Math.max(160, Math.max(imageW, imageH) * 0.2));
+}
 const BOX_RESIZABLE: ShapeType[] = ['rect', 'ellipse', 'highlight', 'blur', 'pen'];
 
 /** Which part of a box a drag grabbed: an edge/corner (compass letters) or the body. */
@@ -74,7 +120,16 @@ type ShapeDrag =
   | { kind: 'move'; ids: string[]; start: Point; delta: Point; selectOnlyOnClick: string | null }
   | { kind: 'resize'; orig: Shape; grab: BoxGrab | 0 | 1; start: Point; draft: Shape | null };
 
-type TextEdit = { id: string | null; anchor: Point; value: string; color: string; fontSize: number; fill: boolean };
+type TextEdit = {
+  kind: 'text' | 'tag';
+  id: string | null;
+  anchor: Point;
+  value: string;
+  color: string;
+  fontSize: number;
+  fill: boolean;
+  tagArrow: TagArrow;
+};
 
 function sortedRect(x1: number, y1: number, x2: number, y2: number): Rect {
   return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
@@ -179,9 +234,14 @@ export class ScreenMarker extends LitElement {
   #store = new AnnotatorStore();
   #canvasRef = createRef<HTMLCanvasElement>();
   #stageRef = createRef<HTMLDivElement>();
-  #textInputRef = createRef<HTMLInputElement>();
+  #textInputRef = createRef<HTMLInputElement | HTMLTextAreaElement>();
   #loadDocumentInputRef = createRef<HTMLInputElement>();
   #image: { src: string; img: HTMLImageElement } | null = null;
+  // The canvas covers this box of the scene, in image coordinates (the
+  // image sits at 0,0; the margin around it can hold tags and shapes).
+  #area: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  // The image plus anything drawn past it — what exports include.
+  #content: Rect = { x: 0, y: 0, w: 0, h: 0 };
 
   // Transient interaction state — never part of the document or undo history.
   #drawing = false;
@@ -207,6 +267,11 @@ export class ScreenMarker extends LitElement {
   #dragOverSide: 'before' | 'after' | null = null;
   #justMovedPageId: string | null = null;
   #theme: ThemeMode = loadTheme();
+  #presenting: { slides: string[]; index: number; publicView: boolean; heading: string; message: string } | null = null;
+  #cloudBusy = false;
+  #cloudName: string | null = cloudNameFromHash();
+  // The document behind a public link, kept for "Edit a copy".
+  #publicDoc: { pages: Page[]; activePageId: string } | null = null;
 
   constructor() {
     super();
@@ -234,11 +299,16 @@ export class ScreenMarker extends LitElement {
     window.addEventListener('blur', this.#onWindowBlur);
     this.addEventListener('dragover', this.#onDragOver);
     this.addEventListener('drop', this.#onDrop);
+    document.addEventListener('folderfoo-file-open', this.#onCloudFileChosen);
+    if (publicToken) void this.#openPublicPresentation(publicToken);
+    void mountAccountUi();
     this.#store.restore().then(async () => {
       this.requestUpdate();
       await this.updateComplete;
       await this.#redraw();
       this.#fitToWindow();
+      const name = cloudNameFromHash();
+      if (name && !publicToken) void this.#openCloudDocument(name, { confirmReplace: false });
     });
   }
 
@@ -248,6 +318,7 @@ export class ScreenMarker extends LitElement {
     window.removeEventListener('keydown', this.#onKeydown);
     window.removeEventListener('keyup', this.#onKeyup);
     window.removeEventListener('blur', this.#onWindowBlur);
+    document.removeEventListener('folderfoo-file-open', this.#onCloudFileChosen);
   }
 
   #onDragOver = (e: DragEvent) => {
@@ -282,12 +353,21 @@ export class ScreenMarker extends LitElement {
   #onKeyup = (e: KeyboardEvent) => {
     if (e.key !== ' ' || !this.#spaceHeld) return;
     this.#spaceHeld = false;
-    // A Space tap (no drag) still toggles the preview, as before Space+drag panning existed.
-    if (!this.#spacePanned && this.#store.activePage.imageDataUrl) this.#openPreview();
+    // A Space tap (no drag) cycles a selected tag's pointer clockwise;
+    // otherwise it toggles the preview, as before Space+drag panning existed.
+    const tag = this.#singleSelectedTag();
+    if (!this.#spacePanned && tag) {
+      const order = TAG_ARROWS.filter((a) => a !== 'none');
+      const i = order.indexOf((tag.tagArrow ?? 'bottom-center') as (typeof order)[number]);
+      this.#applyStyle({ tagArrow: order[(i + 1) % order.length]! });
+    } else if (!this.#spacePanned && this.#store.activePage.imageDataUrl) {
+      this.#openPreview();
+    }
     this.requestUpdate();
   };
 
   #onKeydown = (e: KeyboardEvent) => {
+    if (this.#presenting) return;
     const typing = fromEditable(e);
     const mod = e.metaKey || e.ctrlKey;
 
@@ -353,6 +433,19 @@ export class ScreenMarker extends LitElement {
         e.preventDefault();
         this.#closePageWithConfirm(this.#store.activePageId.value);
       }
+      return;
+    }
+
+    if (e.key.startsWith('Arrow') && e.shiftKey && !mod && !e.altKey && this.#singleSelectedTag()) {
+      // Shift+arrow jumps a selected tag's pointer to that side, then steps
+      // along it on repeat presses (e.g. ← ← ←: left-top, left-center, left-bottom).
+      e.preventDefault();
+      const side = ({ ArrowUp: 'top', ArrowRight: 'right', ArrowDown: 'bottom', ArrowLeft: 'left' } as const)[
+        e.key as 'ArrowUp' | 'ArrowRight' | 'ArrowDown' | 'ArrowLeft'
+      ];
+      const options = TAG_SIDE_POSITIONS[side];
+      const i = options.indexOf(this.#singleSelectedTag()!.tagArrow ?? 'bottom-center');
+      this.#applyStyle({ tagArrow: options[i === -1 ? 0 : (i + 1) % options.length]! });
       return;
     }
 
@@ -509,6 +602,7 @@ export class ScreenMarker extends LitElement {
     try {
       const { pages, activePageId } = await readDocumentFile(file);
       this.#store.loadDocument(pages, activePageId);
+      this.#setCloudName(null);
       await this.updateComplete;
       await this.#redraw();
       this.#fitToWindow();
@@ -561,6 +655,7 @@ export class ScreenMarker extends LitElement {
     };
     if (FILLABLE.includes(type)) shape.fill = this.#store.activeFill.value;
     if (SIZED_BY_FONT.includes(type)) shape.fontSize = this.#store.activeFontSize.value;
+    if (type === 'tag') shape.tagArrow = this.#store.activeTagArrow.value;
     return shape;
   }
 
@@ -570,15 +665,33 @@ export class ScreenMarker extends LitElement {
     if (!canvas || !page.imageDataUrl) return;
 
     const img = await this.#loadPageImage(page.imageDataUrl);
-    const sizeChanged = canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight;
-    if (sizeChanged) {
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
+    const W = img.naturalWidth;
+    const H = img.naturalHeight;
+    const shapes = this.#displayShapes();
+    const content = sceneBounds(W, H, shapes);
+    const m = sceneMargin(W, H);
+    const area: Rect = { x: content.x - m, y: content.y - m, w: content.w + m * 2, h: content.h + m * 2 };
+    const prev = this.#area;
+    const sizeChanged = prev.x !== area.x || prev.y !== area.y || canvas.width !== area.w || canvas.height !== area.h;
+    this.#area = area;
+    this.#content = content;
+    if (canvas.width !== area.w || canvas.height !== area.h) {
+      canvas.width = area.w;
+      canvas.height = area.h;
     }
     const ctx = canvas.getContext('2d')!;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Off-image margin: a faint tint so it reads as scene, not image.
+    ctx.fillStyle = 'rgba(128, 128, 128, 0.14)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.translate(-area.x, -area.y);
+    if (content.x < 0 || content.y < 0 || content.w > W || content.h > H) {
+      // What exports will include beyond the image (it's white there).
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+      ctx.fillRect(content.x, content.y, content.w, content.h);
+    }
     ctx.drawImage(img, 0, 0);
-    const shapes = this.#displayShapes();
     drawShapes(ctx, shapes);
 
     const unit = 1 / this.#displayScale();
@@ -590,11 +703,11 @@ export class ScreenMarker extends LitElement {
       const pts = this.#handlePoints(handleShape);
       if (pts.length) drawHandles(ctx, pts, HANDLE_CSS_PX * unit);
     }
-    if (this.#store.selection.value?.type === 'image') drawImageSelectionOutline(ctx, canvas.width, canvas.height);
+    if (this.#store.selection.value?.type === 'image') drawImageSelectionOutline(ctx, W, H);
     if (this.#marquee) drawMarquee(ctx, this.#marquee.rect, unit);
 
     const region = this.#activeRegion();
-    if (region) drawRegionOverlay(ctx, region, HANDLE_CSS_PX * unit);
+    if (region) drawRegionOverlay(ctx, region, HANDLE_CSS_PX * unit, area);
     // canvas.width/height just changed the wrap's target size (#canvasWrapStyle
     // reads it) — re-render once so the wrap picks up the new box on first load.
     if (sizeChanged) this.requestUpdate();
@@ -628,7 +741,7 @@ export class ScreenMarker extends LitElement {
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+    return { x: (e.clientX - rect.left) * scaleX + this.#area.x, y: (e.clientY - rect.top) * scaleY + this.#area.y };
   }
 
   // ---------- pointer handling ----------
@@ -686,16 +799,28 @@ export class ScreenMarker extends LitElement {
     stage.scrollTop += after.top + fy * after.height - clientY;
   }
 
-  /** Zooms so the whole image fits in the stage, never above 100%. */
-  #fitToWindow(): void {
+  /**
+   * Zooms so the page content (the image plus anything drawn past it, not
+   * the empty margin) fits the stage, never above 100%, then centers it.
+   */
+  async #fitToWindow(): Promise<void> {
     const canvas = this.#canvasRef.value;
     const stage = this.#stageRef.value;
-    if (!canvas || !stage || !canvas.width || !this.#store.activePage.imageDataUrl) return;
+    const c = this.#content;
+    if (!canvas || !stage || !canvas.width || !c.w || !this.#store.activePage.imageDataUrl) return;
     const dpr = window.devicePixelRatio || 1;
     const availW = stage.clientWidth - 32;
     const availH = stage.clientHeight - 32;
     if (availW <= 0 || availH <= 0) return;
-    this.#store.setZoom(Math.min(1, (availW * dpr) / canvas.width, (availH * dpr) / canvas.height));
+    this.#store.setZoom(Math.min(1, (availW * dpr) / c.w, (availH * dpr) / c.h));
+    await this.updateComplete;
+    const rect = canvas.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
+    const scale = rect.width / canvas.width;
+    const cx = rect.left + (c.x - this.#area.x + c.w / 2) * scale;
+    const cy = rect.top + (c.y - this.#area.y + c.h / 2) * scale;
+    stage.scrollLeft += cx - (stageRect.left + stage.clientWidth / 2);
+    stage.scrollTop += cy - (stageRect.top + stage.clientHeight / 2);
   }
 
   #onPointerDown = (e: PointerEvent) => {
@@ -759,6 +884,14 @@ export class ScreenMarker extends LitElement {
       const hit = hitTestShapes(this.#store.activePage.shapes, pt);
       if (hit?.type === 'text') this.#startTextEdit(hit);
       else this.#startTextEdit(null, pt);
+      return;
+    }
+
+    if (tool === 'tag') {
+      e.preventDefault(); // same focus reason as the Text tool above
+      const hit = hitTestShapes(this.#store.activePage.shapes, pt);
+      if (hit?.type === 'tag') this.#startTextEdit(hit);
+      else this.#startTextEdit(null, pt, 'tag');
       return;
     }
 
@@ -871,7 +1004,7 @@ export class ScreenMarker extends LitElement {
       const { rect, additive } = this.#marquee;
       this.#marquee = null;
       if (rect.w < CLICK_THRESHOLD && rect.h < CLICK_THRESHOLD) {
-        if (!additive) this.#store.selection.set({ type: 'image' });
+        if (!additive) this.#store.selection.set(this.#insideImage(rect) ? { type: 'image' } : null);
       } else {
         const hits = shapesInRect(this.#store.activePage.shapes, rect).map((s) => s.id);
         this.#store.selectShapes(additive ? [...new Set([...this.#store.selectedIds, ...hits])] : hits);
@@ -897,39 +1030,54 @@ export class ScreenMarker extends LitElement {
       // the cursor" instead, same as the Select tool would.
       const hit = start ? hitTestShapes(this.#store.activePage.shapes, start) : null;
       if (hit && e.shiftKey) this.#store.toggleShapeSelected(hit.id);
-      else this.#store.selection.set(hit ? { type: 'shapes', ids: [hit.id] } : { type: 'image' });
+      else if (hit) this.#store.selection.set({ type: 'shapes', ids: [hit.id] });
+      else this.#store.selection.set(start && this.#insideImage(start) ? { type: 'image' } : null);
     } else if (points.length >= 2) {
       this.#store.addShape(this.#newShape(tool, points));
     }
     void this.#redraw();
   };
 
+  #insideImage(p: Point): boolean {
+    const img = this.#image?.img;
+    return !!img && p.x >= 0 && p.y >= 0 && p.x <= img.naturalWidth && p.y <= img.naturalHeight;
+  }
+
   #onDoubleClick = (e: MouseEvent) => {
     if (!this.#store.activePage.imageDataUrl) return;
     const hit = hitTestShapes(this.#store.activePage.shapes, this.#canvasPoint(e));
-    if (hit?.type === 'text') this.#startTextEdit(hit);
+    if (hit?.type === 'text' || hit?.type === 'tag') this.#startTextEdit(hit);
   };
+
+  #singleSelectedTag(): Shape | null {
+    const selected = this.#store.selectedShapes;
+    return selected.length === 1 && selected[0]!.type === 'tag' ? selected[0]! : null;
+  }
 
   // ---------- inline text editing ----------
 
-  #startTextEdit(shape: Shape | null, anchor?: Point): void {
+  #startTextEdit(shape: Shape | null, anchor?: Point, kind: 'text' | 'tag' = 'text'): void {
     this.#commitTextEdit();
     this.#textEdit = shape
       ? {
+          kind: shape.type === 'tag' ? 'tag' : 'text',
           id: shape.id,
           anchor: shape.points[0]!,
           value: shape.label ?? '',
           color: shape.color,
           fontSize: shape.fontSize ?? 18,
           fill: !!shape.fill,
+          tagArrow: shape.tagArrow ?? 'bottom-center',
         }
       : {
+          kind,
           id: null,
           anchor: anchor!,
           value: '',
           color: this.#store.activeColor.value,
           fontSize: this.#store.activeFontSize.value,
           fill: this.#store.activeFill.value,
+          tagArrow: this.#store.activeTagArrow.value,
         };
     if (shape) this.#store.selectShapes([shape.id]);
     this.#focusTextEdit = true;
@@ -947,12 +1095,14 @@ export class ScreenMarker extends LitElement {
       if (shape && !label) this.#store.deleteShapes([edit.id]);
       else if (shape && label !== shape.label) this.#store.replaceShape({ ...shape, label });
     } else if (label) {
-      const shape = this.#newShape('text', [edit.anchor]);
+      const shape = this.#newShape(edit.kind, [edit.anchor]);
       shape.label = label;
       shape.color = edit.color;
       shape.fontSize = edit.fontSize;
-      shape.fill = edit.fill;
+      if (edit.kind === 'tag') shape.tagArrow = edit.tagArrow;
+      else shape.fill = edit.fill;
       this.#store.addShape(shape);
+      this.#store.selectShapes([shape.id]);
     }
     this.requestUpdate();
   }
@@ -965,7 +1115,8 @@ export class ScreenMarker extends LitElement {
   #onTextKeydown = (e: KeyboardEvent) => {
     // Keep global shortcuts (tool keys, Delete, Cmd+Z…) out of the text field.
     e.stopPropagation();
-    if (e.key === 'Enter') {
+    // Tags are multi-line: Shift+Enter adds a line, Enter saves.
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       this.#commitTextEdit();
     } else if (e.key === 'Escape') {
@@ -978,11 +1129,55 @@ export class ScreenMarker extends LitElement {
     const edit = this.#textEdit;
     if (!edit) return '';
     const scale = this.#displayScale();
+    const ox = this.#area.x;
+    const oy = this.#area.y;
+    if (edit.kind === 'tag') {
+      const L = layoutTag({
+        id: '',
+        type: 'tag',
+        color: edit.color,
+        lineWidth: 1,
+        points: [edit.anchor],
+        label: edit.value,
+        fontSize: edit.fontSize,
+        tagArrow: edit.tagArrow,
+      });
+      const style = [
+        `left:${(L.box.x - ox) * scale}px`,
+        `top:${(L.box.y - oy) * scale}px`,
+        `min-width:${L.box.w * scale}px`,
+        `min-height:${L.box.h * scale}px`,
+        `max-width:${(L.fontSize * 16 + L.padX * 2) * scale}px`,
+        `font-size:${L.fontSize * scale}px`,
+        `line-height:${L.lineHeight * scale}px`,
+        `padding:${L.padY * scale}px ${L.padX * scale}px`,
+        `border-radius:${L.radius * scale}px`,
+        `color:${contrastColor(edit.color)}`,
+        `background:${edit.color}`,
+      ].join(';');
+      return html`
+        <textarea
+          ${ref(this.#textInputRef)}
+          class="text-editor tag-editor"
+          style=${style}
+          rows="1"
+          .value=${live(edit.value)}
+          placeholder="Explain this…"
+          @input=${(e: Event) => {
+            edit.value = (e.target as HTMLTextAreaElement).value;
+            this.requestUpdate();
+          }}
+          @keydown=${this.#onTextKeydown}
+          @blur=${() => this.#commitTextEdit()}
+          @pointerdown=${(e: Event) => e.stopPropagation()}
+        ></textarea>
+      `;
+    }
     const fontPx = edit.fontSize * scale;
     const pad = edit.fill ? edit.fontSize * 0.25 * scale : 0;
     const style = [
-      `left:${edit.anchor.x * scale - pad}px`,
-      `top:${edit.anchor.y * scale - pad}px`,
+      `left:${(edit.anchor.x - ox) * scale - pad}px`,
+      `top:${(edit.anchor.y - oy) * scale - pad}px`,
       `font-size:${fontPx}px`,
       `padding:${pad}px`,
       `width:calc(${Math.max(2, edit.value.length + 1)}ch + ${pad * 2}px)`,
@@ -1039,8 +1234,10 @@ export class ScreenMarker extends LitElement {
       return;
     }
 
-    const W = canvas.width;
-    const H = canvas.height;
+    const img = this.#image?.img;
+    if (!img) return;
+    const W = img.naturalWidth;
+    const H = img.naturalHeight;
     const dx = pt.x - drag.start.x;
     const dy = pt.y - drag.start.y;
     const o = drag.orig;
@@ -1095,11 +1292,12 @@ export class ScreenMarker extends LitElement {
     const canvas = this.#canvasRef.value;
     if (!r || !canvas || this.#regionDrag) return '';
     const scale = this.#displayScale();
+    const { x: ox, y: oy } = this.#area;
     const wrapH = canvas.height * scale;
-    const right = (r.x + r.w) * scale;
-    const top = Math.max(4, Math.min((r.y + r.h) * scale + 6, wrapH - 36));
+    const right = (r.x + r.w - ox) * scale;
+    const top = Math.max(4, Math.min((r.y + r.h - oy) * scale + 6, wrapH - 36));
     const alignLeft = right < 300;
-    const left = alignLeft ? Math.max(4, r.x * scale) : right;
+    const left = alignLeft ? Math.max(4, (r.x - ox) * scale) : right;
     return html`
       <div
         class="region-actions"
@@ -1173,6 +1371,7 @@ export class ScreenMarker extends LitElement {
       lineWidth: first && !SIZED_BY_FONT.includes(first.type) ? first.lineWidth : this.#store.activeLineWidth.value,
       fontSize: first?.fontSize ?? this.#store.activeFontSize.value,
       fill: first && FILLABLE.includes(first.type) ? !!first.fill : this.#store.activeFill.value,
+      tagArrow: first?.type === 'tag' ? (first.tagArrow ?? 'bottom-center') : this.#store.activeTagArrow.value,
     };
   }
 
@@ -1182,11 +1381,13 @@ export class ScreenMarker extends LitElement {
     if (style.lineWidth !== undefined) this.#store.activeLineWidth.set(style.lineWidth);
     if (style.fontSize !== undefined) this.#store.activeFontSize.set(style.fontSize);
     if (style.fill !== undefined) this.#store.activeFill.set(style.fill);
+    if (style.tagArrow !== undefined) this.#store.activeTagArrow.set(style.tagArrow);
     const edit = this.#textEdit;
     if (edit) {
       if (style.color !== undefined) edit.color = style.color;
       if (style.fontSize !== undefined) edit.fontSize = style.fontSize;
       if (style.fill !== undefined) edit.fill = style.fill;
+      if (style.tagArrow !== undefined) edit.tagArrow = style.tagArrow;
       this.requestUpdate();
     }
     this.#store.updateShapesStyle(this.#store.selectedIds, style);
@@ -1208,6 +1409,153 @@ export class ScreenMarker extends LitElement {
     } catch {
       // user cancelled (Esc)
     }
+  };
+
+  // ---------- folderfoo cloud ----------
+
+  #hasContent(): boolean {
+    return (
+      this.#store.pages.value.length > 1 ||
+      this.#store.pages.value.some((p) => p.imageDataUrl !== null || p.shapes.length > 0)
+    );
+  }
+
+  #setCloudName(name: string | null): void {
+    this.#cloudName = name;
+    setCloudNameInHash(name);
+    this.requestUpdate();
+  }
+
+  #onCloudFileChosen = (e: Event) => {
+    const name = (e as CustomEvent<{ name: string }>).detail?.name;
+    if (name) void this.#openCloudDocument(name, { confirmReplace: true });
+  };
+
+  async #openCloudDocument(name: string, { confirmReplace }: { confirmReplace: boolean }): Promise<void> {
+    if (confirmReplace && this.#hasContent() && name !== this.#cloudName) {
+      if (!window.confirm(`Open "${name}"? It will replace everything currently open. You can Undo (Cmd/Ctrl+Z) afterward.`)) return;
+    }
+    this.#commitTextEdit();
+    try {
+      const { pages, activePageId } = parseDocumentValue(await loadCloudDocument(name));
+      this.#store.loadDocument(pages, activePageId);
+      this.#setCloudName(name);
+      this.#clearRegion();
+      await this.updateComplete;
+      await this.#redraw();
+      this.#fitToWindow();
+      this.#flashStatus(`Opened "${name}"`);
+    } catch (err) {
+      const e = err as Error & { status?: number };
+      this.#flashStatus(e.status === 404 ? `"${name}" not found` : `Open failed: ${e.message}`);
+    }
+  }
+
+  /** Saves to the current cloud name (asking for one the first time, or always with `saveAs`). Resolves the name saved under, or null. */
+  async #saveToCloud(saveAs = false): Promise<string | null> {
+    this.#commitTextEdit();
+    let name = saveAs ? null : this.#cloudName;
+    if (!name) {
+      const typed = window.prompt('Save to folderfoo as:', this.#cloudName ?? `screenmarker-${new Date().toISOString().slice(0, 10)}`);
+      name = typed?.trim().replace(/\.json$/i, '') || null;
+      if (!name) return null;
+    }
+    this.#cloudBusy = true;
+    this.requestUpdate();
+    try {
+      await saveCloudDocument(name, documentValue(this.#store.pages.value, this.#store.activePageId.value));
+      this.#setCloudName(name);
+      this.#flashStatus(`Saved to folderfoo as "${name}"`);
+      return name;
+    } catch (err) {
+      const e = err as Error & { conflict?: boolean };
+      this.#flashStatus(
+        e.conflict
+          ? `"${name}" was changed elsewhere since you opened it. Open it again, or use Save as, then retry.`
+          : `Save failed: ${e.message}`
+      );
+      return null;
+    } finally {
+      this.#cloudBusy = false;
+      this.requestUpdate();
+    }
+  }
+
+  /** Saves the document, then copies a no-account link that opens it in presentation mode. */
+  #sharePresentation = async () => {
+    const name = await this.#saveToCloud();
+    if (!name) return;
+    try {
+      const { url, expiresAt } = await createPresentationLink(name);
+      await navigator.clipboard.writeText(url);
+      this.#flashStatus(`Presentation link copied — anyone with it can view (until ${new Date(expiresAt).toLocaleDateString()})`);
+    } catch (err) {
+      this.#flashStatus(`Share failed: ${(err as Error).message}`);
+    }
+  };
+
+  // ---------- presentation ----------
+
+  /** One slide per page that has an image: the page flattened with its annotations and tags. */
+  async #renderSlides(pages: Page[]): Promise<string[]> {
+    const withImages = pages.filter((p): p is Page & { imageDataUrl: string } => p.imageDataUrl !== null);
+    return Promise.all(withImages.map(async (p) => (await flattenPage(p.imageDataUrl, p.shapes)).canvas.toDataURL('image/png')));
+  }
+
+  #present = async () => {
+    this.#commitTextEdit();
+    const pages = this.#store.pages.value;
+    const withImages = pages.filter((p) => p.imageDataUrl !== null);
+    if (!withImages.length) return;
+    try {
+      const slides = await this.#renderSlides(pages);
+      const index = Math.max(0, withImages.findIndex((p) => p.id === this.#store.activePageId.value));
+      this.#presenting = { slides, index, publicView: false, heading: this.#cloudName ?? '', message: '' };
+      this.requestUpdate();
+    } catch (err) {
+      this.#flashStatus(`Present failed: ${(err as Error).message}`);
+    }
+  };
+
+  async #openPublicPresentation(token: string): Promise<void> {
+    this.#presenting = { slides: [], index: 0, publicView: true, heading: '', message: 'Loading…' };
+    this.requestUpdate();
+    try {
+      const { content, owner, path } = await loadPublicDocument(token);
+      this.#publicDoc = parseDocumentValue(content);
+      const slides = await this.#renderSlides(this.#publicDoc.pages);
+      this.#presenting = {
+        slides,
+        index: 0,
+        publicView: true,
+        heading: `${path.split('/').pop()} · ${owner}`,
+        message: slides.length ? '' : 'This presentation has no slides yet.',
+      };
+    } catch {
+      this.#presenting = { slides: [], index: 0, publicView: true, heading: '', message: 'This link is invalid or has expired.' };
+    }
+    this.requestUpdate();
+  }
+
+  #closePresenter = () => {
+    this.#presenting = null;
+    this.requestUpdate();
+  };
+
+  /** From a public link: copies the shown document into this browser's editor (not linked to the owner's file). */
+  #editPublicCopy = async () => {
+    const doc = this.#publicDoc;
+    if (!doc) return;
+    if (this.#hasContent() && !window.confirm('Replace what is open in your editor with a copy of this presentation? You can Undo (Cmd/Ctrl+Z) afterward.')) {
+      return;
+    }
+    this.#store.loadDocument(structuredClone(doc.pages), doc.activePageId);
+    this.#setCloudName(null);
+    this.#presenting = null;
+    void mountAccountUi();
+    await this.updateComplete;
+    await this.#redraw();
+    this.#fitToWindow();
   };
 
   // ---------- copy / export ----------
@@ -1274,6 +1622,7 @@ export class ScreenMarker extends LitElement {
       return;
     }
     this.#store.newDocument();
+    this.#setCloudName(null);
     this.#store.zoomReset();
   };
 
@@ -1480,6 +1829,7 @@ export class ScreenMarker extends LitElement {
           `
         )}
         <div class="tab-add" @click=${() => this.#addPage()} title="Add page">+</div>
+        ${this.#cloudName ? html`<span class="cloud-name" title="Saved in folderfoo">☁ ${this.#cloudName}</span>` : ''}
       </div>
 
       <div class="toolbar">
@@ -1559,6 +1909,16 @@ export class ScreenMarker extends LitElement {
         >
           ◼ Fill
         </button>
+        ${this.#store.activeTool.value === 'tag' || this.#store.selectedShapes.some((s) => s.type === 'tag')
+          ? html`
+              <select
+                title="Tag pointer (Shift+arrow keys jump to a side; Space cycles)"
+                @change=${(e: Event) => this.#applyStyle({ tagArrow: (e.target as HTMLSelectElement).value as TagArrow })}
+              >
+                ${TAG_ARROWS.map((a) => html`<option value=${a} ?selected=${style.tagArrow === a}>${TAG_ARROW_LABEL[a]}</option>`)}
+              </select>
+            `
+          : ''}
         <div class="spacer"></div>
         <div class="group">
           <button ?disabled=${noImage} @click=${() => this.#transformImage('rotate-ccw')} title="Rotate left">⟲</button>
@@ -1593,6 +1953,22 @@ export class ScreenMarker extends LitElement {
           <input type="file" accept="image/*" style="display:none" @change=${this.#onFilePick} />
           Open image…
         </label>
+        <div class="group">
+          <button @click=${() => void showFilePicker().catch((err: Error) => this.#flashStatus(`folderfoo unavailable: ${err.message}`))} title="Open a document from your folderfoo account">
+            ☁ Open…
+          </button>
+          <button
+            ?disabled=${this.#cloudBusy}
+            @click=${(e: MouseEvent) => void this.#saveToCloud(e.shiftKey)}
+            title=${this.#cloudName ? `Save to folderfoo as "${this.#cloudName}" (Shift+click: save as…)` : 'Save to your folderfoo account'}
+          >
+            ☁ Save
+          </button>
+          <button ?disabled=${noImage || this.#cloudBusy} @click=${this.#sharePresentation} title="Save, then copy a view-only presentation link anyone can open">
+            🔗 Share
+          </button>
+          <button ?disabled=${noImage} @click=${this.#present} title="Present all pages as slides">▶ Present</button>
+        </div>
         <button class="button-primary" ?disabled=${noImage} @click=${this.#copyImage}>📋 Copy Image</button>
         <button class="button-primary" ?disabled=${noImage} @click=${this.#copyCurrentPage}>📋 Copy Current Page</button>
         <button ?disabled=${noImage} @click=${this.#openPreview}>Preview</button>
@@ -1657,6 +2033,19 @@ export class ScreenMarker extends LitElement {
                 </div>
               </div>
             </div>
+          `
+        : ''}
+      ${this.#presenting
+        ? html`
+            <screen-marker-presenter
+              .slides=${this.#presenting.slides}
+              .index=${this.#presenting.index}
+              ?public-view=${this.#presenting.publicView}
+              heading=${this.#presenting.heading}
+              message=${this.#presenting.message}
+              @presenter-close=${this.#closePresenter}
+              @presenter-edit-copy=${this.#editPublicCopy}
+            ></screen-marker-presenter>
           `
         : ''}
     `;

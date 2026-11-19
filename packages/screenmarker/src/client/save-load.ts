@@ -11,8 +11,12 @@ export interface DocumentFile {
 }
 
 export function serializeDocument(pages: Page[], activePageId: string): string {
-  const file: DocumentFile = { format: FILE_FORMAT, version: FILE_VERSION, pages, activePageId };
-  return JSON.stringify(file, null, 2);
+  return JSON.stringify(documentValue(pages, activePageId), null, 2);
+}
+
+/** The in-memory document shape that both the .json file and a folderfoo cloud file hold. */
+export function documentValue(pages: Page[], activePageId: string): DocumentFile {
+  return { format: FILE_FORMAT, version: FILE_VERSION, pages, activePageId };
 }
 
 export function parseDocument(json: string): { pages: Page[]; activePageId: string } {
@@ -22,6 +26,12 @@ export function parseDocument(json: string): { pages: Page[]; activePageId: stri
   } catch {
     throw new Error('not valid JSON');
   }
+  return parseDocumentValue(parsed);
+}
+
+/** Validates an already-parsed document (from a file, or as folderfoo hands a stored value back). */
+export function parseDocumentValue(parsed: unknown): { pages: Page[]; activePageId: string } {
+  if (typeof parsed === 'string') return parseDocument(parsed);
   if (
     typeof parsed !== 'object' ||
     parsed === null ||

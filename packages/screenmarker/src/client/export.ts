@@ -1,4 +1,4 @@
-import { flattenPagesToCanvas, flattenToCanvas } from './render.js';
+import { flattenPage, flattenPagesToCanvas } from './render.js';
 import type { Page, Rect } from './types.js';
 
 function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
@@ -29,11 +29,11 @@ export async function downloadImage(pages: Page[]): Promise<void> {
 /** Copies region `r` of one page (image plus annotations, flattened) to the OS clipboard. */
 export async function copyRegion(page: Page, r: Rect): Promise<void> {
   if (!page.imageDataUrl) throw new Error('page has no image');
-  const full = await flattenToCanvas(page.imageDataUrl, page.shapes);
+  const { canvas: full, origin } = await flattenPage(page.imageDataUrl, page.shapes);
   const canvas = document.createElement('canvas');
   canvas.width = r.w;
   canvas.height = r.h;
-  canvas.getContext('2d')!.drawImage(full, -r.x, -r.y);
+  canvas.getContext('2d')!.drawImage(full, -(r.x + origin.x), -(r.y + origin.y));
   const blob = await canvasToBlob(canvas);
   await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
 }

@@ -1,5 +1,5 @@
 import { Signal, effect } from 'avosignals';
-import type { Page, Shape, Tool } from './types.js';
+import type { Page, Shape, TagArrow, Tool } from './types.js';
 import { loadSession, saveSession } from './persistence.js';
 import { getTabId } from './tab-identity.js';
 import { loadPreferences, savePreferences } from './preferences.js';
@@ -26,7 +26,7 @@ const PASTE_OFFSET = 16;
 export type Selection = { type: 'shapes'; ids: string[] } | { type: 'image' } | null;
 type Clipboard = { type: 'shapes'; shapes: Shape[] } | { type: 'image'; imageDataUrl: string } | null;
 
-export type ShapeStyle = { color?: string; lineWidth?: number; fontSize?: number; fill?: boolean };
+export type ShapeStyle = { color?: string; lineWidth?: number; fontSize?: number; fill?: boolean; tagArrow?: TagArrow };
 
 const initialPrefs = loadPreferences();
 
@@ -45,6 +45,7 @@ export class AnnotatorStore {
   activeLineWidth = new Signal<number>(initialPrefs.lineWidth);
   activeFontSize = new Signal<number>(initialPrefs.fontSize);
   activeFill = new Signal<boolean>(initialPrefs.fill);
+  activeTagArrow = new Signal<TagArrow>('bottom-center');
   zoom = new Signal<number>(1);
   previewZoom = new Signal<number>(1);
   selection = new Signal<Selection>(null);
@@ -253,12 +254,13 @@ export class AnnotatorStore {
         if (!set.has(s.id)) return s;
         const next: Shape = { ...s };
         if (style.color !== undefined) next.color = style.color;
-        const sized = s.type === 'text' || s.type === 'step';
+        const sized = s.type === 'text' || s.type === 'step' || s.type === 'tag';
         if (style.fontSize !== undefined && sized) next.fontSize = style.fontSize;
         if (style.lineWidth !== undefined && !sized) next.lineWidth = style.lineWidth;
         if (style.fill !== undefined && (s.type === 'rect' || s.type === 'ellipse' || s.type === 'text')) {
           next.fill = style.fill;
         }
+        if (style.tagArrow !== undefined && s.type === 'tag') next.tagArrow = style.tagArrow;
         return next;
       })
     );

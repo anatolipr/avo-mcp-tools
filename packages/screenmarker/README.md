@@ -16,6 +16,9 @@ Starts a local server and opens the app in your browser. Paste a screenshot (`Cm
 
 - **Annotate** with rectangles, ellipses, arrows, lines, text, numbered step markers, freehand pen, highlight, and blur/pixelate (for hiding secrets) — each with adjustable color and stroke width (or font size for text and steps). Rectangles and ellipses can be filled, and text can sit on a solid background box
 - **Select and edit** shapes after drawing: click, Shift+click, or drag a box to multi-select; move, resize (corner/edge handles, arrow/line endpoints), restyle, duplicate, reorder (front/back), or delete. Arrow keys nudge the selection (Shift for 10px)
+- **Tags** (`g`): speech-bubble callouts that explain part of a page. Place them anywhere — on the image or in the margin around it — with the pointer on any of 12 positions (or none, for a plain note). `Shift`+arrow keys jump the pointer to a side, `Space` cycles it; multi-line text with `Shift+Enter`. Anything drawn past the image edge is included in copies, downloads, and slides (on white)
+- **folderfoo account** (avatar, top right): sign in to **☁ Open…** and **☁ Save** documents in your folderfoo storage (`Shift`+click Save for "save as"). The open document's name is kept in the URL `#hash`, so a reload reopens it
+- **Share as a presentation**: **🔗 Share** saves the document and copies a view-only link anyone can open, no account needed. It opens as full-screen slides (one per page, with annotations and tags); viewers can step through, go fullscreen, or "Edit a copy" in their own editor. Links expire after 30 days and always show the latest saved version. **▶ Present** shows the same slides for the open document
 - **Inline text editing** — click with the Text tool to type in place; double-click any label to edit it
 - **Region select** (`m`): drag out a box, move or resize it by its body, edges, or corners, then **Copy selection** (`Cmd/Ctrl+C`, includes annotations) or **Crop selection** (`Enter`, crops the page image and keeps annotations editable; undoable). `Esc` clears it
 - **Rotate and flip** the image; annotations follow
@@ -26,7 +29,7 @@ Starts a local server and opens the app in your browser. Paste a screenshot (`Cm
 - **Copy to clipboard** or **download as PNG**, plus a **preview** of exactly what will be copied
 - **Save/load as a document file** (JSON) to resume annotating later. Note: the saved file keeps the original, un-blurred image so blur stays editable — share the exported PNG, not the document file, when blur hides something sensitive
 - **Undo/redo** and light/dark/auto theme
-- Keyboard-driven: tool shortcuts (`v` select, `m` region, `r` rect, `o` ellipse, `a` arrow, `l` line, `t` text, `n` step, `p` pen, `h` highlight, `b` blur), `[`/`]` for stroke or font size, `f` fit to window, `Cmd/Ctrl+A` select all, `Cmd/Ctrl+D` duplicate, `Cmd/Ctrl+]`/`[` bring to front/send to back, `,`/`.` to reorder pages, `←`/`→` to switch pages (when nothing is selected), `Cmd/Ctrl+S`/`O` to save/load
+- Keyboard-driven: tool shortcuts (`v` select, `m` region, `r` rect, `o` ellipse, `a` arrow, `l` line, `t` text, `g` tag, `n` step, `p` pen, `h` highlight, `b` blur), `[`/`]` for stroke or font size, `f` fit to window, `Cmd/Ctrl+A` select all, `Cmd/Ctrl+D` duplicate, `Cmd/Ctrl+]`/`[` bring to front/send to back, `,`/`.` to reorder pages, `←`/`→` to switch pages (when nothing is selected), `Cmd/Ctrl+S`/`O` to save/load
 
 ## Deploying to the web
 

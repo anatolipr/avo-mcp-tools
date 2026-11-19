@@ -298,6 +298,27 @@ export const screenMarkerStyles = css`
       font-weight: bold;
       line-height: 1.2;
       min-width: 2ch;
+      field-sizing: content;
+    }
+    .tag-editor {
+      border: none;
+      resize: none;
+      overflow: hidden;
+      white-space: pre-wrap;
+      field-sizing: content;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+      box-sizing: border-box;
+    }
+    .cloud-name {
+      margin-left: auto;
+      margin-right: 84px;
+      font-size: 12px;
+      opacity: 0.7;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 40vw;
+      padding-bottom: 6px;
     }
     .color-input {
       width: 26px;
