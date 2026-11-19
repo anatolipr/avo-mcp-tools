@@ -16,12 +16,13 @@ Starts a local server and opens the app in your browser. Paste a screenshot (`Cm
 
 - **Annotate** with rectangles, arrows, text labels, freehand pen, and highlight — each with adjustable color and stroke width (or font size for text)
 - **Select and edit** any shape after drawing it: move, restyle, or delete
+- **Region select** (`m`): drag out a box, move or resize it by its body, edges, or corners, then **Copy selection** (`Cmd/Ctrl+C`, includes annotations) or **Crop selection** (`Enter`, crops the page image and keeps annotations editable; undoable). `Esc` clears it
 - **Multi-page documents** — add multiple screenshots as tabs, reorder them by dragging, and copy/export them together as one stacked image or individually
 - **Paste, drag-and-drop, or file picker** to load images
 - **Copy to clipboard** or **download as PNG**, plus a **preview** of exactly what will be copied
 - **Save/load as a document file** (JSON) to resume annotating later
 - **Undo/redo**, zoom, and light/dark/auto theme
-- Keyboard-driven: tool shortcuts (`v` select, `r` rect, `a` arrow, `t` text, `p` pen, `h` highlight), `[`/`]` for stroke or font size, `,`/`.` to reorder pages, arrow keys to switch pages, `Cmd/Ctrl+S`/`O` to save/load
+- Keyboard-driven: tool shortcuts (`v` select, `m` region, `r` rect, `a` arrow, `t` text, `p` pen, `h` highlight), `[`/`]` for stroke or font size, `,`/`.` to reorder pages, arrow keys to switch pages, `Cmd/Ctrl+S`/`O` to save/load
 
 ## Deploying to the web
 

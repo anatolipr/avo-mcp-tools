@@ -1,6 +1,6 @@
 {
   "name": "screenmarker",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "type": "module",
   "description": "Paste a screenshot, annotate it with arrows/boxes/text/pen/highlight, and copy the flattened image back to the clipboard.",
   "repository": {
@@ -30,7 +30,7 @@
     "start": "node bin/screenmarker.js",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.client.json",
-    "stop": "kill -9 $(lsof -ti :${PORT:-8766}) 2>/dev/null && echo 'Server stopped' || echo 'No server running'"
+    "stop": "kill -9 $(lsof -ti :${PORT:-8768}) 2>/dev/null && echo 'Server stopped' || echo 'No server running'"
   },
   "dependencies": {
     "avosignals": "^1.0.16",

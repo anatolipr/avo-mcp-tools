@@ -1,4 +1,4 @@
-import type { Page, Point, Shape } from './types.js';
+import type { Page, Point, Rect, Shape } from './types.js';
 
 function drawArrowhead(ctx: CanvasRenderingContext2D, from: { x: number; y: number }, to: { x: number; y: number }, lineWidth: number): void {
   const angle = Math.atan2(to.y - from.y, to.x - from.x);
@@ -172,6 +172,52 @@ export function drawImageSelectionOutline(ctx: CanvasRenderingContext2D, width: 
     10,
     10
   );
+}
+
+/**
+ * Region-select overlay: dims everything outside the region, outlines it
+ * with zebra dashes, and draws eight resize handles. `handleSize` is in
+ * canvas pixels so callers can keep handles a constant on-screen size
+ * regardless of zoom / devicePixelRatio.
+ */
+export function drawRegionOverlay(ctx: CanvasRenderingContext2D, r: Rect, handleSize: number): void {
+  const { width, height } = ctx.canvas;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+  ctx.fillRect(0, 0, width, r.y);
+  ctx.fillRect(0, r.y + r.h, width, height - r.y - r.h);
+  ctx.fillRect(0, r.y, r.x, r.h);
+  ctx.fillRect(r.x + r.w, r.y, width - r.x - r.w, r.h);
+  ctx.restore();
+
+  const lineWidth = handleSize / 5;
+  strokeZebraDashes(ctx, () => ctx.strokeRect(r.x, r.y, r.w, r.h), lineWidth, lineWidth * 4, lineWidth * 4);
+
+  ctx.save();
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#000000';
+  ctx.lineWidth = lineWidth;
+  const half = handleSize / 2;
+  for (const hx of [r.x, r.x + r.w / 2, r.x + r.w]) {
+    for (const hy of [r.y, r.y + r.h / 2, r.y + r.h]) {
+      if (hx === r.x + r.w / 2 && hy === r.y + r.h / 2) continue;
+      ctx.fillRect(hx - half, hy - half, handleSize, handleSize);
+      ctx.strokeRect(hx - half, hy - half, handleSize, handleSize);
+    }
+  }
+  ctx.restore();
+}
+
+/** Returns a PNG data URL of just the background image cut to `r` — no annotations baked in. */
+export async function cropImageDataUrl(imageDataUrl: string, r: Rect): Promise<string> {
+  const img = new Image();
+  img.src = imageDataUrl;
+  await img.decode();
+  const canvas = document.createElement('canvas');
+  canvas.width = r.w;
+  canvas.height = r.h;
+  canvas.getContext('2d')!.drawImage(img, -r.x, -r.y);
+  return canvas.toDataURL('image/png');
 }
 
 export async function flattenToCanvas(imageDataUrl: string, shapes: Shape[]): Promise<HTMLCanvasElement> {

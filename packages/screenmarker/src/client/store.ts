@@ -209,6 +209,29 @@ export class AnnotatorStore {
     );
   }
 
+  /**
+   * Replaces the active page's image with an already-cropped one and shifts
+   * every shape by (-dx, -dy) so annotations stay put relative to the image
+   * content. Shapes left fully outside the new bounds are kept (they just
+   * won't render) so Undo is the only thing that ever drops content. Undoable.
+   */
+  cropActivePage(imageDataUrl: string, dx: number, dy: number): void {
+    this.#snapshot();
+    const pageId = this.activePageId.value;
+    this.pages.update((pages) =>
+      pages.map((p) =>
+        p.id === pageId
+          ? {
+              ...p,
+              imageDataUrl,
+              shapes: p.shapes.map((s) => ({ ...s, points: s.points.map((pt) => ({ x: pt.x - dx, y: pt.y - dy })) })),
+            }
+          : p
+      )
+    );
+    this.selection.set(null);
+  }
+
   /** Updates a shape's color, lineWidth, and/or fontSize in place. Undoable as a single step. */
   updateShapeStyle(id: string, style: { color?: string; lineWidth?: number; fontSize?: number }): void {
     this.#snapshot();

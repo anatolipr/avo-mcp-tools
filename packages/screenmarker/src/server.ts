@@ -11,7 +11,7 @@ const packageRoot = __dirname.endsWith(`${path.sep}dist${path.sep}src`)
   ? path.join(__dirname, '..', '..')
   : path.join(__dirname, '..');
 
-const PORT = process.env.PORT ? Number(process.env.PORT) : 8766;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 8768;
 const STATIC_DIR = path.join(packageRoot, 'dist', 'client');
 
 const MIME_TYPES: Record<string, string> = {

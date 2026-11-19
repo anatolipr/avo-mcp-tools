@@ -1,5 +1,5 @@
 export type ShapeType = 'rect' | 'arrow' | 'text' | 'pen' | 'highlight';
-export type Tool = ShapeType | 'select';
+export type Tool = ShapeType | 'select' | 'region';
 
 export interface Point {
   x: number;
@@ -24,4 +24,12 @@ export interface Page {
   name: string;
   imageDataUrl: string | null;
   shapes: Shape[];
+}
+
+/** Axis-aligned rectangle in canvas (image) pixels. */
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }

@@ -2,13 +2,23 @@ import { LitElement, html, css } from 'lit';
 import { createRef, ref } from 'lit/directives/ref.js';
 import { SignalWatcher } from 'avosignals';
 import { AnnotatorStore } from './store.js';
-import { drawShapes, drawShape, drawSelectionOutline, drawImageSelectionOutline, hitTestShapes, flattenPagesToCanvas } from './render.js';
-import { copyImageOnly, downloadImage } from './export.js';
+import {
+  drawShapes,
+  drawShape,
+  drawSelectionOutline,
+  drawImageSelectionOutline,
+  drawRegionOverlay,
+  cropImageDataUrl,
+  hitTestShapes,
+  flattenPagesToCanvas,
+} from './render.js';
+import { copyImageOnly, copyRegion, downloadImage } from './export.js';
 import { downloadDocument, readDocumentFile } from './save-load.js';
-import type { Point, Shape, Tool } from './types.js';
+import type { Point, Rect, Shape, Tool } from './types.js';
 
 const TOOLS: { type: Tool; label: string; icon: string; key: string }[] = [
   { type: 'select', label: 'Select', icon: '↖', key: 'v' },
+  { type: 'region', label: 'Region', icon: '⬚', key: 'm' },
   { type: 'rect', label: 'Rectangle', icon: '▭', key: 'r' },
   { type: 'arrow', label: 'Arrow', icon: '↗', key: 'a' },
   { type: 'text', label: 'Text', icon: 'T', key: 't' },
@@ -24,6 +34,32 @@ const FONT_SIZES = [12, 14, 18, 24, 32, 48, 64];
 // draw tool active is treated as a click-to-select rather than a real drag —
 // a shape that small would be a useless zero-size artifact anyway.
 const CLICK_THRESHOLD = 3;
+
+// Region-select handles, in CSS pixels (converted to canvas pixels per zoom).
+const REGION_HANDLE_CSS_PX = 9;
+
+/** Which part of the region a drag grabbed: an edge/corner (compass letters) or the body. */
+type RegionGrab = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
+
+const REGION_CURSOR: Record<RegionGrab, string> = {
+  move: 'move',
+  n: 'ns-resize',
+  s: 'ns-resize',
+  e: 'ew-resize',
+  w: 'ew-resize',
+  ne: 'nesw-resize',
+  sw: 'nesw-resize',
+  nw: 'nwse-resize',
+  se: 'nwse-resize',
+};
+
+function normalizeRect(x1: number, y1: number, x2: number, y2: number, maxW: number, maxH: number): Rect {
+  const left = Math.max(0, Math.min(x1, x2));
+  const top = Math.max(0, Math.min(y1, y2));
+  const right = Math.min(maxW, Math.max(x1, x2));
+  const bottom = Math.min(maxH, Math.max(y1, y2));
+  return { x: Math.round(left), y: Math.round(top), w: Math.round(right - left), h: Math.round(bottom - top) };
+}
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -237,6 +273,29 @@ export class ScreenMarker extends LitElement {
       display: block;
       transform-origin: 0 0;
     }
+    .region-actions {
+      position: absolute;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+      white-space: nowrap;
+      z-index: 2;
+    }
+    .region-actions button {
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+    .region-size {
+      font-size: 11px;
+      opacity: 0.7;
+      padding: 0 4px;
+      font-variant-numeric: tabular-nums;
+    }
     .zoom-controls {
       display: inline-flex;
       align-items: center;
@@ -330,6 +389,12 @@ export class ScreenMarker extends LitElement {
   #dragOverSide: 'before' | 'after' | null = null;
   #justMovedPageId: string | null = null;
   #theme: ThemeMode = loadTheme();
+  // Region-select state is transient UI (not document content), so it lives
+  // here rather than in the store/undo history. Tied to a page id so it
+  // never leaks onto another page after switching tabs.
+  #region: { pageId: string; rect: Rect } | null = null;
+  #regionDrag: { grab: RegionGrab | 'create'; start: Point; orig: Rect } | null = null;
+  #canvasCursor = '';
 
   constructor() {
     super();
@@ -397,6 +462,25 @@ export class ScreenMarker extends LitElement {
       e.preventDefault();
       this.#closePreview();
       return;
+    }
+
+    const region = this.#activeRegion();
+    if (region && !typing) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this.#clearRegion();
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        void this.#cropRegion();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        void this.#copyRegion();
+        return;
+      }
     }
 
     if (e.key === ' ' && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -489,10 +573,12 @@ export class ScreenMarker extends LitElement {
     if (e.key.toLowerCase() === 'z' && e.shiftKey) {
       e.preventDefault();
       this.#store.redo();
+      this.#clearRegion();
       this.#redraw();
     } else if (e.key.toLowerCase() === 'z') {
       e.preventDefault();
       this.#store.undo();
+      this.#clearRegion();
       this.#redraw();
     } else if (e.key === '=' || e.key === '+') {
       e.preventDefault();
@@ -535,6 +621,7 @@ export class ScreenMarker extends LitElement {
   async #loadImageFile(file: File): Promise<void> {
     const dataUrl = await fileToDataUrl(file);
     this.#store.setImage(this.#store.activePageId.value, dataUrl);
+    this.#clearRegion();
     this.#store.zoomReset();
     await this.updateComplete;
     this.#redraw();
@@ -599,6 +686,8 @@ export class ScreenMarker extends LitElement {
     } else if (sel?.type === 'image') {
       drawImageSelectionOutline(ctx, canvas.width, canvas.height);
     }
+    const region = this.#activeRegion();
+    if (region) drawRegionOverlay(ctx, region, this.#regionHandleSize());
     // canvas.width/height just changed the wrap's target size (#canvasWrapStyle
     // reads it) — re-render once so the wrap picks up the new box on first load.
     if (sizeChanged) this.requestUpdate();
@@ -624,6 +713,18 @@ export class ScreenMarker extends LitElement {
     if (!this.#store.activePage.imageDataUrl) return;
     const tool = this.#store.activeTool.value;
     const pt = this.#canvasPoint(e);
+
+    if (tool === 'region') {
+      const current = this.#activeRegion();
+      const grab = current ? this.#regionGrabAt(current, pt) : null;
+      this.#regionDrag =
+        current && grab
+          ? { grab, start: pt, orig: current }
+          : { grab: 'create', start: pt, orig: { x: pt.x, y: pt.y, w: 0, h: 0 } };
+      if (this.#store.selection.value) this.#store.selection.set(null);
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
 
     if (tool === 'select') {
       const hit = hitTestShapes(this.#store.activePage.shapes, pt);
@@ -664,6 +765,11 @@ export class ScreenMarker extends LitElement {
   };
 
   #onPointerMove = (e: PointerEvent) => {
+    if (this.#store.activeTool.value === 'region') {
+      this.#onRegionPointerMove(e);
+      return;
+    }
+
     if (this.#movingShapeId && this.#dragStart) {
       const pt = this.#canvasPoint(e);
       this.#moveDelta = { x: pt.x - this.#dragStart.x, y: pt.y - this.#dragStart.y };
@@ -684,6 +790,14 @@ export class ScreenMarker extends LitElement {
   };
 
   #onPointerUp = (e: PointerEvent) => {
+    if (this.#regionDrag) {
+      const r = this.#region?.rect;
+      this.#regionDrag = null;
+      if (!r || r.w < CLICK_THRESHOLD || r.h < CLICK_THRESHOLD) this.#clearRegion();
+      else this.requestUpdate();
+      return;
+    }
+
     if (this.#movingShapeId) {
       const id = this.#movingShapeId;
       const { x: dx, y: dy } = this.#moveDelta;
@@ -707,13 +821,15 @@ export class ScreenMarker extends LitElement {
     // #drawing is only ever set true for draw tools (select/text return early
     // in #onPointerDown before reaching setPointerCapture), so tool here is
     // always a real ShapeType — but narrow explicitly rather than casting.
-    if (tool !== 'select' && dragDistance < CLICK_THRESHOLD) {
+    if (tool === 'select' || tool === 'region') {
+      // Unreachable (#drawing is only set for draw tools); narrows `tool` to ShapeType below.
+    } else if (dragDistance < CLICK_THRESHOLD) {
       // A click (no real drag) with a draw tool active would only produce a
       // degenerate zero-size shape — treat it as "select whatever's under
       // the cursor" instead, same as the Select tool would.
       const hit = start ? hitTestShapes(this.#store.activePage.shapes, start) : null;
       this.#store.selection.set(hit ? { type: 'shape', id: hit.id } : { type: 'image' });
-    } else if (tool !== 'select' && this.#currentPoints.length >= 2) {
+    } else if (this.#currentPoints.length >= 2) {
       this.#store.addShape({
         id: makeId(),
         type: tool,
@@ -731,7 +847,7 @@ export class ScreenMarker extends LitElement {
     const page = this.#store.activePage;
     const canvas = this.#canvasRef.value;
     const tool = this.#store.activeTool.value;
-    if (!canvas || !page.imageDataUrl || tool === 'select') return;
+    if (!canvas || !page.imageDataUrl || tool === 'select' || tool === 'region') return;
     const img = new Image();
     img.src = page.imageDataUrl;
     await img.decode();
@@ -770,6 +886,141 @@ export class ScreenMarker extends LitElement {
       drawShape(ctx, moved);
       drawSelectionOutline(ctx, moved);
     }
+  }
+
+  /** The region on the active page, only while the Region tool is active. */
+  #activeRegion(): Rect | null {
+    if (this.#store.activeTool.value !== 'region') return null;
+    if (!this.#region || this.#region.pageId !== this.#store.activePageId.value) return null;
+    return this.#region.rect;
+  }
+
+  #clearRegion(): void {
+    if (!this.#region) return;
+    this.#region = null;
+    this.#regionDrag = null;
+    this.requestUpdate();
+  }
+
+  /** Handle size in canvas pixels, so handles stay ~REGION_HANDLE_CSS_PX on screen at any zoom. */
+  #regionHandleSize(): number {
+    return REGION_HANDLE_CSS_PX / this.#displayScale();
+  }
+
+  /** What part of region `r` is under `pt`: a corner, an edge, the body, or nothing. */
+  #regionGrabAt(r: Rect, pt: Point): RegionGrab | null {
+    const tol = this.#regionHandleSize();
+    const inX = pt.x >= r.x - tol && pt.x <= r.x + r.w + tol;
+    const inY = pt.y >= r.y - tol && pt.y <= r.y + r.h + tol;
+    if (!inX || !inY) return null;
+    const v = Math.abs(pt.y - r.y) <= tol ? 'n' : Math.abs(pt.y - (r.y + r.h)) <= tol ? 's' : '';
+    const h = Math.abs(pt.x - r.x) <= tol ? 'w' : Math.abs(pt.x - (r.x + r.w)) <= tol ? 'e' : '';
+    return v || h ? ((v + h) as RegionGrab) : 'move';
+  }
+
+  #onRegionPointerMove(e: PointerEvent): void {
+    const canvas = this.#canvasRef.value;
+    if (!canvas) return;
+    const pt = this.#canvasPoint(e);
+    const drag = this.#regionDrag;
+
+    if (!drag) {
+      const current = this.#activeRegion();
+      const grab = current ? this.#regionGrabAt(current, pt) : null;
+      const cursor = grab ? REGION_CURSOR[grab] : 'crosshair';
+      if (cursor !== this.#canvasCursor) {
+        this.#canvasCursor = cursor;
+        this.requestUpdate();
+      }
+      return;
+    }
+
+    const W = canvas.width;
+    const H = canvas.height;
+    const dx = pt.x - drag.start.x;
+    const dy = pt.y - drag.start.y;
+    const o = drag.orig;
+    let rect: Rect;
+
+    if (drag.grab === 'create') {
+      rect = normalizeRect(drag.start.x, drag.start.y, pt.x, pt.y, W, H);
+    } else if (drag.grab === 'move') {
+      rect = {
+        x: Math.round(Math.max(0, Math.min(W - o.w, o.x + dx))),
+        y: Math.round(Math.max(0, Math.min(H - o.h, o.y + dy))),
+        w: o.w,
+        h: o.h,
+      };
+    } else {
+      // Dragging an edge past the opposite one flips the rect (normalizeRect re-sorts the sides).
+      let left = o.x;
+      let top = o.y;
+      let right = o.x + o.w;
+      let bottom = o.y + o.h;
+      if (drag.grab.includes('w')) left += dx;
+      if (drag.grab.includes('e')) right += dx;
+      if (drag.grab.includes('n')) top += dy;
+      if (drag.grab.includes('s')) bottom += dy;
+      rect = normalizeRect(left, top, right, bottom, W, H);
+    }
+
+    this.#region = { pageId: this.#store.activePageId.value, rect };
+    this.requestUpdate();
+  }
+
+  #copyRegion = async () => {
+    const r = this.#activeRegion();
+    if (!r) return;
+    try {
+      await copyRegion(this.#store.activePage, r);
+      this.#flashStatus('Selection copied to clipboard');
+    } catch (err) {
+      this.#flashStatus(`Copy failed: ${(err as Error).message}`);
+    }
+  };
+
+  /** Crops the active page's image to the region; annotations shift with it and stay editable. Undoable. */
+  #cropRegion = async () => {
+    const r = this.#activeRegion();
+    const page = this.#store.activePage;
+    if (!r || !page.imageDataUrl) return;
+    try {
+      const cropped = await cropImageDataUrl(page.imageDataUrl, r);
+      this.#store.cropActivePage(cropped, r.x, r.y);
+      this.#clearRegion();
+      await this.updateComplete;
+      this.#redraw();
+      this.#flashStatus('Cropped (Cmd/Ctrl+Z to undo)');
+    } catch (err) {
+      this.#flashStatus(`Crop failed: ${(err as Error).message}`);
+    }
+  };
+
+  /** Floating Copy/Crop bar anchored under the region's bottom-right corner, kept inside the canvas box. Hidden mid-drag. */
+  #regionActions() {
+    const r = this.#activeRegion();
+    const canvas = this.#canvasRef.value;
+    if (!r || !canvas || this.#regionDrag) return '';
+    const scale = this.#displayScale();
+    const wrapH = canvas.height * scale;
+    const right = (r.x + r.w) * scale;
+    const top = Math.max(4, Math.min((r.y + r.h) * scale + 6, wrapH - 36));
+    const alignLeft = right < 300;
+    const left = alignLeft ? Math.max(4, r.x * scale) : right;
+    return html`
+      <div
+        class="region-actions"
+        style="left:${left}px; top:${top}px; ${alignLeft ? '' : 'transform: translateX(-100%);'}"
+        @pointerdown=${(e: Event) => e.stopPropagation()}
+      >
+        <span class="region-size">${r.w}×${r.h}</span>
+        <button class="button-primary" @click=${this.#copyRegion} title="Copy selection, with annotations (Cmd/Ctrl+C)">
+          📋 Copy selection
+        </button>
+        <button @click=${this.#cropRegion} title="Crop image to selection (Enter)">✂ Crop selection</button>
+        <button @click=${() => this.#clearRegion()} title="Clear selection (Esc)">✕</button>
+      </div>
+    `;
   }
 
   async #flashStatus(msg: string): Promise<void> {
@@ -1206,11 +1457,14 @@ export class ScreenMarker extends LitElement {
               >
                 <canvas
                   ${ref(this.#canvasRef)}
-                  style="transform: scale(${this.#displayScale()})"
+                  style="transform: scale(${this.#displayScale()}); cursor: ${
+                    this.#store.activeTool.value === 'region' ? this.#canvasCursor || 'crosshair' : 'default'
+                  }"
                   @pointerdown=${this.#onPointerDown}
                   @pointermove=${this.#onPointerMove}
                   @pointerup=${this.#onPointerUp}
                 ></canvas>
+                ${this.#regionActions()}
               </div>
             `
           : html`<div class="empty">Paste a screenshot (Cmd/Ctrl+V), drag one in, or use "Open image…" above.</div>`}
