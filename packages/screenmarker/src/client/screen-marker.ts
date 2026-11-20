@@ -17,6 +17,8 @@ import {
   focusBounds,
   hitTestShapes,
   layoutTag,
+  magnifierRadii,
+  DEFAULT_MAGNIFY,
   preloadPictures,
   sceneBounds,
   shapeBounds,
@@ -26,6 +28,9 @@ import {
   type ImageTransform,
 } from './render.js';
 import { copyImageOnly, copyRegion, downloadImage } from './export.js';
+import { findText, recognizeLines } from './ocr.js';
+import { diffRegions } from './diff.js';
+import { pagesToMarkdown } from './markdown.js';
 import { documentValue, downloadDocument, parseDocumentValue, readDocumentFile } from './save-load.js';
 import { screenMarkerStyles } from './styles.js';
 import {
@@ -59,6 +64,7 @@ const TOOLS: { type: Tool; label: string; icon: string; key: string }[] = [
   { type: 'pen', label: 'Pen', icon: '✎', key: 'p' },
   { type: 'highlight', label: 'Highlight', icon: '▮', key: 'h' },
   { type: 'blur', label: 'Blur', icon: '▦', key: 'b' },
+  { type: 'magnifier', label: 'Magnifier (drag from the spot to where the lens goes)', icon: '🔍', key: 'm' },
 ];
 
 const COLORS = ['#ff3b30', '#ffcc00', '#34c759', '#007aff', '#000000', '#ffffff'];
@@ -118,7 +124,10 @@ const GRAB_CURSOR: Record<BoxGrab, string> = {
 
 type ShapeDrag =
   | { kind: 'move'; ids: string[]; start: Point; delta: Point; selectOnlyOnClick: string | null }
-  | { kind: 'resize'; orig: Shape; grab: BoxGrab | 0 | 1; start: Point; draft: Shape | null };
+  // The page image itself, dragged while selected; committed by moving every shape the other way.
+  | { kind: 'image'; start: Point; delta: Point }
+  // grab 2: a magnifier's lens-radius handle.
+  | { kind: 'resize'; orig: Shape; grab: BoxGrab | 0 | 1 | 2; start: Point; draft: Shape | null };
 
 type TextEdit = {
   kind: 'text' | 'tag' | 'step';
@@ -193,6 +202,9 @@ function squareFrom(a: Point, b: Point): Point {
 }
 
 const BOX_DRAWN: ShapeType[] = ['rect', 'ellipse', 'highlight', 'blur'];
+
+/** Shapes a "reveal" page shows one per click when presenting. */
+const REVEALED: ShapeType[] = ['tag', 'step', 'magnifier'];
 
 type MenuItem =
   | { label: string; run: () => void; shortcut?: string; disabled?: boolean; danger?: boolean }
@@ -278,6 +290,10 @@ export class ScreenMarker extends LitElement {
   // Region select is tied to a page id so it never leaks onto another page after switching tabs.
   #region: { pageId: string; rect: Rect } | null = null;
   #regionDrag: { grab: BoxGrab | 'create'; start: Point; orig: Rect; additive: boolean } | null = null;
+  // Find-text bar (Cmd/Ctrl+F): matches are boxes in the page image's coordinates.
+  #search: { pageId: string; query: string; hits: Rect[]; index: number; status: string } | null = null;
+  #searchTimer: ReturnType<typeof setTimeout> | undefined;
+  #searchInputRef = createRef<HTMLInputElement>();
   #textEdit: TextEdit | null = null;
   #focusTextEdit = false;
   #selectOnFocus = true;
@@ -461,6 +477,12 @@ export class ScreenMarker extends LitElement {
       return;
     }
 
+    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f' && this.#store.activePage.imageDataUrl) {
+      e.preventDefault();
+      this.#openSearch();
+      return;
+    }
+
     if (typing) return;
 
     const region = this.#activeRegion();
@@ -543,6 +565,13 @@ export class ScreenMarker extends LitElement {
         const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
         const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
         this.#store.moveShapes(selectedIds, dx, dy);
+      } else if (this.#store.selection.value?.type === 'image') {
+        // Nudging the page image moves every shape the other way (shapes are relative to it).
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+        void this.#commitImageMove({ x: dx, y: dy }, true);
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         this.#gotoAdjacentPage(e.key === 'ArrowLeft' ? -1 : 1);
@@ -817,6 +846,13 @@ export class ScreenMarker extends LitElement {
     if (FILLABLE.includes(type)) shape.fill = this.#store.activeFill.value;
     if (SIZED_BY_FONT.includes(type)) shape.fontSize = this.#store.activeFontSize.value;
     if (type === 'tag') shape.tagArrow = this.#store.activeTagArrow.value;
+    if (type === 'magnifier') {
+      // A lens about a fifth of the page image's shorter side reads well at any resolution.
+      const img = this.#image?.img;
+      const side = img ? Math.min(img.naturalWidth, img.naturalHeight) : 400;
+      shape.lensRadius = Math.max(40, Math.round(side * 0.1));
+      shape.magnify = DEFAULT_MAGNIFY;
+    }
     return shape;
   }
 
@@ -846,14 +882,19 @@ export class ScreenMarker extends LitElement {
     ctx.translate(-area.x, -area.y);
     // The empty space around the image stays transparent (the stage shows
     // through); only the image itself gets a drop shadow to stand out.
+    // While the page image is being dragged it draws at its drag offset; shapes stay put.
+    const imageDrag = this.#shapeDrag?.kind === 'image' ? this.#shapeDrag.delta : { x: 0, y: 0 };
     ctx.save();
+    ctx.translate(imageDrag.x, imageDrag.y);
     ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
     ctx.shadowBlur = 16 / this.#displayScale();
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, W, H);
-    ctx.restore();
+    ctx.shadowColor = 'transparent';
     ctx.drawImage(img, 0, 0);
+    ctx.restore();
     drawShapes(ctx, shapes);
+    this.#drawSearchHits(ctx);
 
     const unit = 1 / this.#displayScale();
     const selected = new Set(this.#store.selectedIds);
@@ -864,7 +905,12 @@ export class ScreenMarker extends LitElement {
       const pts = this.#handlePoints(handleShape);
       if (pts.length) drawHandles(ctx, pts, HANDLE_CSS_PX * unit);
     }
-    if (this.#store.selection.value?.type === 'image') drawImageSelectionOutline(ctx, W, H);
+    if (this.#store.selection.value?.type === 'image') {
+      ctx.save();
+      ctx.translate(imageDrag.x, imageDrag.y);
+      drawImageSelectionOutline(ctx, W, H);
+      ctx.restore();
+    }
 
     const region = this.#activeRegion();
     if (region) drawRegionOverlay(ctx, region, HANDLE_CSS_PX * unit, area);
@@ -876,13 +922,25 @@ export class ScreenMarker extends LitElement {
   /** Resize-handle positions for a shape: two endpoints for arrows/lines, 8 box handles for box-like shapes, none for text/steps (sized via font size). */
   #handlePoints(shape: Shape): Point[] {
     if (shape.type === 'arrow' || shape.type === 'line') return shape.points.slice(0, 2);
+    if (shape.type === 'magnifier') return this.#magnifierHandles(shape);
     if (BOX_RESIZABLE.includes(shape.type)) return boxHandlePoints(boundsRect(shape));
     return [];
   }
 
+  /** A magnifier's handles: the spot (0), the lens center (1), and the lens radius on its right edge (2). */
+  #magnifierHandles(shape: Shape): Point[] {
+    const [s, l] = shape.points;
+    if (!s || !l) return [];
+    return [s, l, { x: l.x + magnifierRadii(shape).lens, y: l.y }];
+  }
+
   /** Which resize handle of `shape` is under `pt`, if any: an endpoint index for arrows/lines, a box edge/corner otherwise. */
-  #shapeHandleAt(shape: Shape, pt: Point): BoxGrab | 0 | 1 | null {
+  #shapeHandleAt(shape: Shape, pt: Point): BoxGrab | 0 | 1 | 2 | null {
     const tol = this.#handleTolerance();
+    if (shape.type === 'magnifier') {
+      const i = this.#magnifierHandles(shape).findIndex((p) => Math.hypot(p.x - pt.x, p.y - pt.y) <= tol);
+      return i === 0 || i === 1 || i === 2 ? i : null;
+    }
     if (shape.type === 'arrow' || shape.type === 'line') {
       const i = shape.points.slice(0, 2).findIndex((p) => Math.hypot(p.x - pt.x, p.y - pt.y) <= tol);
       return i === 0 || i === 1 ? i : null;
@@ -1062,6 +1120,12 @@ export class ScreenMarker extends LitElement {
         capture();
         return;
       }
+      // A selected page image drags like a picture; unselected, a drag on it still draws a selection region.
+      if (!e.shiftKey && this.#store.selection.value?.type === 'image' && this.#insideImage(pt)) {
+        this.#shapeDrag = { kind: 'image', start: pt, delta: { x: 0, y: 0 } };
+        capture();
+        return;
+      }
       this.#region = null;
       this.#regionDrag = { grab: 'create', start: pt, orig: { x: pt.x, y: pt.y, w: 0, h: 0 }, additive: e.shiftKey };
       capture();
@@ -1117,7 +1181,7 @@ export class ScreenMarker extends LitElement {
     }
 
     const drag = this.#shapeDrag;
-    if (drag?.kind === 'move') {
+    if (drag?.kind === 'move' || drag?.kind === 'image') {
       let dx = pt.x - drag.start.x;
       let dy = pt.y - drag.start.y;
       // Shift locks the move to the dominant axis.
@@ -1155,6 +1219,10 @@ export class ScreenMarker extends LitElement {
 
   #resizedShape(drag: Extract<ShapeDrag, { kind: 'resize' }>, pt: Point, shift = false): Shape {
     const o = drag.orig;
+    if (drag.grab === 2) {
+      const l = o.points[1]!;
+      return { ...o, lensRadius: Math.max(12, Math.round(Math.hypot(pt.x - l.x, pt.y - l.y))) };
+    }
     if (drag.grab === 0 || drag.grab === 1) {
       const points = [...o.points];
       // Shift snaps the dragged end to 45° around the other end.
@@ -1189,11 +1257,13 @@ export class ScreenMarker extends LitElement {
       const handle = selected.length === 1 ? this.#shapeHandleAt(selected[0]!, pt) : null;
       const region = this.#activeRegion();
       const regionGrab = region ? boxGrabAt(region, pt, this.#handleTolerance()) : null;
-      if (handle === 0 || handle === 1) cursor = 'grab';
+      if (handle === 2) cursor = 'ew-resize';
+      else if (handle === 0 || handle === 1) cursor = 'grab';
       else if (handle) cursor = GRAB_CURSOR[handle];
       else if (regionGrab && regionGrab !== 'move') cursor = GRAB_CURSOR[regionGrab];
       else if (hitTestShapes(this.#store.activePage.shapes, pt)) cursor = 'move';
       else if (regionGrab === 'move') cursor = 'move';
+      else if (this.#store.selection.value?.type === 'image' && this.#insideImage(pt)) cursor = 'move';
     } else if (tool === 'text') {
       cursor = 'text';
     }
@@ -1227,6 +1297,10 @@ export class ScreenMarker extends LitElement {
     const drag = this.#shapeDrag;
     if (drag) {
       this.#shapeDrag = null;
+      if (drag.kind === 'image') {
+        void this.#commitImageMove(drag.delta);
+        return;
+      }
       if (drag.kind === 'move') {
         const { x: dx, y: dy } = drag.delta;
         if (Math.hypot(dx, dy) >= CLICK_THRESHOLD) this.#store.moveShapes(drag.ids, dx, dy);
@@ -1262,6 +1336,259 @@ export class ScreenMarker extends LitElement {
     }
     void this.#redraw();
   };
+
+  /**
+   * Shapes are stored relative to the page image, so moving the image by d
+   * moves every shape by -d instead (one undo step), then scrolls so the
+   * shapes stay where they were on screen and the image lands where it was dropped.
+   */
+  async #commitImageMove(d: Point, nudge = false): Promise<void> {
+    if (!nudge && Math.hypot(d.x, d.y) < CLICK_THRESHOLD) {
+      void this.#redraw();
+      return;
+    }
+    const ids = this.#store.activePage.shapes.map((s) => s.id);
+    if (!ids.length) {
+      // Nothing to move relative to: the image alone has no position of its own.
+      void this.#redraw();
+      return;
+    }
+    const anchor = { x: this.#content.x + this.#content.w / 2, y: this.#content.y + this.#content.h / 2 };
+    const before = this.#clientOf(anchor);
+    this.#clearRegion();
+    this.#store.moveShapes(ids, -d.x, -d.y);
+    await this.#settleLayout();
+    const after = this.#clientOf({ x: anchor.x - d.x, y: anchor.y - d.y });
+    const stage = this.#stageRef.value;
+    if (stage && before && after) {
+      stage.scrollLeft += after.x - before.x;
+      stage.scrollTop += after.y - before.y;
+    }
+  }
+
+  // ---------- find text (OCR) ----------
+
+  #openSearch(): void {
+    const pageId = this.#store.activePageId.value;
+    if (!this.#search) this.#search = { pageId, query: '', hits: [], index: 0, status: '' };
+    this.requestUpdate();
+    void this.updateComplete.then(() => {
+      this.#searchInputRef.value?.focus();
+      this.#searchInputRef.value?.select();
+    });
+    // Start reading the page right away, so results are ready by the time a word is typed.
+    const src = this.#store.activePage.imageDataUrl;
+    if (src) void recognizeLines(src).catch(() => {});
+  }
+
+  #closeSearch = () => {
+    this.#search = null;
+    clearTimeout(this.#searchTimer);
+    this.requestUpdate();
+    void this.#redraw();
+  };
+
+  /** Runs the query against the active page's recognized text. */
+  async #runSearch(): Promise<void> {
+    const search = this.#search;
+    const src = this.#store.activePage.imageDataUrl;
+    if (!search || !src) return;
+    const pageId = this.#store.activePageId.value;
+    const query = search.query;
+    search.pageId = pageId;
+    if (!query.trim()) {
+      Object.assign(search, { hits: [], index: 0, status: '' });
+      this.requestUpdate();
+      void this.#redraw();
+      return;
+    }
+    search.status = 'Reading text…';
+    this.requestUpdate();
+    try {
+      const lines = await recognizeLines(src);
+      // Ignore a result for a query or page that has since changed.
+      if (this.#search !== search || search.query !== query || this.#store.activePageId.value !== pageId) return;
+      search.hits = findText(lines, query);
+      search.index = 0;
+      search.status = search.hits.length ? '' : 'No matches';
+    } catch (err) {
+      search.status = `Text recognition unavailable: ${(err as Error).message}`;
+    }
+    this.requestUpdate();
+    await this.#redraw();
+    this.#scrollToSearchHit();
+  }
+
+  #onSearchInput = (e: Event) => {
+    if (!this.#search) return;
+    this.#search.query = (e.target as HTMLInputElement).value;
+    clearTimeout(this.#searchTimer);
+    this.#searchTimer = setTimeout(() => void this.#runSearch(), 200);
+  };
+
+  #onSearchKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this.#closeSearch();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      this.#stepSearch(e.shiftKey ? -1 : 1);
+    }
+  };
+
+  #stepSearch(dir: 1 | -1): void {
+    const s = this.#search;
+    if (!s?.hits.length) return;
+    s.index = (s.index + dir + s.hits.length) % s.hits.length;
+    this.requestUpdate();
+    void this.#redraw().then(() => this.#scrollToSearchHit());
+  }
+
+  #activeSearchHits(): Rect[] {
+    const s = this.#search;
+    return s && s.pageId === this.#store.activePageId.value ? s.hits : [];
+  }
+
+  #drawSearchHits(ctx: CanvasRenderingContext2D): void {
+    const hits = this.#activeSearchHits();
+    if (!hits.length) return;
+    const unit = 1 / this.#displayScale();
+    ctx.save();
+    hits.forEach((r, i) => {
+      const current = i === this.#search!.index;
+      ctx.fillStyle = current ? 'rgba(255, 149, 0, 0.35)' : 'rgba(255, 214, 10, 0.25)';
+      ctx.fillRect(r.x - 2, r.y - 2, r.w + 4, r.h + 4);
+      ctx.strokeStyle = current ? '#ff9500' : 'rgba(255, 179, 0, 0.9)';
+      ctx.lineWidth = (current ? 3 : 1.5) * unit;
+      ctx.strokeRect(r.x - 2, r.y - 2, r.w + 4, r.h + 4);
+    });
+    ctx.restore();
+  }
+
+  /** Scrolls the current match into the middle of the stage if it is off screen. */
+  #scrollToSearchHit(): void {
+    const s = this.#search;
+    const r = s?.hits[s.index];
+    const stage = this.#stageRef.value;
+    if (!r || !stage) return;
+    const c = this.#clientOf({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+    if (!c) return;
+    const box = stage.getBoundingClientRect();
+    if (c.x > box.left + 40 && c.x < box.right - 40 && c.y > box.top + 40 && c.y < box.bottom - 40) return;
+    stage.scrollLeft += c.x - (box.left + box.width / 2);
+    stage.scrollTop += c.y - (box.top + box.height / 2);
+  }
+
+  /** Turns every match into a highlight or blur shape (one undo step). */
+  #markSearchHits(type: 'highlight' | 'blur'): void {
+    const hits = this.#activeSearchHits();
+    if (!hits.length) return;
+    const pad = type === 'blur' ? 3 : 2;
+    this.#store.addShapes(
+      hits.map((r) => ({
+        ...this.#newShape(type, [
+          { x: r.x - pad, y: r.y - pad },
+          { x: r.x + r.w + pad, y: r.y + r.h + pad },
+        ]),
+        ...(type === 'highlight' ? { color: '#ffcc00' } : {}),
+      }))
+    );
+    this.#flashStatus(`${type === 'blur' ? 'Blurred' : 'Highlighted'} ${hits.length} match${hits.length === 1 ? '' : 'es'}`);
+  }
+
+  #renderSearchBar() {
+    const s = this.#search;
+    if (!s) return '';
+    const hits = this.#activeSearchHits();
+    const count = hits.length ? `${s.index + 1}/${hits.length}` : s.status;
+    return html`
+      <div class="search-bar" @pointerdown=${(e: Event) => e.stopPropagation()}>
+        <input
+          ${ref(this.#searchInputRef)}
+          type="search"
+          placeholder="Find text in image"
+          .value=${live(s.query)}
+          @input=${this.#onSearchInput}
+          @keydown=${this.#onSearchKey}
+        />
+        <span class="search-count">${count}</span>
+        <button ?disabled=${hits.length < 2} @click=${() => this.#stepSearch(-1)} title="Previous (Shift+Enter)">‹</button>
+        <button ?disabled=${hits.length < 2} @click=${() => this.#stepSearch(1)} title="Next (Enter)">›</button>
+        <button ?disabled=${!hits.length} @click=${() => this.#markSearchHits('highlight')} title="Add a highlight over every match">Highlight all</button>
+        <button ?disabled=${!hits.length} @click=${() => this.#markSearchHits('blur')} title="Blur every match (e.g. an email address or token)">Blur all</button>
+        <button @click=${this.#closeSearch} title="Close (Esc)">✕</button>
+      </div>
+    `;
+  }
+
+  // ---------- image diff ----------
+
+  /**
+   * Outlines where the active page's image differs from `otherSrc` with
+   * rectangles in the current color (one undo step).
+   */
+  async #highlightChanges(otherSrc: string, against: string): Promise<void> {
+    const src = this.#store.activePage.imageDataUrl;
+    if (!src) return;
+    this.#flashStatus('Comparing…');
+    try {
+      const boxes = await diffRegions(src, otherSrc);
+      if (!boxes.length) {
+        this.#flashStatus(`No differences from ${against}`);
+        return;
+      }
+      if (boxes.length > 80) {
+        this.#flashStatus(`Too many differences from ${against} (${boxes.length} areas): are these the same screen?`);
+        return;
+      }
+      this.#store.addShapes(
+        boxes.map((r) =>
+          this.#newShape('rect', [
+            { x: r.x, y: r.y },
+            { x: r.x + r.w, y: r.y + r.h },
+          ])
+        )
+      );
+      this.#store.selectShapes([]);
+      this.#flashStatus(`Marked ${boxes.length} change${boxes.length === 1 ? '' : 's'} from ${against}`);
+    } catch (err) {
+      this.#flashStatus(`Compare failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** The nearest earlier page that has an image. */
+  #previousImagePage(): Page | null {
+    const pages = this.#store.pages.value;
+    const i = pages.findIndex((p) => p.id === this.#store.activePageId.value);
+    for (let k = i - 1; k >= 0; k--) if (pages[k]!.imageDataUrl) return pages[k]!;
+    return null;
+  }
+
+  // ---------- copy as markdown ----------
+
+  #copyAsMarkdown = async () => {
+    try {
+      const { markdown, html: rich } = await pagesToMarkdown(this.#pagesWithImages(), this.#exportBackground());
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/plain': new Blob([markdown], { type: 'text/plain' }),
+          'text/html': new Blob([rich], { type: 'text/html' }),
+        }),
+      ]);
+      this.#flashStatus('Copied as Markdown (rich paste includes the images)');
+    } catch (err) {
+      this.#flashStatus(`Copy failed: ${(err as Error).message}`);
+    }
+  };
+
+  /** Where an image-coordinate point is on screen. */
+  #clientOf(p: Point): Point | null {
+    const canvas = this.#canvasRef.value;
+    if (!canvas?.width) return null;
+    const rect = canvas.getBoundingClientRect();
+    const scale = rect.width / canvas.width;
+    return { x: rect.left + (p.x - this.#area.x) * scale, y: rect.top + (p.y - this.#area.y) * scale };
+  }
 
   #insideImage(p: Point): boolean {
     const img = this.#image?.img;
@@ -1600,7 +1927,7 @@ export class ScreenMarker extends LitElement {
     const r = this.#activeRegion();
     if (!r) return;
     try {
-      await copyRegion(this.#store.activePage, r);
+      await copyRegion(this.#store.activePage, r, this.#exportBackground());
       this.#flashStatus('Selection copied to clipboard');
     } catch (err) {
       this.#flashStatus(`Copy failed: ${(err as Error).message}`);
@@ -1979,7 +2306,7 @@ export class ScreenMarker extends LitElement {
     // dark stage as they do in the editor, not on an exported-white box.
     return Promise.all(
       withImages.map(async (p) => {
-        const revealed = p.reveal ? p.shapes.filter((s) => s.type === 'tag' || s.type === 'step') : [];
+        const revealed = p.reveal ? p.shapes.filter((s) => REVEALED.includes(s.type)) : [];
         const builds: string[] = [];
         let width = 0;
         let height = 0;
@@ -2084,6 +2411,15 @@ export class ScreenMarker extends LitElement {
       this.#openMenu(e, [
         ...(editable ? [{ label: hit.type === 'step' ? 'Edit number' : 'Edit text', shortcut: 'Enter', run: () => this.#startTextEdit(hit) }] : []),
         ...(hasPictures ? [{ label: 'Arrange pictures in a row', run: () => void this.#arrangePicturesInRow() }] : []),
+        ...(hit.type === 'picture' && this.#store.selectedIds.length === 1
+          ? [{ label: 'Highlight changes vs page image', run: () => void this.#highlightChanges(hit.src!, 'this picture') }]
+          : []),
+        ...(hit.type === 'magnifier'
+          ? [1.5, 2, 3, 4].map((m) => ({
+              label: `${(hit.magnify ?? DEFAULT_MAGNIFY) === m ? '✓ ' : ''}Magnify ${m}×`,
+              run: () => this.#store.replaceShape({ ...hit, magnify: m }),
+            }))
+          : []),
         { label: 'Duplicate', shortcut: '⌘D', run: () => this.#store.duplicateSelectedShapes() },
         { label: 'Copy', shortcut: '⌘C', run: () => this.#store.copySelection() },
         'sep',
@@ -2106,6 +2442,16 @@ export class ScreenMarker extends LitElement {
       },
       'sep',
       { label: 'Copy page image', run: () => void this.#copyCurrentPage() },
+      { label: 'Copy as Markdown', run: () => void this.#copyAsMarkdown() },
+      { label: 'Find text…', shortcut: '⌘F', run: () => this.#openSearch() },
+      {
+        label: 'Highlight changes vs previous page',
+        disabled: !this.#previousImagePage(),
+        run: () => {
+          const prev = this.#previousImagePage();
+          if (prev) void this.#highlightChanges(prev.imageDataUrl!, 'the previous page');
+        },
+      },
       { label: 'Present from this page', run: () => void this.#present() },
       { label: 'Fit to window', shortcut: 'F', run: () => void this.#fitToWindow() },
     ]);
@@ -2306,7 +2652,7 @@ export class ScreenMarker extends LitElement {
           .value=${live(page.title ?? '')}
           @input=${(e: Event) => this.#store.updatePageMeta(page.id, { title: (e.target as HTMLInputElement).value })}
         />
-        <label class="slide-reveal" title="When presenting, show this page's tags and step markers one per click, in the order you added them">
+        <label class="slide-reveal" title="When presenting, show this page's tags, step markers and magnifiers one per click, in the order you added them">
           <input
             type="checkbox"
             .checked=${live(!!page.reveal)}
@@ -2361,9 +2707,47 @@ export class ScreenMarker extends LitElement {
 
   // ---------- copy / export ----------
 
+  /** Fill outside the image for copies/downloads, per the export background setting; null is transparent. */
+  #exportBackground(): string | null {
+    const pref = this.#store.exportBackground.value;
+    if (pref === 'transparent') return null;
+    // The host's resolved background is the theme's --bg (light-dark() resolved for the current scheme).
+    if (pref === 'theme') return getComputedStyle(this).backgroundColor || '#ffffff';
+    return pref;
+  }
+
+  #renderExportBackground() {
+    const pref = this.#store.exportBackground.value;
+    const choice = pref === 'theme' || pref === 'transparent' || pref === '#ffffff' ? pref : 'custom';
+    return html`
+      <label class="export-bg" title="Background outside the image in copies and downloads">
+        BG
+        <select
+          .value=${choice}
+          @change=${(e: Event) => {
+            const v = (e.target as HTMLSelectElement).value;
+            this.#store.exportBackground.set(v === 'custom' ? (choice === 'custom' ? pref : '#000000') : v);
+          }}
+        >
+          <option value="theme">Theme</option>
+          <option value="#ffffff">White</option>
+          <option value="transparent">Transparent</option>
+          <option value="custom">Custom</option>
+        </select>
+        ${choice === 'custom'
+          ? html`<input
+              type="color"
+              .value=${pref}
+              @input=${(e: Event) => this.#store.exportBackground.set((e.target as HTMLInputElement).value)}
+            />`
+          : ''}
+      </label>
+    `;
+  }
+
   #copyImage = async () => {
     try {
-      await copyImageOnly(this.#pagesWithImages());
+      await copyImageOnly(this.#pagesWithImages(), this.#exportBackground());
       this.#flashStatus('Image copied to clipboard');
     } catch (err) {
       this.#flashStatus(`Copy failed: ${(err as Error).message}`);
@@ -2372,7 +2756,7 @@ export class ScreenMarker extends LitElement {
 
   #copyCurrentPage = async () => {
     try {
-      await copyImageOnly([this.#store.activePage]);
+      await copyImageOnly([this.#store.activePage], this.#exportBackground());
       this.#flashStatus('Current page copied to clipboard');
     } catch (err) {
       this.#flashStatus(`Copy failed: ${(err as Error).message}`);
@@ -2380,12 +2764,12 @@ export class ScreenMarker extends LitElement {
   };
 
   #download = async () => {
-    await downloadImage(this.#pagesWithImages());
+    await downloadImage(this.#pagesWithImages(), this.#exportBackground());
   };
 
   #openPreview = async () => {
     try {
-      const canvas = await flattenPagesToCanvas(this.#pagesWithImages());
+      const canvas = await flattenPagesToCanvas(this.#pagesWithImages(), this.#exportBackground());
       this.#previewUrl = canvas.toDataURL('image/png');
       this.#previewSize = { width: canvas.width, height: canvas.height };
       this.#store.previewZoomReset();
@@ -2588,6 +2972,8 @@ export class ScreenMarker extends LitElement {
     const style = this.#currentStyle();
     const hasShapes = this.#store.selectedIds.length > 0;
     const noImage = !page.imageDataUrl;
+    // Switching pages with the find bar open searches the new page.
+    if (this.#search?.query && this.#search.pageId !== page.id) queueMicrotask(() => void this.#runSearch());
 
     return html`
       <button
@@ -2759,12 +3145,15 @@ export class ScreenMarker extends LitElement {
         <button class="button-primary" ?disabled=${noImage} @click=${this.#copyImage}>📋 Copy Image</button>
         <button class="button-primary" ?disabled=${noImage} @click=${this.#copyCurrentPage}>📋 Copy Current Page</button>
         <button ?disabled=${noImage} @click=${this.#openPreview}>Preview</button>
+        <button ?disabled=${noImage} @click=${this.#copyAsMarkdown} title="Copy titles, steps and tags as Markdown; rich paste (Docs, Notion…) also gets the images">Copy as Markdown</button>
         <button ?disabled=${noImage} @click=${this.#download}>Download</button>
+        ${this.#renderExportBackground()}
       </div>
 
       <div class="workspace">
       ${this.#renderPageStrip(page.id)}
       <div class="main">
+      ${this.#renderSearchBar()}
       <div
         class="stage"
         ${ref(this.#stageRef)}

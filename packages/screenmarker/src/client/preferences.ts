@@ -5,9 +5,12 @@ export interface Preferences {
   lineWidth: number;
   fontSize: number;
   fill: boolean;
+  // Fill outside the page image in exports: 'theme' (the editor background),
+  // 'transparent', or a #rrggbb color.
+  exportBackground: string;
 }
 
-const DEFAULTS: Preferences = { color: '#ff3b30', lineWidth: 3, fontSize: 18, fill: false };
+const DEFAULTS: Preferences = { color: '#ff3b30', lineWidth: 3, fontSize: 18, fill: false, exportBackground: 'theme' };
 
 /**
  * Last-used tool defaults (color, line width, font size, fill), shared across all
@@ -25,6 +28,7 @@ export function loadPreferences(): Preferences {
       lineWidth: typeof parsed.lineWidth === 'number' ? parsed.lineWidth : DEFAULTS.lineWidth,
       fontSize: typeof parsed.fontSize === 'number' ? parsed.fontSize : DEFAULTS.fontSize,
       fill: typeof parsed.fill === 'boolean' ? parsed.fill : DEFAULTS.fill,
+      exportBackground: typeof parsed.exportBackground === 'string' ? parsed.exportBackground : DEFAULTS.exportBackground,
     };
   } catch {
     return { ...DEFAULTS };

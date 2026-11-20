@@ -46,6 +46,7 @@ export class AnnotatorStore {
   activeFontSize = new Signal<number>(initialPrefs.fontSize);
   activeFill = new Signal<boolean>(initialPrefs.fill);
   activeTagArrow = new Signal<TagArrow>('bottom-center');
+  exportBackground = new Signal<string>(initialPrefs.exportBackground);
   zoom = new Signal<number>(1);
   previewZoom = new Signal<number>(1);
   selection = new Signal<Selection>(null);
@@ -74,6 +75,7 @@ export class AnnotatorStore {
         lineWidth: this.activeLineWidth.value,
         fontSize: this.activeFontSize.value,
         fill: this.activeFill.value,
+        exportBackground: this.exportBackground.value,
       });
     });
   }
@@ -260,6 +262,11 @@ export class AnnotatorStore {
 
   addShape(shape: Shape): void {
     this.#updateActiveShapes((shapes) => [...shapes, shape]);
+  }
+
+  /** Adds several shapes in one undoable step. */
+  addShapes(list: Shape[]): void {
+    if (list.length) this.#updateActiveShapes((shapes) => [...shapes, ...list]);
   }
 
   /** Replaces one shape wholesale (resize, text edit). Undoable. */

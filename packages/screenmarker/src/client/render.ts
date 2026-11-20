@@ -44,6 +44,68 @@ export async function preloadPictures(shapes: Shape[]): Promise<void> {
   );
 }
 
+export const DEFAULT_MAGNIFY = 2;
+
+/** Lens radius and source-spot radius of a magnifier, in image pixels. */
+export function magnifierRadii(shape: Shape): { lens: number; source: number } {
+  const lens = shape.lensRadius ?? 80;
+  return { lens, source: lens / (shape.magnify ?? DEFAULT_MAGNIFY) };
+}
+
+/**
+ * Callout magnifier: a ring around the spot, a connector, and a round lens
+ * showing that spot enlarged. Like blur, it samples whatever is already
+ * painted (the image plus shapes drawn before it).
+ */
+function drawMagnifier(ctx: CanvasRenderingContext2D, shape: Shape): void {
+  const [s, l] = shape.points;
+  if (!s || !l) return;
+  const { lens: R, source: r } = magnifierRadii(shape);
+  const t = ctx.getTransform();
+  // Sample before drawing anything of our own, in raw canvas pixels (see pixelate).
+  const sample = document.createElement('canvas');
+  sample.width = Math.max(1, Math.round(R * 2));
+  sample.height = sample.width;
+  const sctx = sample.getContext('2d')!;
+  sctx.imageSmoothingQuality = 'high';
+  sctx.drawImage(ctx.canvas, s.x - r + t.e, s.y - r + t.f, r * 2, r * 2, 0, 0, sample.width, sample.height);
+
+  const width = Math.max(2, shape.lineWidth);
+  const d = Math.hypot(l.x - s.x, l.y - s.y);
+  if (d > R + r) {
+    const ux = (l.x - s.x) / d;
+    const uy = (l.y - s.y) / d;
+    ctx.beginPath();
+    ctx.moveTo(s.x + ux * r, s.y + uy * r);
+    ctx.lineTo(l.x - ux * R, l.y - uy * R);
+    ctx.lineWidth = width;
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+  ctx.lineWidth = width;
+  ctx.stroke();
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+  ctx.shadowBlur = R * 0.25;
+  ctx.beginPath();
+  ctx.arc(l.x, l.y, R, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.restore();
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(l.x, l.y, R, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.drawImage(sample, l.x - R, l.y - R, R * 2, R * 2);
+  ctx.restore();
+  ctx.beginPath();
+  ctx.arc(l.x, l.y, R, 0, Math.PI * 2);
+  ctx.lineWidth = width * 1.5;
+  ctx.stroke();
+}
+
 export function stepRadius(shape: Shape): number {
   return (shape.fontSize ?? DEFAULT_FONT_SIZE) * 0.85;
 }
@@ -276,6 +338,10 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
       if (shape.points[0]) drawTag(ctx, shape);
       break;
     }
+    case 'magnifier': {
+      drawMagnifier(ctx, shape);
+      break;
+    }
     case 'picture': {
       const [a, b] = shape.points;
       if (!a || !b) break;
@@ -345,6 +411,14 @@ export function shapeBounds(shape: Shape): { x: number; y: number; width: number
     const y = Math.min(box.y, tip.y);
     return { x, y, width: Math.max(box.x + box.w, tip.x) - x, height: Math.max(box.y + box.h, tip.y) - y };
   }
+  if (shape.type === 'magnifier') {
+    const s = shape.points[0] ?? { x: 0, y: 0 };
+    const l = shape.points[1] ?? s;
+    const { lens, source } = magnifierRadii(shape);
+    const x = Math.min(s.x - source, l.x - lens);
+    const y = Math.min(s.y - source, l.y - lens);
+    return { x, y, width: Math.max(s.x + source, l.x + lens) - x, height: Math.max(s.y + source, l.y + lens) - y };
+  }
   if (shape.type === 'step') {
     const c = shape.points[0] ?? { x: 0, y: 0 };
     const r = stepRadius(shape);
@@ -380,6 +454,16 @@ export function hitTestShape(shape: Shape, point: Point): boolean {
       const [a, b] = shape.points;
       if (!a || !b) return false;
       return distanceToSegment(point, a, b) <= HIT_PADDING + shape.lineWidth / 2;
+    }
+    case 'magnifier': {
+      const [s, l] = shape.points;
+      if (!s || !l) return false;
+      const { lens, source } = magnifierRadii(shape);
+      return (
+        Math.hypot(point.x - l.x, point.y - l.y) <= lens + HIT_PADDING ||
+        Math.hypot(point.x - s.x, point.y - s.y) <= source + HIT_PADDING ||
+        distanceToSegment(point, s, l) <= HIT_PADDING + shape.lineWidth / 2
+      );
     }
     case 'pen': {
       for (let i = 0; i < shape.points.length - 1; i++) {
@@ -691,8 +775,8 @@ export async function flattenPage(
   return { canvas, origin: { x: -area.x, y: -area.y }, focus };
 }
 
-export async function flattenToCanvas(imageDataUrl: string, shapes: Shape[]): Promise<HTMLCanvasElement> {
-  return (await flattenPage(imageDataUrl, shapes)).canvas;
+export async function flattenToCanvas(imageDataUrl: string, shapes: Shape[], background: string | null = SCENE_BACKGROUND): Promise<HTMLCanvasElement> {
+  return (await flattenPage(imageDataUrl, shapes, { background })).canvas;
 }
 
 const SEPARATOR_LINE_WIDTH = 3;
@@ -702,13 +786,14 @@ const SEPARATOR_LINE_WIDTH = 3;
  * other (no gap), with a zebra-dashed line drawn right at each seam — so
  * multiple annotated pages become one pasteable image, and the separator
  * reads clearly against any page content instead of needing a plain-white
- * buffer around it. Pages without an image are skipped.
+ * buffer around it. Pages without an image are skipped. `background` fills
+ * outside the images (null: transparent).
  */
-export async function flattenPagesToCanvas(pages: Page[]): Promise<HTMLCanvasElement> {
+export async function flattenPagesToCanvas(pages: Page[], background: string | null = SCENE_BACKGROUND): Promise<HTMLCanvasElement> {
   const withImages = pages.filter((p): p is Page & { imageDataUrl: string } => p.imageDataUrl !== null);
   if (withImages.length === 0) throw new Error('no pages with an image');
 
-  const flattened = await Promise.all(withImages.map((p) => flattenToCanvas(p.imageDataUrl, p.shapes)));
+  const flattened = await Promise.all(withImages.map((p) => flattenToCanvas(p.imageDataUrl, p.shapes, background)));
 
   if (flattened.length === 1) return flattened[0]!;
 
@@ -719,8 +804,10 @@ export async function flattenPagesToCanvas(pages: Page[]): Promise<HTMLCanvasEle
   combined.width = width;
   combined.height = height;
   const ctx = combined.getContext('2d')!;
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, width, height);
+  if (background) {
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, width, height);
+  }
 
   let y = 0;
   flattened.forEach((c, i) => {

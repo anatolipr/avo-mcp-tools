@@ -161,6 +161,66 @@ export const screenMarkerStyles = css`
     .swatch.active {
       border-color: var(--text);
     }
+    .search-bar {
+      position: absolute;
+      top: 8px;
+      right: 16px;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+      max-width: calc(100% - 32px);
+      flex-wrap: wrap;
+    }
+    .search-bar input {
+      font: inherit;
+      font-size: 13px;
+      width: 180px;
+      padding: 4px 6px;
+      color: inherit;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .search-bar button {
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+    .search-count {
+      font-size: 12px;
+      opacity: 0.75;
+      min-width: 40px;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+    .export-bg {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      opacity: 0.85;
+    }
+    .export-bg select {
+      font: inherit;
+      color: inherit;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 3px 4px;
+    }
+    .export-bg input[type='color'] {
+      width: 24px;
+      height: 22px;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: none;
+    }
     .spacer {
       flex: 1;
     }
@@ -440,6 +500,7 @@ export const screenMarkerStyles = css`
       display: flex;
     }
     .main {
+      position: relative;
       flex: 1;
       min-width: 0;
       display: flex;

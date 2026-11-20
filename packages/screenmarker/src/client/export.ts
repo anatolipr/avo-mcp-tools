@@ -8,14 +8,14 @@ function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
 }
 
 /** Mode 1: flat image only. Multiple pages are stacked into one image, dashed-line separated. */
-export async function copyImageOnly(pages: Page[]): Promise<void> {
-  const canvas = await flattenPagesToCanvas(pages);
+export async function copyImageOnly(pages: Page[], background: string | null): Promise<void> {
+  const canvas = await flattenPagesToCanvas(pages, background);
   const blob = await canvasToBlob(canvas);
   await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
 }
 
-export async function downloadImage(pages: Page[]): Promise<void> {
-  const canvas = await flattenPagesToCanvas(pages);
+export async function downloadImage(pages: Page[], background: string | null): Promise<void> {
+  const canvas = await flattenPagesToCanvas(pages, background);
   const blob = await canvasToBlob(canvas);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -27,9 +27,9 @@ export async function downloadImage(pages: Page[]): Promise<void> {
 }
 
 /** Copies region `r` of one page (image plus annotations, flattened) to the OS clipboard. */
-export async function copyRegion(page: Page, r: Rect): Promise<void> {
+export async function copyRegion(page: Page, r: Rect, background: string | null): Promise<void> {
   if (!page.imageDataUrl) throw new Error('page has no image');
-  const { canvas: full, origin } = await flattenPage(page.imageDataUrl, page.shapes);
+  const { canvas: full, origin } = await flattenPage(page.imageDataUrl, page.shapes, { background });
   const canvas = document.createElement('canvas');
   canvas.width = r.w;
   canvas.height = r.h;

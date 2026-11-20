@@ -1,4 +1,4 @@
-export type ShapeType = 'rect' | 'ellipse' | 'arrow' | 'line' | 'text' | 'step' | 'pen' | 'highlight' | 'blur' | 'tag' | 'picture';
+export type ShapeType = 'rect' | 'ellipse' | 'arrow' | 'line' | 'text' | 'step' | 'pen' | 'highlight' | 'blur' | 'tag' | 'picture' | 'magnifier';
 export type Tool = ShapeType | 'select';
 
 export interface Point {
@@ -32,6 +32,10 @@ export interface Shape {
   tagArrow?: TagArrow;
   // picture only: an extra image (data URL) placed on the page, stretched to its two corners.
   src?: string;
+  // magnifier only: points[0] is the spot being enlarged, points[1] the lens
+  // center; the lens has this radius and shows the spot at `magnify`×.
+  lensRadius?: number;
+  magnify?: number;
 }
 
 /** Clockwise around the bubble, three positions per side, plus 'none' (no pointer). */
