@@ -49,6 +49,7 @@ export class ScreenMarkerPresenter extends LitElement {
     heading: { type: String },
     message: { type: String },
     status: { type: String },
+    background: { type: String },
     ownToast: { state: true },
     idle: { state: true },
   };
@@ -72,6 +73,8 @@ export class ScreenMarkerPresenter extends LitElement {
   declare heading: string;
   declare message: string;
   declare status: string;
+  // The editor's scene background, so slide margins match it.
+  declare background: string;
   declare ownToast: string;
   #toastTimer: ReturnType<typeof setTimeout> | undefined;
   declare idle: boolean;
@@ -92,6 +95,7 @@ export class ScreenMarkerPresenter extends LitElement {
     this.heading = '';
     this.message = '';
     this.status = '';
+    this.background = '';
     this.ownToast = '';
     this.idle = false;
   }
@@ -132,7 +136,10 @@ export class ScreenMarkerPresenter extends LitElement {
     }
     .message {
       margin: auto;
-      opacity: 0.75;
+      padding: 10px 16px;
+      border-radius: 8px;
+      background: rgba(30, 30, 32, 0.85);
+      opacity: 0.85;
       font-size: 15px;
       text-align: center;
       max-width: 420px;
@@ -174,6 +181,15 @@ export class ScreenMarkerPresenter extends LitElement {
     }
     .top > * {
       pointer-events: auto;
+    }
+    /* Readable on any scene background, light or dark. */
+    .top > span:first-child {
+      padding: 4px 10px;
+      border-radius: 8px;
+      background: rgba(30, 30, 32, 0.75);
+    }
+    .top button {
+      background: rgba(30, 30, 32, 0.85);
     }
     .top-actions {
       display: flex;
@@ -390,6 +406,7 @@ export class ScreenMarkerPresenter extends LitElement {
   };
 
   willUpdate(changed: Map<string, unknown>): void {
+    if (changed.has('background')) this.style.background = this.background || '';
     if (changed.has('zoom')) this.scale = this.zoom ? this.zoom / this.#dpr() : null;
     // A new deck (or start index) from the host starts that slide at its first step.
     if (changed.has('slides') || changed.has('index')) {

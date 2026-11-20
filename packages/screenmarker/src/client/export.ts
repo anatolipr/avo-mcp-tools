@@ -33,7 +33,13 @@ export async function copyRegion(page: Page, r: Rect, background: string | null)
   const canvas = document.createElement('canvas');
   canvas.width = r.w;
   canvas.height = r.h;
-  canvas.getContext('2d')!.drawImage(full, -(r.x + origin.x), -(r.y + origin.y));
+  const ctx = canvas.getContext('2d')!;
+  // A selection can reach past the drawn scene into the empty margin.
+  if (background) {
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, r.w, r.h);
+  }
+  ctx.drawImage(full, -(r.x + origin.x), -(r.y + origin.y));
   const blob = await canvasToBlob(canvas);
   await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
 }

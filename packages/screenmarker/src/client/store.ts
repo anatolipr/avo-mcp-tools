@@ -47,6 +47,7 @@ export class AnnotatorStore {
   activeFill = new Signal<boolean>(initialPrefs.fill);
   activeTagArrow = new Signal<TagArrow>('bottom-center');
   exportBackground = new Signal<string>(initialPrefs.exportBackground);
+  sceneBackground = new Signal<string>(initialPrefs.sceneBackground);
   zoom = new Signal<number>(1);
   previewZoom = new Signal<number>(1);
   selection = new Signal<Selection>(null);
@@ -76,6 +77,7 @@ export class AnnotatorStore {
         fontSize: this.activeFontSize.value,
         fill: this.activeFill.value,
         exportBackground: this.exportBackground.value,
+        sceneBackground: this.sceneBackground.value,
       });
     });
   }
@@ -240,6 +242,19 @@ export class AnnotatorStore {
   /** Updates a page's slide metadata (title / notes / reveal). Not undoable: typing in the slide panel would flood the history. */
   updatePageMeta(pageId: string, meta: Partial<Pick<Page, 'title' | 'notes' | 'reveal'>>): void {
     this.pages.update((pages) => pages.map((p) => (p.id === pageId ? { ...p, ...meta } : p)));
+  }
+
+  /** Remembers (or with null, forgets) a page's editor view. Not undoable: it is where you look, not what you made. */
+  setPageView(pageId: string, view: Page['view'] | null): void {
+    this.pages.update((pages) =>
+      pages.map((p) => {
+        if (p.id !== pageId) return p;
+        const next = { ...p };
+        if (view) next.view = view;
+        else delete next.view;
+        return next;
+      })
+    );
   }
 
   /** Moves a page one position up/down in the list. Not undoable. Returns whether it moved. */
@@ -432,6 +447,11 @@ export class AnnotatorStore {
     this.pages.set(next.pages);
     this.activePageId.set(next.activePageId);
     this.selection.set(null);
+  }
+
+  /** Forgets the in-app clipboard, so the next Cmd/Ctrl+V pastes what the system clipboard holds. */
+  clearClipboard(): void {
+    this.#clipboard = null;
   }
 
   hasClipboard(): boolean {

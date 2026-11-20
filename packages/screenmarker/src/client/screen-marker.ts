@@ -14,7 +14,6 @@ import {
   drawShapes,
   flattenPage,
   flattenPagesToCanvas,
-  focusBounds,
   hitTestShapes,
   layoutTag,
   magnifierRadii,
@@ -48,6 +47,8 @@ import {
   showFilePicker,
 } from './cloud.js';
 import './presenter.js';
+import './palette.js';
+import type { Command } from './palette.js';
 import type { Slide } from './presenter.js';
 import { pageThumbnail, recentThumbnail, rememberRecentThumbnail } from './thumbs.js';
 import { TAG_ARROWS, type Page, type Point, type Rect, type Shape, type ShapeType, type TagArrow, type Tool } from './types.js';
@@ -275,6 +276,7 @@ export class ScreenMarker extends LitElement {
   #stageRef = createRef<HTMLDivElement>();
   #textInputRef = createRef<HTMLInputElement | HTMLTextAreaElement>();
   #loadDocumentInputRef = createRef<HTMLInputElement>();
+  #imageInputRef = createRef<HTMLInputElement>();
   #image: { src: string; img: HTMLImageElement } | null = null;
   // The canvas covers this box of the scene, in image coordinates (the
   // image sits at 0,0; the margin around it can hold tags and shapes).
@@ -299,7 +301,14 @@ export class ScreenMarker extends LitElement {
   #selectOnFocus = true;
   #spaceHeld = false;
   #spacePanned = false;
-  #pan: { x: number; y: number; left: number; top: number } | null = null;
+  #pan: { x: number; y: number; cam: Point } | null = null;
+  // The camera: the image point shown at the center of the stage. With the
+  // zoom it places the canvas; the canvas only covers the visible part of the
+  // (unbounded) scene, plus some slack so small pans need no redraw.
+  #cam: Point = { x: 0, y: 0 };
+  // Set by a pan-only update: skip the redraw while the canvas still covers the view.
+  #camOnlyUpdate = false;
+  #viewSaveTimer: ReturnType<typeof setTimeout> | undefined;
   #canvasCursor = '';
   #stageObserver = new ResizeObserver(() => this.requestUpdate());
 
@@ -371,7 +380,7 @@ export class ScreenMarker extends LitElement {
       await this.updateComplete;
       if (this.#stageRef.value) this.#stageObserver.observe(this.#stageRef.value);
       await this.#redraw();
-      this.#fitToWindow();
+      await this.#restoreView();
       const name = cloudNameFromHash();
       if (name && !publicToken) void this.#openCloudDocument(name, { confirmReplace: false });
     });
@@ -605,15 +614,15 @@ export class ScreenMarker extends LitElement {
         case '+':
         case '=':
           e.preventDefault();
-          this.#store.zoomIn();
+          this.#zoomBy(1.2);
           return;
         case '-':
           e.preventDefault();
-          this.#store.zoomOut();
+          this.#zoomBy(1 / 1.2);
           return;
         case '0':
           e.preventDefault();
-          this.#store.zoomReset();
+          this.#zoomBy(1 / this.#store.zoom.value);
           return;
         case 'f':
           e.preventDefault();
@@ -631,13 +640,13 @@ export class ScreenMarker extends LitElement {
       this.#clearRegion();
     } else if (e.key === '=' || e.key === '+') {
       e.preventDefault();
-      this.#store.zoomIn();
+      this.#zoomBy(1.2);
     } else if (e.key === '-') {
       e.preventDefault();
-      this.#store.zoomOut();
+      this.#zoomBy(1 / 1.2);
     } else if (e.key === '0') {
       e.preventDefault();
-      this.#store.zoomReset();
+      this.#zoomBy(1 / this.#store.zoom.value);
     } else if (key === 'a') {
       e.preventDefault();
       this.#store.selectShapes(this.#store.activePage.shapes.map((s) => s.id));
@@ -687,6 +696,8 @@ export class ScreenMarker extends LitElement {
   async #loadImageFile(file: File): Promise<void> {
     const dataUrl = await fileToDataUrl(file);
     this.#store.setImage(this.#store.activePageId.value, dataUrl);
+    // A new image: the old framing no longer applies.
+    this.#store.setPageView(this.#store.activePageId.value, null);
     this.#clearRegion();
     await this.updateComplete;
     await this.#redraw();
@@ -695,8 +706,8 @@ export class ScreenMarker extends LitElement {
 
   /**
    * Adds an image file to the active page as a picture shape at its natural
-   * size: centered on `at`, or else to the right of the page's images (so
-   * repeated pastes build a row). Selects it.
+   * size, centered on `at` (a drop) or else on the middle of the view.
+   * Selects it, ready to move or resize.
    */
   async #addPicture(file: File, at?: Point): Promise<void> {
     const src = await fileToDataUrl(file);
@@ -710,12 +721,9 @@ export class ScreenMarker extends LitElement {
     }
     const w = img.naturalWidth;
     const h = img.naturalHeight;
-    const page = this.#store.activePage;
-    const main = await this.#loadPageImage(page.imageDataUrl!);
-    const focus = focusBounds(main.naturalWidth, main.naturalHeight, page.shapes);
-    const gap = pictureGap(main.naturalHeight);
-    const x = at ? at.x - w / 2 : focus.x + focus.w + gap;
-    const y = at ? at.y - h / 2 : focus.y;
+    const c = at ?? this.#cam;
+    const x = Math.round(c.x - w / 2);
+    const y = Math.round(c.y - h / 2);
     const shape: Shape = {
       id: makeId(),
       type: 'picture',
@@ -732,7 +740,6 @@ export class ScreenMarker extends LitElement {
     this.#store.selectShapes([shape.id]);
     await this.updateComplete;
     await this.#redraw();
-    if (!at) this.#fitToWindow();
   }
 
   /**
@@ -795,7 +802,7 @@ export class ScreenMarker extends LitElement {
       this.#setCloudName(null);
       await this.updateComplete;
       await this.#redraw();
-      this.#fitToWindow();
+      await this.#restoreView();
       this.#flashStatus('Document loaded');
     } catch (err) {
       this.#flashStatus(`Load failed: ${(err as Error).message}`);
@@ -867,7 +874,7 @@ export class ScreenMarker extends LitElement {
     const shapes = this.#displayShapes();
     await preloadPictures(shapes);
     const content = sceneBounds(W, H, shapes);
-    const area = this.#editorArea(W, H, content);
+    const area = this.#editorArea();
     const prev = this.#area;
     const sizeChanged = prev.x !== area.x || prev.y !== area.y || canvas.width !== area.w || canvas.height !== area.h;
     this.#area = area;
@@ -951,25 +958,90 @@ export class ScreenMarker extends LitElement {
   }
 
   /**
-   * The scene box the editor canvas covers, in image coordinates: at least
-   * the whole visible stage (centered on the image, so empty space all
-   * around is usable for tags and shapes without the image moving), plus a
-   * wide margin around the content (scroll or pan to reach it), so any tool,
-   * not only tags, can start a shape well outside the image even when the
-   * image fills the window.
+   * The scene box the editor canvas covers, in image coordinates: the part
+   * of the scene visible around the camera, with half a view of slack on
+   * every side, capped at MAX_AREA_SIDE.
    */
-  #editorArea(W: number, H: number, content: Rect): Rect {
-    const stage = this.#stageRef.value;
+  #editorArea(): Rect {
+    const { w, h } = this.#viewSize();
     const scale = this.#displayScale();
-    const viewW = Math.min(MAX_AREA_SIDE, Math.max(W, ((stage?.clientWidth ?? 0) - 32) / scale));
-    const viewH = Math.min(MAX_AREA_SIDE, Math.max(H, ((stage?.clientHeight ?? 0) - 32) / scale));
-    const side = Math.max(content.w, content.h);
-    const edge = Math.max(24 / scale, Math.min(side * 0.3, (MAX_AREA_SIDE - side) / 2));
-    const x1 = Math.floor(Math.min(W / 2 - viewW / 2, content.x - edge));
-    const y1 = Math.floor(Math.min(H / 2 - viewH / 2, content.y - edge));
-    const x2 = Math.ceil(Math.max(W / 2 + viewW / 2, content.x + content.w + edge));
-    const y2 = Math.ceil(Math.max(H / 2 + viewH / 2, content.y + content.h + edge));
-    return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+    const aw = Math.min(MAX_AREA_SIDE, (w * 2) / scale);
+    const ah = Math.min(MAX_AREA_SIDE, (h * 2) / scale);
+    const x1 = Math.floor(this.#cam.x - aw / 2);
+    const y1 = Math.floor(this.#cam.y - ah / 2);
+    return { x: x1, y: y1, w: Math.ceil(aw), h: Math.ceil(ah) };
+  }
+
+  #viewSize(): { w: number; h: number } {
+    const stage = this.#stageRef.value;
+    return { w: stage?.clientWidth || 800, h: stage?.clientHeight || 600 };
+  }
+
+  /** Whether the canvas still covers everything the stage shows. */
+  #viewCovered(): boolean {
+    const { w, h } = this.#viewSize();
+    const scale = this.#displayScale();
+    const a = this.#area;
+    const canvas = this.#canvasRef.value;
+    if (!canvas || canvas.width !== a.w) return false;
+    return (
+      this.#cam.x - w / 2 / scale >= a.x &&
+      this.#cam.y - h / 2 / scale >= a.y &&
+      this.#cam.x + w / 2 / scale <= a.x + a.w &&
+      this.#cam.y + h / 2 / scale <= a.y + a.h
+    );
+  }
+
+  /** The image point under a client (screen) position. */
+  #imagePointAt(clientX: number, clientY: number): Point {
+    const stage = this.#stageRef.value!.getBoundingClientRect();
+    const scale = this.#displayScale();
+    return {
+      x: this.#cam.x + (clientX - stage.left - stage.width / 2) / scale,
+      y: this.#cam.y + (clientY - stage.top - stage.height / 2) / scale,
+    };
+  }
+
+  /** Moves the camera (a pan, or after a zoom) and remembers the view for this page. */
+  #setCamera(cam: Point, remember = true): void {
+    this.#cam = cam;
+    this.#camOnlyUpdate = true;
+    this.requestUpdate();
+    if (remember) this.#scheduleViewSave();
+  }
+
+  #scheduleViewSave(): void {
+    const pageId = this.#store.activePageId.value;
+    clearTimeout(this.#viewSaveTimer);
+    this.#viewSaveTimer = setTimeout(() => {
+      if (this.#store.activePageId.value !== pageId) return;
+      const view = { x: Math.round(this.#cam.x), y: Math.round(this.#cam.y), zoom: this.#store.zoom.value };
+      const old = this.#store.activePage.view;
+      if (!old || old.x !== view.x || old.y !== view.y || old.zoom !== view.zoom) this.#store.setPageView(pageId, view);
+    }, 400);
+  }
+
+  /** Shows the page as last left (its saved view), or fitted when it has none. */
+  async #restoreView(): Promise<void> {
+    const view = this.#store.activePage.view;
+    if (!view) return this.#fitToWindow();
+    this.#store.setZoom(view.zoom);
+    this.#cam = { x: view.x, y: view.y };
+    await this.#settleLayout();
+  }
+
+  /** Forgets the page's saved view and fits the content again. */
+  #resetView = () => {
+    clearTimeout(this.#viewSaveTimer);
+    this.#store.setPageView(this.#store.activePageId.value, null);
+    void this.#fitToWindow();
+  };
+
+  /** Zooms by `factor` around the stage center (keys and buttons). */
+  #zoomBy(factor: number): void {
+    const stage = this.#stageRef.value?.getBoundingClientRect();
+    if (!stage) return;
+    void this.#zoomAt(this.#store.zoom.value * factor, stage.left + stage.width / 2, stage.top + stage.height / 2);
   }
 
   /** Lets an image point land at a given screen position after a zoom/area change (only possible where the stage can scroll). */
@@ -996,12 +1068,13 @@ export class ScreenMarker extends LitElement {
   /** Stage-level pointerdown: Space+drag pans from anywhere; a click on the stage padding (not bubbled from the canvas) clears the selection. */
   #onStagePointerDown = (e: PointerEvent) => {
     if (this.#spaceHeld) {
-      const stage = this.#stageRef.value!;
-      this.#pan = { x: e.clientX, y: e.clientY, left: stage.scrollLeft, top: stage.scrollTop };
+      this.#startPan(e);
       this.#spacePanned = true;
-      stage.setPointerCapture(e.pointerId);
-      e.preventDefault();
-      this.requestUpdate();
+      return;
+    }
+    if (e.button === 1) {
+      // Middle-button drag pans too.
+      this.#startPan(e);
       return;
     }
     if (e.target === e.currentTarget) {
@@ -1010,11 +1083,20 @@ export class ScreenMarker extends LitElement {
     }
   };
 
+  #startPan(e: PointerEvent): void {
+    this.#pan = { x: e.clientX, y: e.clientY, cam: { ...this.#cam } };
+    this.#stageRef.value!.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    this.requestUpdate();
+  }
+
   #onStagePointerMove = (e: PointerEvent) => {
     if (!this.#pan) return;
-    const stage = this.#stageRef.value!;
-    stage.scrollLeft = this.#pan.left - (e.clientX - this.#pan.x);
-    stage.scrollTop = this.#pan.top - (e.clientY - this.#pan.y);
+    const scale = this.#displayScale();
+    this.#setCamera({
+      x: this.#pan.cam.x - (e.clientX - this.#pan.x) / scale,
+      y: this.#pan.cam.y - (e.clientY - this.#pan.y) / scale,
+    });
   };
 
   #onStagePointerUp = () => {
@@ -1023,51 +1105,60 @@ export class ScreenMarker extends LitElement {
     this.requestUpdate();
   };
 
-  /** Cmd/Ctrl+wheel and trackpad pinch (which browsers report as ctrl+wheel) zoom around the cursor. */
+  /**
+   * The wheel (two-finger scroll on a trackpad) pans the scene; Cmd/Ctrl+wheel
+   * and trackpad pinch (which browsers report as ctrl+wheel) zoom around the cursor.
+   */
   #onWheel = (e: WheelEvent) => {
-    if (!(e.ctrlKey || e.metaKey) || !this.#canvasRef.value) return;
+    if (!this.#canvasRef.value) return;
     e.preventDefault();
-    const factor = Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0025));
-    void this.#zoomAt(this.#store.zoom.value * factor, e.clientX, e.clientY);
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.#viewSize().h : 1;
+    if (e.ctrlKey || e.metaKey) {
+      const factor = Math.exp(-e.deltaY * unit * 0.0025);
+      void this.#zoomAt(this.#store.zoom.value * factor, e.clientX, e.clientY);
+      return;
+    }
+    const scale = this.#displayScale();
+    // Shift+wheel on a mouse scrolls sideways.
+    const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX;
+    const dy = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
+    this.#setCamera({ x: this.#cam.x + (dx * unit) / scale, y: this.#cam.y + (dy * unit) / scale });
   };
 
   /** Sets zoom while keeping the image point under (clientX, clientY) fixed on screen. */
   async #zoomAt(zoom: number, clientX: number, clientY: number): Promise<void> {
-    const canvas = this.#canvasRef.value;
     const stage = this.#stageRef.value;
-    if (!canvas || !stage) return;
-    const before = canvas.getBoundingClientRect();
-    const ix = this.#area.x + ((clientX - before.left) / before.width) * canvas.width;
-    const iy = this.#area.y + ((clientY - before.top) / before.height) * canvas.height;
+    if (!stage) return;
+    const p = this.#imagePointAt(clientX, clientY);
     this.#store.setZoom(zoom);
+    const rect = stage.getBoundingClientRect();
+    const scale = this.#displayScale();
+    this.#cam = {
+      x: p.x - (clientX - rect.left - rect.width / 2) / scale,
+      y: p.y - (clientY - rect.top - rect.height / 2) / scale,
+    };
+    this.#scheduleViewSave();
     await this.#settleLayout();
-    const after = canvas.getBoundingClientRect();
-    stage.scrollLeft += after.left + ((ix - this.#area.x) / canvas.width) * after.width - clientX;
-    stage.scrollTop += after.top + ((iy - this.#area.y) / canvas.height) * after.height - clientY;
   }
 
   /**
-   * Zooms so the page content (the image plus anything drawn past it, not
-   * the empty margin) fits the stage, never above 100%, then centers it.
+   * Zooms so the page content (the image plus anything drawn past it) fits
+   * the stage, never above 100%, and centers it. Does not touch the page's
+   * saved view (Reset view does): fitting is only a way to look.
    */
   async #fitToWindow(): Promise<void> {
-    const canvas = this.#canvasRef.value;
+    const page = this.#store.activePage;
     const stage = this.#stageRef.value;
-    const c = this.#content;
-    if (!canvas || !stage || !canvas.width || !c.w || !this.#store.activePage.imageDataUrl) return;
+    if (!stage || !page.imageDataUrl) return;
+    const img = await this.#loadPageImage(page.imageDataUrl);
+    const c = sceneBounds(img.naturalWidth, img.naturalHeight, page.shapes);
     const dpr = window.devicePixelRatio || 1;
     const availW = stage.clientWidth - 32;
     const availH = stage.clientHeight - 32;
-    if (availW <= 0 || availH <= 0) return;
+    if (availW <= 0 || availH <= 0 || !c.w || !c.h) return;
     this.#store.setZoom(Math.min(1, (availW * dpr) / c.w, (availH * dpr) / c.h));
+    this.#cam = { x: c.x + c.w / 2, y: c.y + c.h / 2 };
     await this.#settleLayout();
-    const rect = canvas.getBoundingClientRect();
-    const stageRect = stage.getBoundingClientRect();
-    const scale = rect.width / canvas.width;
-    const cx = rect.left + (c.x - this.#area.x + c.w / 2) * scale;
-    const cy = rect.top + (c.y - this.#area.y + c.h / 2) * scale;
-    stage.scrollLeft += cx - (stageRect.left + stage.clientWidth / 2);
-    stage.scrollTop += cy - (stageRect.top + stage.clientHeight / 2);
   }
 
   #onPointerDown = (e: PointerEvent) => {
@@ -1342,8 +1433,7 @@ export class ScreenMarker extends LitElement {
 
   /**
    * Shapes are stored relative to the page image, so moving the image by d
-   * moves every shape by -d instead (one undo step), then scrolls so the
-   * shapes stay where they were on screen and the image lands where it was dropped.
+   * moves every shape by -d instead (one undo step).
    */
   async #commitImageMove(d: Point, nudge = false): Promise<void> {
     if (!nudge && Math.hypot(d.x, d.y) < CLICK_THRESHOLD) {
@@ -1356,17 +1446,12 @@ export class ScreenMarker extends LitElement {
       void this.#redraw();
       return;
     }
-    const anchor = { x: this.#content.x + this.#content.w / 2, y: this.#content.y + this.#content.h / 2 };
-    const before = this.#clientOf(anchor);
     this.#clearRegion();
     this.#store.moveShapes(ids, -d.x, -d.y);
+    // The camera moves with the shapes, so they stay put on screen and the image lands where dropped.
+    this.#cam = { x: this.#cam.x - d.x, y: this.#cam.y - d.y };
+    if (this.#store.activePage.view) this.#scheduleViewSave();
     await this.#settleLayout();
-    const after = this.#clientOf({ x: anchor.x - d.x, y: anchor.y - d.y });
-    const stage = this.#stageRef.value;
-    if (stage && before && after) {
-      stage.scrollLeft += after.x - before.x;
-      stage.scrollTop += after.y - before.y;
-    }
   }
 
   // ---------- find text (OCR) ----------
@@ -1468,7 +1553,7 @@ export class ScreenMarker extends LitElement {
     ctx.restore();
   }
 
-  /** Scrolls the current match into the middle of the stage if it is off screen. */
+  /** Centers the current match if it is off screen (without remembering that as the page's view). */
   #scrollToSearchHit(): void {
     const s = this.#search;
     const r = s?.hits[s.index];
@@ -1478,8 +1563,7 @@ export class ScreenMarker extends LitElement {
     if (!c) return;
     const box = stage.getBoundingClientRect();
     if (c.x > box.left + 40 && c.x < box.right - 40 && c.y > box.top + 40 && c.y < box.bottom - 40) return;
-    stage.scrollLeft += c.x - (box.left + box.width / 2);
-    stage.scrollTop += c.y - (box.top + box.height / 2);
+    this.#setCamera({ x: r.x + r.w / 2, y: r.y + r.h / 2 }, false);
   }
 
   /** Turns every match into a highlight or blur shape (one undo step). */
@@ -1927,10 +2011,13 @@ export class ScreenMarker extends LitElement {
   }
 
   #copyRegion = async () => {
-    const r = this.#activeRegion();
+    const r = this.#copyArea();
     if (!r) return;
     try {
       await copyRegion(this.#store.activePage, r, this.#exportBackground());
+      // The copied pixels, not older in-app shapes, are what Cmd/Ctrl+V should paste next
+      // (as a movable, resizable picture on a page that has an image).
+      this.#store.clearClipboard();
       this.#flashStatus('Selection copied to clipboard');
     } catch (err) {
       this.#flashStatus(`Copy failed: ${(err as Error).message}`);
@@ -2241,7 +2328,7 @@ export class ScreenMarker extends LitElement {
       void this.#joinChannel(name);
       await this.updateComplete;
       await this.#redraw();
-      if (!keepView) this.#fitToWindow();
+      if (!keepView) await this.#restoreView();
       this.#flashStatus(keepView ? `Updated to the latest "${name}"` : `Opened "${name}"`);
     } catch (err) {
       const e = err as Error & { status?: number };
@@ -2321,7 +2408,13 @@ export class ScreenMarker extends LitElement {
           const shown = p.shapes.filter((s) => !hidden.has(s.id));
           // Every build is sized by all shapes, so revealing never shifts or rescales the slide;
           // centered, so the images stay put between pages whose tags sit on different sides.
-          const flat = await flattenPage(p.imageDataUrl, shown, { background: null, sceneShapes: p.shapes, centered: true });
+          const flat = await flattenPage(p.imageDataUrl, shown, {
+            background: null,
+            sceneShapes: p.shapes,
+            centered: true,
+            // A page framed by hand (panned/zoomed in the editor) is centered where it was framed.
+            center: p.view,
+          });
           ({ width, height } = flat.canvas);
           ({ w: focusWidth, h: focusHeight } = flat.focus);
           builds.push(flat.canvas.toDataURL('image/png'));
@@ -2386,7 +2479,7 @@ export class ScreenMarker extends LitElement {
     void mountAccountUi();
     await this.updateComplete;
     await this.#redraw();
-    this.#fitToWindow();
+    await this.#restoreView();
   };
 
   // ---------- context menus ----------
@@ -2715,41 +2808,178 @@ export class ScreenMarker extends LitElement {
   #exportBackground(): string | null {
     const pref = this.#store.exportBackground.value;
     if (pref === 'transparent') return null;
-    // The host's resolved background is the theme's --bg (light-dark() resolved for the current scheme).
-    if (pref === 'theme') return getComputedStyle(this).backgroundColor || '#ffffff';
+    if (pref === 'theme') return this.#sceneColor();
     return pref;
   }
 
-  #renderExportBackground() {
-    const pref = this.#store.exportBackground.value;
-    const choice = pref === 'theme' || pref === 'transparent' || pref === '#ffffff' ? pref : 'custom';
+  /** The scene background as CSS (may be light-dark(), so it follows the color scheme). */
+  #sceneCss(): string {
+    const pref = this.#store.sceneBackground.value;
+    if (pref === 'system') return 'light-dark(#ffffff, #000000)';
+    if (pref === 'theme') return 'var(--bg)';
+    return pref;
+  }
+
+  /** The scene background resolved to a concrete color (for exports and slides). */
+  #sceneColor(): string {
+    const stage = this.#stageRef.value;
+    const c = stage ? getComputedStyle(stage).backgroundColor : '';
+    return c && c !== 'rgba(0, 0, 0, 0)' ? c : '#ffffff';
+  }
+
+  /** A labeled background picker: fixed choices plus a custom color. */
+  #renderBackgroundPicker(label: string, title: string, value: string, choices: [string, string][], set: (v: string) => void) {
+    const fixed = choices.some(([v]) => v === value);
     return html`
-      <label class="export-bg" title="Background outside the image in copies and downloads">
-        BG
+      <label class="export-bg" title=${title}>
+        ${label}
         <select
-          .value=${choice}
+          .value=${fixed ? value : 'custom'}
           @change=${(e: Event) => {
             const v = (e.target as HTMLSelectElement).value;
-            this.#store.exportBackground.set(v === 'custom' ? (choice === 'custom' ? pref : '#000000') : v);
+            set(v === 'custom' ? (fixed ? '#808080' : value) : v);
           }}
         >
-          <option value="theme">Theme</option>
-          <option value="#ffffff">White</option>
-          <option value="transparent">Transparent</option>
+          ${choices.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
           <option value="custom">Custom</option>
         </select>
-        ${choice === 'custom'
-          ? html`<input
-              type="color"
-              .value=${pref}
-              @input=${(e: Event) => this.#store.exportBackground.set((e.target as HTMLInputElement).value)}
-            />`
-          : ''}
+        ${fixed ? '' : html`<input type="color" .value=${value} @input=${(e: Event) => set((e.target as HTMLInputElement).value)} />`}
       </label>
     `;
   }
 
+  #renderExportBackground() {
+    return this.#renderBackgroundPicker(
+      'BG',
+      'Background outside the image in copies and downloads',
+      this.#store.exportBackground.value,
+      [
+        ['theme', 'Scene'],
+        ['#ffffff', 'White'],
+        ['transparent', 'Transparent'],
+      ],
+      (v) => this.#store.exportBackground.set(v)
+    );
+  }
+
+  #renderSceneBackground() {
+    return this.#renderBackgroundPicker(
+      'Scene',
+      'Background around the page in the editor and slides',
+      this.#store.sceneBackground.value,
+      [
+        ['system', 'System'],
+        ['theme', 'Theme'],
+        ['#ffffff', 'White'],
+        ['#000000', 'Black'],
+      ],
+      (v) => this.#store.sceneBackground.set(v)
+    );
+  }
+
+  /**
+   * What a copy should be limited to: the selection region, else the box
+   * around the selected shapes (with their surroundings), else null for "everything".
+   */
+  #copyArea(): Rect | null {
+    const region = this.#activeRegion();
+    if (region) return region;
+    const shapes = this.#store.selectedShapes;
+    if (!shapes.length) return null;
+    const pad = 8;
+    const bs = shapes.map((s) => shapeBounds(s));
+    const x1 = Math.floor(Math.min(...bs.map((b) => b.x)) - pad);
+    const y1 = Math.floor(Math.min(...bs.map((b) => b.y)) - pad);
+    const x2 = Math.ceil(Math.max(...bs.map((b) => b.x + b.width)) + pad);
+    const y2 = Math.ceil(Math.max(...bs.map((b) => b.y + b.height)) + pad);
+    return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  }
+
+  // ---------- command palette (Shift Shift) ----------
+
+  /** Everything the Shift-Shift palette offers, for the current state (unavailable commands are left out). */
+  #commands(): Command[] {
+    const store = this.#store;
+    const page = store.activePage;
+    const hasImage = !!page.imageDataUrl;
+    const selected = store.selectedShapes;
+    const pages = store.pages.value;
+    const cmds: Command[] = [];
+    const add = (id: string, label: string, run: () => void, hint?: string, when = true) => {
+      if (when) cmds.push({ id, label, run, hint });
+    };
+    for (const t of TOOLS) add(`tool-${t.type}`, `Tool: ${t.label.replace(/ \(.*\)$/, '')}`, () => this.#setTool(t.type), t.key.toUpperCase());
+
+    add('copy-image', this.#copyArea() ? 'Copy selection as image' : 'Copy image (all pages)', () => void this.#copyImage(), '', hasImage);
+    add('copy-page', 'Copy current page as image', () => void this.#copyCurrentPage(), '', hasImage);
+    add('copy-md', 'Copy as Markdown', () => void this.#copyAsMarkdown(), '', hasImage);
+    add('download', 'Download PNG', () => void this.#download(), '', hasImage);
+    add('preview', 'Preview export', () => void this.#openPreview(), '', hasImage);
+    add('present', 'Present', () => void this.#present(), '', hasImage);
+    add('share', 'Share presentation link', () => void this.#sharePresentation(), '', hasImage);
+
+    add('find', 'Find text in image', () => this.#openSearch(), '⌘F', hasImage);
+    add('diff', 'Highlight changes vs previous page', () => {
+      const prev = this.#previousImagePage();
+      if (prev) void this.#highlightChanges(prev.imageDataUrl!, 'the previous page');
+    }, '', hasImage && !!this.#previousImagePage());
+
+    add('fit', 'Fit to window', () => void this.#fitToWindow(), 'F', hasImage);
+    add('reset-view', 'Reset view (initial position)', this.#resetView, '', !!page.view);
+    add('zoom-in', 'Zoom in', () => this.#zoomBy(1.2), '⌘+');
+    add('zoom-out', 'Zoom out', () => this.#zoomBy(1 / 1.2), '⌘−');
+    add('zoom-100', 'Zoom to 100%', () => this.#zoomBy(1 / store.zoom.value), '⌘0');
+
+    add('undo', 'Undo', () => store.undo(), '⌘Z');
+    add('redo', 'Redo', () => store.redo(), '⇧⌘Z');
+    add('select-all', 'Select all shapes', () => store.selectShapes(page.shapes.map((s) => s.id)), '⌘A', page.shapes.length > 0);
+    add('duplicate', 'Duplicate selection', () => store.duplicateSelectedShapes(), '⌘D', selected.length > 0);
+    add('front', 'Bring to front', () => store.reorderSelectedShapes('front'), '⌘]', selected.length > 0);
+    add('back', 'Send to back', () => store.reorderSelectedShapes('back'), '⌘[', selected.length > 0);
+    add('delete', 'Delete selection', () => store.deleteSelectedShapes(), '⌫', selected.length > 0);
+    add('arrange', 'Arrange pictures in a row', () => void this.#arrangePicturesInRow(), '', selected.some((s) => s.type === 'picture'));
+    add('crop', 'Crop to selection', () => void this.#cropRegion(), 'Enter', !!this.#activeRegion());
+    add('clear', 'Clear annotations on this page', () => store.clearActivePage(), '', page.shapes.length > 0);
+
+    add('rotate-ccw', 'Rotate left', () => void this.#transformImage('rotate-ccw'), '', hasImage);
+    add('rotate-cw', 'Rotate right', () => void this.#transformImage('rotate-cw'), '', hasImage);
+    add('flip-h', 'Flip horizontally', () => void this.#transformImage('flip-h'), '', hasImage);
+    add('flip-v', 'Flip vertically', () => void this.#transformImage('flip-v'), '', hasImage);
+
+    add('new-page', 'New page', () => this.#addPage(), '');
+    add('dup-page', 'Duplicate page', () => this.#duplicatePage(page.id), '⇧⌘D');
+    add('next-page', 'Next page', () => this.#gotoAdjacentPage(1), '→', pages.length > 1);
+    add('prev-page', 'Previous page', () => this.#gotoAdjacentPage(-1), '←', pages.length > 1);
+    add('delete-page', 'Delete page', () => this.#closePageWithConfirm(page.id), '');
+    add('reveal', page.reveal ? 'Stop revealing tags one at a time' : 'Reveal tags & steps one at a time', () =>
+      store.updatePageMeta(page.id, { reveal: !page.reveal }), '', hasImage);
+    add('notes', this.#notesOpen ? 'Hide speaker notes' : 'Show speaker notes', () => {
+      this.#notesOpen = !this.#notesOpen;
+      this.requestUpdate();
+    });
+    add('strip', this.#stripCollapsed ? 'Show page thumbnails' : 'Collapse pages to tabs', () => this.#setStripCollapsed(!this.#stripCollapsed));
+
+    add('open-image', 'Open image file…', () => this.#imageInputRef.value?.click());
+    add('save-file', 'Save document to file', () => this.#saveDocument(), '⌘S');
+    add('load-file', 'Load document from file…', () => this.#loadDocumentInputRef.value?.click(), '⌘O');
+    add('cloud-save', 'Save to folderfoo', () => void this.#saveToCloud(), '');
+    add('cloud-save-as', 'Save to folderfoo as…', () => void this.#saveToCloud(true), '');
+    add('cloud-open', 'Open from folderfoo…', () => void showFilePicker().catch((err: Error) => this.#flashStatus(`folderfoo unavailable: ${err.message}`)), '');
+    add('new-doc', 'New document', () => this.#newDocument(), '');
+
+    add('theme', 'Change color theme', () => this.#cycleTheme(), '');
+    for (const [v, l] of [['system', 'System'], ['theme', 'Theme'], ['#ffffff', 'White'], ['#000000', 'Black']] as const) {
+      add(`scene-${v}`, `Scene background: ${l}`, () => store.sceneBackground.set(v), '', store.sceneBackground.value !== v);
+    }
+    for (const [v, l] of [['theme', 'Scene'], ['#ffffff', 'White'], ['transparent', 'Transparent']] as const) {
+      add(`export-${v}`, `Export background: ${l}`, () => store.exportBackground.set(v), '', store.exportBackground.value !== v);
+    }
+    return cmds;
+  }
+
   #copyImage = async () => {
+    // With a selection, the copy buttons copy only what is selected.
+    if (this.#copyArea()) return this.#copyRegion();
     try {
       await copyImageOnly(this.#pagesWithImages(), this.#exportBackground());
       this.#flashStatus('Image copied to clipboard');
@@ -2759,6 +2989,7 @@ export class ScreenMarker extends LitElement {
   };
 
   #copyCurrentPage = async () => {
+    if (this.#copyArea()) return this.#copyRegion();
     try {
       await copyImageOnly([this.#store.activePage], this.#exportBackground());
       this.#flashStatus('Current page copied to clipboard');
@@ -2820,7 +3051,7 @@ export class ScreenMarker extends LitElement {
     this.#store.setActivePage(id);
     await this.updateComplete;
     await this.#redraw();
-    this.#fitToWindow();
+    await this.#restoreView();
   }
 
   #gotoAdjacentPage(direction: -1 | 1): void {
@@ -2937,7 +3168,10 @@ export class ScreenMarker extends LitElement {
   }
 
   updated(): void {
-    void this.#redraw();
+    // A pan alone only moves the canvas, unless the view has left what it covers.
+    const camOnly = this.#camOnlyUpdate;
+    this.#camOnlyUpdate = false;
+    if (!camOnly || !this.#viewCovered()) void this.#redraw();
     this.#checkAutosave();
     if (this.#focusTextEdit && this.#textInputRef.value) {
       this.#focusTextEdit = false;
@@ -2963,7 +3197,10 @@ export class ScreenMarker extends LitElement {
     const canvas = this.#canvasRef.value;
     if (!canvas || !canvas.width) return '';
     const scale = this.#displayScale();
-    return `width:${canvas.width * scale}px; height:${canvas.height * scale}px;`;
+    const { w, h } = this.#viewSize();
+    const left = w / 2 + (this.#area.x - this.#cam.x) * scale;
+    const top = h / 2 + (this.#area.y - this.#cam.y) * scale;
+    return `width:${canvas.width * scale}px; height:${canvas.height * scale}px; left:${left}px; top:${top}px;`;
   }
 
   #canvasCursorCss(): string {
@@ -3104,12 +3341,20 @@ export class ScreenMarker extends LitElement {
           <button ?disabled=${noImage} @click=${() => this.#transformImage('flip-v')} title="Flip vertically">⇵</button>
         </div>
         <div class="zoom-controls">
-          <button @click=${() => this.#store.zoomOut()} title="Zoom out (Cmd/Ctrl+-, Cmd/Ctrl+scroll, pinch)">−</button>
-          <span class="zoom-level" @dblclick=${() => this.#store.zoomReset()} title="Double-click to reset">
+          <button @click=${() => this.#zoomBy(1 / 1.2)} title="Zoom out (Cmd/Ctrl+-, Cmd/Ctrl+scroll, pinch)">−</button>
+          <span class="zoom-level" @dblclick=${() => this.#zoomBy(1 / this.#store.zoom.value)} title="Double-click for 100%">
             ${Math.round(this.#store.zoom.value * 100)}%
           </span>
-          <button @click=${() => this.#store.zoomIn()} title="Zoom in (Cmd/Ctrl+=, Cmd/Ctrl+scroll, pinch)">+</button>
+          <button @click=${() => this.#zoomBy(1.2)} title="Zoom in (Cmd/Ctrl+=, Cmd/Ctrl+scroll, pinch)">+</button>
           <button @click=${() => this.#fitToWindow()} title="Fit to window (F)">Fit</button>
+          ${this.#renderSceneBackground()}
+          <button
+            ?disabled=${!page.view}
+            @click=${this.#resetView}
+            title="Back to the initial position: forget this page's panned/zoomed view (slides center on the images again)"
+          >
+            ⌖ Reset view
+          </button>
         </div>
         <button @click=${() => this.#store.undo()} title="Undo (Cmd/Ctrl+Z)">↶ Undo</button>
         <button @click=${() => this.#store.redo()} title="Redo (Shift+Cmd/Ctrl+Z)">↷ Redo</button>
@@ -3127,7 +3372,7 @@ export class ScreenMarker extends LitElement {
           Load…
         </label>
         <label style="display:inline-flex; align-items:center; cursor:pointer; border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:13px;">
-          <input type="file" accept="image/*" style="display:none" @change=${this.#onFilePick} />
+          <input ${ref(this.#imageInputRef)} type="file" accept="image/*" style="display:none" @change=${this.#onFilePick} />
           Open image…
         </label>
         <div class="group">
@@ -3160,6 +3405,7 @@ export class ScreenMarker extends LitElement {
       ${this.#renderSearchBar()}
       <div
         class="stage"
+        style="background:${this.#sceneCss()}"
         ${ref(this.#stageRef)}
         @pointerdown=${this.#onStagePointerDown}
         @pointermove=${this.#onStagePointerMove}
@@ -3223,6 +3469,7 @@ export class ScreenMarker extends LitElement {
             </div>
           `
         : ''}
+      <screen-marker-palette .commands=${this.#commands()}></screen-marker-palette>
       ${this.#presenting
         ? html`
             <screen-marker-presenter
@@ -3236,6 +3483,7 @@ export class ScreenMarker extends LitElement {
               @presenter-edit-copy=${this.#editPublicCopy}
               @presenter-copy-link=${this.#sharePresentation}
               status=${this.#statusMsg}
+              background=${this.#sceneColor()}
             ></screen-marker-presenter>
           `
         : ''}

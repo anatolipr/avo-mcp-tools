@@ -224,16 +224,17 @@ export const screenMarkerStyles = css`
     .spacer {
       flex: 1;
     }
+    /* A camera, not a scroll box: the wheel pans and the canvas is placed by the camera (see #canvasWrapStyle). */
     .stage {
       flex: 1;
-      display: flex;
-      overflow: auto;
-      padding: 16px;
+      position: relative;
+      overflow: hidden;
+      overscroll-behavior: none;
+      touch-action: none;
+      background: var(--scene-bg, transparent);
     }
     .canvas-wrap {
-      position: relative;
-      margin: auto;
-      flex: none;
+      position: absolute;
       overflow: hidden;
     }
     canvas {

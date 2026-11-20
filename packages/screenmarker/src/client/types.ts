@@ -67,6 +67,10 @@ export interface Page {
   notes?: string;
   // Present this page's tags and step markers one per click, in the order added.
   reveal?: boolean;
+  // Where the editor was looking, once the page has been panned or zoomed by
+  // hand: the image point at the center of the view, and the zoom. Slides
+  // center on that point too. Absent: fit to the content (the default).
+  view?: { x: number; y: number; zoom: number };
 }
 
 /** Axis-aligned rectangle in canvas (image) pixels. */

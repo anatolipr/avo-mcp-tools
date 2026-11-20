@@ -720,6 +720,8 @@ export interface FlattenOptions {
   background?: string | null;
   sceneShapes?: Shape[];
   centered?: boolean;
+  // With `centered`: center on this point (a page's saved view) instead of the images.
+  center?: Point;
 }
 
 /** The page image plus every picture shape: what a slide centers on. Integer-aligned. */
@@ -757,14 +759,20 @@ const SCENE_BACKGROUND = '#ffffff';
 export async function flattenPage(
   imageDataUrl: string,
   shapes: Shape[],
-  { background = SCENE_BACKGROUND, sceneShapes = shapes, centered = false }: FlattenOptions = {}
+  { background = SCENE_BACKGROUND, sceneShapes = shapes, centered = false, center }: FlattenOptions = {}
 ): Promise<{ canvas: HTMLCanvasElement; origin: Point; focus: Rect }> {
   const [img] = await Promise.all([loadImage(imageDataUrl), preloadPictures(shapes)]);
   const W = img.naturalWidth;
   const H = img.naturalHeight;
   let area = sceneBounds(W, H, sceneShapes);
   const focus = focusBounds(W, H, sceneShapes);
-  if (centered) {
+  if (centered && center) {
+    const cx = Math.round(center.x);
+    const cy = Math.round(center.y);
+    const dx = Math.max(cx - area.x, area.x + area.w - cx);
+    const dy = Math.max(cy - area.y, area.y + area.h - cy);
+    area = { x: cx - dx, y: cy - dy, w: 2 * dx, h: 2 * dy };
+  } else if (centered) {
     const dx = Math.max(focus.x - area.x, area.x + area.w - (focus.x + focus.w));
     const dy = Math.max(focus.y - area.y, area.y + area.h - (focus.y + focus.h));
     area = { x: focus.x - dx, y: focus.y - dy, w: focus.w + 2 * dx, h: focus.h + 2 * dy };

@@ -8,9 +8,12 @@ export interface Preferences {
   // Fill outside the page image in exports: 'theme' (the editor background),
   // 'transparent', or a #rrggbb color.
   exportBackground: string;
+  // Editor (and slide) background around the page: 'system' (white in light
+  // mode, black in dark), 'theme' (the app's panel background), or #rrggbb.
+  sceneBackground: string;
 }
 
-const DEFAULTS: Preferences = { color: '#ff3b30', lineWidth: 3, fontSize: 18, fill: false, exportBackground: 'theme' };
+const DEFAULTS: Preferences = { color: '#ff3b30', lineWidth: 3, fontSize: 18, fill: false, exportBackground: 'theme', sceneBackground: 'system' };
 
 /**
  * Last-used tool defaults (color, line width, font size, fill), shared across all
@@ -29,6 +32,7 @@ export function loadPreferences(): Preferences {
       fontSize: typeof parsed.fontSize === 'number' ? parsed.fontSize : DEFAULTS.fontSize,
       fill: typeof parsed.fill === 'boolean' ? parsed.fill : DEFAULTS.fill,
       exportBackground: typeof parsed.exportBackground === 'string' ? parsed.exportBackground : DEFAULTS.exportBackground,
+      sceneBackground: typeof parsed.sceneBackground === 'string' ? parsed.sceneBackground : DEFAULTS.sceneBackground,
     };
   } catch {
     return { ...DEFAULTS };
