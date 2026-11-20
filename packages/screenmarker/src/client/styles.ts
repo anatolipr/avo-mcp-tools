@@ -447,19 +447,19 @@ export const screenMarkerStyles = css`
     }
     .page-strip {
       flex: none;
-      width: 148px;
+      width: 104px;
       overflow-y: auto;
-      padding: 10px 8px;
+      padding: 8px 6px;
       background: var(--panel);
       border-right: 1px solid var(--border);
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 6px;
       user-select: none;
     }
     .page-item {
       position: relative;
-      padding: 4px 4px 4px 18px;
+      padding: 3px 3px 3px 15px;
       border-radius: 8px;
       border: 2px solid transparent;
       cursor: pointer;
@@ -491,9 +491,9 @@ export const screenMarkerStyles = css`
     }
     .page-num {
       position: absolute;
-      left: 3px;
-      top: 4px;
-      font-size: 11px;
+      left: 2px;
+      top: 3px;
+      font-size: 10px;
       opacity: 0.6;
     }
     .page-thumb {
@@ -516,16 +516,16 @@ export const screenMarkerStyles = css`
       opacity: 0.5;
     }
     .page-title {
-      margin-top: 3px;
-      font-size: 11px;
+      margin-top: 2px;
+      font-size: 10px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
     .page-actions {
       position: absolute;
-      top: 6px;
-      right: 6px;
+      top: 4px;
+      right: 4px;
       display: none;
       gap: 2px;
     }
@@ -533,14 +533,39 @@ export const screenMarkerStyles = css`
       display: flex;
     }
     .page-actions button {
-      padding: 0 5px;
-      font-size: 12px;
-      line-height: 18px;
+      padding: 0 4px;
+      font-size: 11px;
+      line-height: 16px;
       background: var(--panel);
     }
     .page-add {
-      font-size: 12px;
+      font-size: 11px;
+      padding: 4px 6px;
       opacity: 0.8;
+    }
+    .strip-toggle {
+      padding: 2px 7px;
+    }
+    .tabs-inline {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      min-width: 0;
+      overflow-x: auto;
+      flex: 0 1 auto;
+    }
+    .tabs-inline .tab {
+      padding: 4px 6px 4px 10px;
+      border-radius: 6px;
+      white-space: nowrap;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tabs-inline .tab.active {
+      background: var(--bg);
+      border-color: var(--border);
+      margin-bottom: 0;
     }
     .slide-panel {
       display: flex;

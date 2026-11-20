@@ -299,6 +299,14 @@ export class ScreenMarker extends LitElement {
   #recent: { name: string; openedAt: number }[] | null = null;
   #thumbUrls = new WeakMap<Page, string | null>();
   #notesOpen = false;
+  // Pages as a thumbnail sidebar, or collapsed to compact tabs in the title bar. Remembered per browser.
+  #stripCollapsed = (() => {
+    try {
+      return localStorage.getItem('screenmarker_page_strip') === 'tabs';
+    } catch {
+      return false;
+    }
+  })();
   #menu: { x: number; y: number; items: MenuItem[] } | null = null;
   #cloudName: string | null = cloudNameFromHash();
   // The document behind a public link, kept for "Edit a copy".
@@ -2067,7 +2075,63 @@ export class ScreenMarker extends LitElement {
     return null;
   }
 
+  #setStripCollapsed(collapsed: boolean): void {
+    this.#stripCollapsed = collapsed;
+    try {
+      localStorage.setItem('screenmarker_page_strip', collapsed ? 'tabs' : 'strip');
+    } catch {
+      // per-browser nicety only
+    }
+    this.requestUpdate();
+  }
+
+  /** Collapsed form of the page strip: compact tabs in the title bar, as before the sidebar existed. */
+  #renderPageTabs(activeId: string) {
+    const pages = this.#store.pages.value;
+    return html`
+      <button class="strip-toggle" title="Show page thumbnails" @click=${() => this.#setStripCollapsed(false)}>▤</button>
+      <div
+        class="tabs-inline"
+        @dragover=${(e: DragEvent) => {
+          if (this.#draggingPageId) e.preventDefault();
+        }}
+        @drop=${(e: DragEvent) => {
+          e.preventDefault();
+          const fromId = this.#draggingPageId;
+          this.#draggingPageId = null;
+          this.#dragOverPageId = null;
+          this.#dragOverSide = null;
+          if (fromId && this.#store.reorderPageToEnd(fromId)) this.#flashMovedTab(fromId);
+          else this.requestUpdate();
+        }}
+      >
+        ${pages.map(
+          (p, i) => html`
+            <div
+              class="tab ${p.id === activeId ? 'active' : ''} ${this.#dragOverPageId === p.id
+                ? `drag-over-${this.#dragOverSide}`
+                : ''} ${this.#justMovedPageId === p.id ? 'just-moved' : ''}"
+              draggable="true"
+              title=${p.title || this.#pageLabel(i)}
+              @click=${() => this.#switchPage(p.id)}
+              @contextmenu=${(e: MouseEvent) => this.#onPageContextMenu(e, p.id, i)}
+              @dragstart=${(e: DragEvent) => this.#onTabDragStart(e, p.id)}
+              @dragover=${(e: DragEvent) => this.#onTabDragOver(e, p.id)}
+              @drop=${(e: DragEvent) => this.#onTabDrop(e, p.id)}
+              @dragend=${this.#onTabDragEnd}
+            >
+              ${p.title || this.#pageLabel(i)}
+              <span class="tab-close" title="Delete page" @click=${(e: Event) => this.#closePage(e, p.id)}>×</span>
+            </div>
+          `
+        )}
+        <div class="tab-add" @click=${() => this.#addPage()} title="Add page">+</div>
+      </div>
+    `;
+  }
+
   #renderPageStrip(activeId: string) {
+    if (this.#stripCollapsed) return '';
     const pages = this.#store.pages.value;
     return html`
       <nav
@@ -2124,6 +2188,7 @@ export class ScreenMarker extends LitElement {
           `;
         })}
         <button class="page-add" @click=${() => this.#addPage()} title="Add page">+ Page</button>
+        <button class="page-add" @click=${() => this.#setStripCollapsed(true)} title="Collapse to tabs in the top bar">« Tabs</button>
       </nav>
     `;
   }
@@ -2318,6 +2383,8 @@ export class ScreenMarker extends LitElement {
   #dragOverSideFor(e: DragEvent): 'before' | 'after' {
     const el = e.currentTarget as HTMLElement;
     const rect = el.getBoundingClientRect();
+    // Sidebar tiles stack vertically; collapsed title-bar tabs sit side by side.
+    if (el.classList.contains('tab')) return e.clientX - rect.left < rect.width / 2 ? 'before' : 'after';
     return e.clientY - rect.top < rect.height / 2 ? 'before' : 'after';
   }
 
@@ -2429,6 +2496,7 @@ export class ScreenMarker extends LitElement {
       </button>
       <div class="titlebar">
         <span class="app-name">screenmarker</span>
+        ${this.#stripCollapsed ? this.#renderPageTabs(page.id) : ''}
         ${this.#cloudName
           ? html`
               <span class="cloud-name" title="Saved in folderfoo">☁ ${this.#cloudName}</span>

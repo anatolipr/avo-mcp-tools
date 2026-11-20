@@ -24,7 +24,7 @@ Starts a local server and opens the app in your browser. Paste a screenshot (`Cm
 - **Rotate and flip** the image; annotations follow
 - **Zoom and pan**: images open fit-to-window; `Cmd/Ctrl+scroll` or trackpad pinch zooms around the cursor; hold `Space` and drag to pan (tap `Space` for the preview)
 - **Custom colors** via a color picker, plus an eyedropper (in Chromium browsers) to pick any color on screen
-- **Page strip**: a sidebar of slide thumbnails — click to switch, drag to reorder, hover for duplicate/delete, right-click for more (move up/down, present from here)
+- **Page strip**: a sidebar of slide thumbnails — click to switch, drag to reorder, hover for duplicate/delete, right-click for more (move up/down, present from here); **« Tabs** collapses it to compact tabs in the top bar (▤ brings the thumbnails back)
 - **Slide panel** under the canvas: a slide **title** (shown on the thumbnail and when presenting), **speaker notes** (shown only when you present the open document, with `N`; they are stored in the document, so don't put secrets there if you share it), and **Reveal tags & steps one at a time**, which presents that page's tags and step markers one per click, in the order you added them (`Cmd/Ctrl+]`/`[` changes the order)
 - **Right-click menus** on shapes (edit, duplicate, copy, front/back, color, delete), on empty canvas (paste, select all, present), and on pages
 - **Shift while drawing**: lines and arrows snap to 45°, rectangles/ellipses/highlights/blurs become squares and circles; Shift while moving locks to one axis; Shift on a corner handle keeps the aspect ratio
