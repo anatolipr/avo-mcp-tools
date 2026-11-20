@@ -3,9 +3,12 @@ import { LitElement, html, css } from 'lit';
 /** One slide: its build images (one when nothing is revealed step by step), plus title and speaker notes. */
 export interface Slide {
   builds: string[];
-  // Size of every build image, in image pixels.
+  // Size of every build image, in image pixels; the page's images sit centered in it.
   width: number;
   height: number;
+  // Size of the page image plus its picture shapes, without the tags around them.
+  focusWidth: number;
+  focusHeight: number;
   title: string;
   notes: string;
 }
@@ -33,6 +36,7 @@ export class ScreenMarkerPresenter extends LitElement {
     index: { type: Number },
     zoom: { attribute: false },
     scale: { state: true },
+    viewSize: { state: true },
     build: { state: true },
     laser: { state: true },
     laserPos: { state: true },
@@ -48,6 +52,11 @@ export class ScreenMarkerPresenter extends LitElement {
   declare zoom: number | null;
   // CSS pixels per slide pixel; null fits the slide to the screen.
   declare scale: number | null;
+  declare viewSize: { w: number; h: number } | null;
+  #resizeObserver = new ResizeObserver(([entry]) => {
+    const el = entry!.target as HTMLElement;
+    this.viewSize = { w: el.clientWidth - 48, h: el.clientHeight - 48 };
+  });
   declare build: number;
   declare laser: boolean;
   declare laserPos: { x: number; y: number } | null;
@@ -65,6 +74,7 @@ export class ScreenMarkerPresenter extends LitElement {
     this.index = 0;
     this.zoom = null;
     this.scale = null;
+    this.viewSize = null;
     this.build = 0;
     this.laser = false;
     this.laserPos = null;
@@ -87,33 +97,30 @@ export class ScreenMarkerPresenter extends LitElement {
       flex-direction: column;
       user-select: none;
     }
+    /* Flex + auto margins, not grid centering, so a zoomed-in slide can scroll to every edge. */
     .slide {
       flex: 1;
       min-height: 0;
-      display: grid;
-      place-items: center;
+      display: flex;
+      overflow: auto;
       padding: 24px;
       cursor: pointer;
     }
     .slide img {
-      max-width: 100%;
-      max-height: 100%;
-      object-fit: contain;
+      flex: none;
+      margin: auto;
       /* Follows the image's alpha, so transparent margins around tags cast no box. */
       filter: drop-shadow(0 6px 30px rgba(0, 0, 0, 0.6));
     }
-    /* Flex + auto margins, not grid centering, so an overflowing slide can scroll to every edge. */
-    .slide.zoomed {
-      display: flex;
-      overflow: auto;
-    }
-    .slide.zoomed img {
-      flex: none;
-      margin: auto;
-      max-width: none;
-      max-height: none;
+    /* Until the stage is measured. */
+    .slide.unsized img {
+      flex: 0 1 auto;
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
     }
     .message {
+      margin: auto;
       opacity: 0.75;
       font-size: 15px;
       text-align: center;
@@ -240,6 +247,7 @@ export class ScreenMarkerPresenter extends LitElement {
     window.removeEventListener('keyup', this.#onKeyUp, true);
     window.removeEventListener('pointermove', this.#onMove);
     this.removeEventListener('wheel', this.#onWheel);
+    this.#resizeObserver.disconnect();
     clearTimeout(this.#idleTimer);
     if (document.fullscreenElement === this) void document.exitFullscreen();
   }
@@ -291,12 +299,30 @@ export class ScreenMarkerPresenter extends LitElement {
     return window.devicePixelRatio || 1;
   }
 
-  /** Current CSS pixels per slide pixel, measured when fitting. */
+  firstUpdated(): void {
+    this.#resizeObserver.observe(this.renderRoot.querySelector('.slide')!);
+  }
+
+  /**
+   * Fit scale (never enlarging), shared by every slide of the same image
+   * size: the one whose tags need the most room sets it, so duplicated pages
+   * show their image at one size and place however their tags move.
+   */
+  #fitScale(): number | null {
+    const v = this.viewSize;
+    const cur = this.slides[this.index];
+    if (!v || !cur?.width || v.w <= 0 || v.h <= 0) return null;
+    let scale = 1;
+    for (const s of this.slides) {
+      if (s.focusWidth !== cur.focusWidth || s.focusHeight !== cur.focusHeight) continue;
+      scale = Math.min(scale, v.w / s.width, v.h / s.height);
+    }
+    return scale;
+  }
+
+  /** Current CSS pixels per slide pixel. */
   #currentScale(): number {
-    if (this.scale !== null) return this.scale;
-    const img = this.renderRoot.querySelector('.slide img');
-    const w = this.slides[this.index]?.width;
-    return img && w ? img.getBoundingClientRect().width / w : 1 / this.#dpr();
+    return this.scale ?? this.#fitScale() ?? 1 / this.#dpr();
   }
 
   /** Sets the zoom, keeping the slide point under (clientX, clientY) fixed; defaults to the view center. */
@@ -442,6 +468,7 @@ export class ScreenMarkerPresenter extends LitElement {
     const src = slide?.builds[this.build];
     const title = slide?.title || this.heading;
     const zoomed = this.scale !== null && !!slide?.width;
+    const scale = this.scale ?? this.#fitScale();
     return html`
       <div class="top">
         <span>${title}</span>
@@ -451,12 +478,12 @@ export class ScreenMarkerPresenter extends LitElement {
             </button>`
           : html`<button @click=${() => this.#close()} title="Close (Esc)">✕ Close</button>`}
       </div>
-      <div class="slide ${zoomed ? 'zoomed' : ''}" @click=${this.#onSlideClick}>
+      <div class="slide ${scale === null ? 'unsized' : ''}" @click=${this.#onSlideClick}>
         ${src
           ? html`<img
               src=${src}
               alt="Slide ${this.index + 1} of ${n}"
-              style=${zoomed ? `width:${slide!.width * this.scale!}px; height:${slide!.height * this.scale!}px` : ''}
+              style=${scale === null ? '' : `width:${slide!.width * scale}px; height:${slide!.height * scale}px`}
             />`
           : html`<div class="message">${this.message}</div>`}
       </div>

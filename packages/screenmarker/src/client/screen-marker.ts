@@ -14,8 +14,10 @@ import {
   drawShapes,
   flattenPage,
   flattenPagesToCanvas,
+  focusBounds,
   hitTestShapes,
   layoutTag,
+  preloadPictures,
   sceneBounds,
   shapeBounds,
   shapesInRect,
@@ -97,7 +99,7 @@ const TAG_ARROW_LABEL: Record<TagArrow, string> = {
 /** Largest editor canvas side, in image pixels (keeps very low zoom levels from allocating huge canvases). */
 const MAX_AREA_SIDE = 8192;
 
-const BOX_RESIZABLE: ShapeType[] = ['rect', 'ellipse', 'highlight', 'blur', 'pen'];
+const BOX_RESIZABLE: ShapeType[] = ['rect', 'ellipse', 'highlight', 'blur', 'pen', 'picture'];
 
 /** Which part of a box a drag grabbed: an edge/corner (compass letters) or the body. */
 type BoxGrab = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -205,6 +207,11 @@ function relativeTime(ms: number): string {
   if (s < 3600) return `${Math.round(s / 60)} min ago`;
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return new Date(ms).toLocaleDateString();
+}
+
+/** Space between pictures in a row: proportional to the page image so it reads the same at any resolution. */
+function pictureGap(imageHeight: number): number {
+  return Math.max(16, Math.round(imageHeight * 0.03));
 }
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -373,8 +380,15 @@ export class ScreenMarker extends LitElement {
 
   #onDrop = async (e: DragEvent) => {
     e.preventDefault();
-    const file = e.dataTransfer?.files?.[0];
-    if (file) await this.#loadImageFile(file);
+    const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    // Onto a page that has an image, files become movable pictures centered at the drop point.
+    if (this.#store.activePage.imageDataUrl && this.#canvasRef.value) {
+      const at = this.#canvasPoint(e);
+      for (const f of files) await this.#addPicture(f, at);
+      return;
+    }
+    await this.#loadImageFile(files[0]!);
   };
 
   #onPaste = async (e: ClipboardEvent) => {
@@ -384,7 +398,10 @@ export class ScreenMarker extends LitElement {
     for (const item of items) {
       if (item.type.startsWith('image/')) {
         const file = item.getAsFile();
-        if (file) await this.#loadImageFile(file);
+        if (!file) return;
+        // A page that already has an image gets the paste as an extra, movable picture.
+        if (this.#store.activePage.imageDataUrl) await this.#addPicture(file);
+        else await this.#loadImageFile(file);
         return;
       }
     }
@@ -647,6 +664,77 @@ export class ScreenMarker extends LitElement {
     this.#fitToWindow();
   }
 
+  /**
+   * Adds an image file to the active page as a picture shape at its natural
+   * size: centered on `at`, or else to the right of the page's images (so
+   * repeated pastes build a row). Selects it.
+   */
+  async #addPicture(file: File, at?: Point): Promise<void> {
+    const src = await fileToDataUrl(file);
+    const img = new Image();
+    img.src = src;
+    try {
+      await img.decode();
+    } catch {
+      this.#flashStatus('Could not read that image');
+      return;
+    }
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    const page = this.#store.activePage;
+    const main = await this.#loadPageImage(page.imageDataUrl!);
+    const focus = focusBounds(main.naturalWidth, main.naturalHeight, page.shapes);
+    const gap = pictureGap(main.naturalHeight);
+    const x = at ? at.x - w / 2 : focus.x + focus.w + gap;
+    const y = at ? at.y - h / 2 : focus.y;
+    const shape: Shape = {
+      id: makeId(),
+      type: 'picture',
+      color: this.#store.activeColor.value,
+      lineWidth: 0,
+      points: [
+        { x, y },
+        { x: x + w, y: y + h },
+      ],
+      src,
+    };
+    this.#store.addShape(shape);
+    this.#store.activeTool.set('select');
+    this.#store.selectShapes([shape.id]);
+    await this.updateComplete;
+    await this.#redraw();
+    if (!at) this.#fitToWindow();
+  }
+
+  /**
+   * Lines up the selected pictures to the right of the page image, in their
+   * current left-to-right order, each scaled to the image's height with an
+   * even gap: a ribbon of screenshots. One undo step.
+   */
+  async #arrangePicturesInRow(): Promise<void> {
+    const page = this.#store.activePage;
+    if (!page.imageDataUrl) return;
+    const pictures = this.#store.selectedShapes
+      .filter((s) => s.type === 'picture')
+      .sort((a, b) => shapeBounds(a).x - shapeBounds(b).x);
+    if (!pictures.length) return;
+    const main = await this.#loadPageImage(page.imageDataUrl);
+    const H = main.naturalHeight;
+    const gap = pictureGap(H);
+    let x = main.naturalWidth + gap;
+    const next = pictures.map((p) => {
+      const b = shapeBounds(p);
+      const w = b.height ? (b.width * H) / b.height : b.width;
+      const moved: Shape = { ...p, points: [{ x, y: 0 }, { x: x + w, y: H }] };
+      x += w + gap;
+      return moved;
+    });
+    this.#store.replaceShapes(next);
+    await this.updateComplete;
+    await this.#redraw();
+    this.#fitToWindow();
+  }
+
   #onFilePick = async (e: Event) => {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
@@ -741,6 +829,7 @@ export class ScreenMarker extends LitElement {
     const W = img.naturalWidth;
     const H = img.naturalHeight;
     const shapes = this.#displayShapes();
+    await preloadPictures(shapes);
     const content = sceneBounds(W, H, shapes);
     const area = this.#editorArea(W, H, content);
     const prev = this.#area;
@@ -1075,8 +1164,10 @@ export class ScreenMarker extends LitElement {
     if (drag.grab === 'move') return o;
     const from = boundsRect(o);
     let [l, t, r, b] = resizeBox(from, drag.grab, pt.x - drag.start.x, pt.y - drag.start.y);
-    if (shift && drag.grab.length === 2 && from.w > 0 && from.h > 0) {
-      // Shift on a corner keeps the aspect ratio, anchored at the opposite corner.
+    // Pictures keep their aspect ratio on a corner drag unless Shift is held; other boxes only with Shift.
+    const keepRatio = o.type === 'picture' ? !shift : shift;
+    if (keepRatio && drag.grab.length === 2 && from.w > 0 && from.h > 0) {
+      // Keep the aspect ratio, anchored at the opposite corner.
       const ax = drag.grab.includes('w') ? from.x + from.w : from.x;
       const ay = drag.grab.includes('n') ? from.y + from.h : from.y;
       const k = Math.max(Math.abs(r - l) / from.w, Math.abs(b - t) / from.h);
@@ -1892,16 +1983,19 @@ export class ScreenMarker extends LitElement {
         const builds: string[] = [];
         let width = 0;
         let height = 0;
+        let focusWidth = 0;
+        let focusHeight = 0;
         for (let k = 0; k <= revealed.length; k++) {
           const hidden = new Set(revealed.slice(k).map((s) => s.id));
           const shown = p.shapes.filter((s) => !hidden.has(s.id));
-          // Every build is sized by all shapes, so revealing never shifts or rescales the slide.
-          const { canvas } = await flattenPage(p.imageDataUrl, shown, null, p.shapes);
-          width = canvas.width;
-          height = canvas.height;
-          builds.push(canvas.toDataURL('image/png'));
+          // Every build is sized by all shapes, so revealing never shifts or rescales the slide;
+          // centered, so the images stay put between pages whose tags sit on different sides.
+          const flat = await flattenPage(p.imageDataUrl, shown, { background: null, sceneShapes: p.shapes, centered: true });
+          ({ width, height } = flat.canvas);
+          ({ w: focusWidth, h: focusHeight } = flat.focus);
+          builds.push(flat.canvas.toDataURL('image/png'));
         }
-        return { builds, width, height, title: p.title ?? '', notes: withNotes ? (p.notes ?? '') : '' };
+        return { builds, width, height, focusWidth, focusHeight, title: p.title ?? '', notes: withNotes ? (p.notes ?? '') : '' };
       })
     );
   }
@@ -1986,8 +2080,10 @@ export class ScreenMarker extends LitElement {
     if (hit) {
       if (!this.#store.selectedIds.includes(hit.id)) this.#store.selectShapes([hit.id]);
       const editable = this.#store.selectedIds.length === 1 && (hit.type === 'text' || hit.type === 'tag' || hit.type === 'step');
+      const hasPictures = this.#store.selectedShapes.some((s) => s.type === 'picture');
       this.#openMenu(e, [
         ...(editable ? [{ label: hit.type === 'step' ? 'Edit number' : 'Edit text', shortcut: 'Enter', run: () => this.#startTextEdit(hit) }] : []),
+        ...(hasPictures ? [{ label: 'Arrange pictures in a row', run: () => void this.#arrangePicturesInRow() }] : []),
         { label: 'Duplicate', shortcut: '⌘D', run: () => this.#store.duplicateSelectedShapes() },
         { label: 'Copy', shortcut: '⌘C', run: () => this.#store.copySelection() },
         'sep',

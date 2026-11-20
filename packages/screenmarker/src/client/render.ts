@@ -25,6 +25,25 @@ export function contrastColor(color: string): string {
   return luminance > 0.6 ? '#000000' : '#ffffff';
 }
 
+// Decoded picture-shape images by data URL. drawShape is synchronous, so
+// callers await preloadPictures() before drawing; a picture whose image is
+// not decoded yet is skipped for that frame.
+const pictureCache = new Map<string, HTMLImageElement>();
+
+/** Decodes every picture shape's image into the cache. */
+export async function preloadPictures(shapes: Shape[]): Promise<void> {
+  const pending = shapes.filter((s) => s.type === 'picture' && s.src && !pictureCache.has(s.src));
+  await Promise.all(
+    pending.map(async (s) => {
+      try {
+        pictureCache.set(s.src!, await loadImage(s.src!));
+      } catch {
+        // Undecodable data: the picture draws as an empty box.
+      }
+    })
+  );
+}
+
 export function stepRadius(shape: Shape): number {
   return (shape.fontSize ?? DEFAULT_FONT_SIZE) * 0.85;
 }
@@ -257,6 +276,19 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
       if (shape.points[0]) drawTag(ctx, shape);
       break;
     }
+    case 'picture': {
+      const [a, b] = shape.points;
+      if (!a || !b) break;
+      const r = cornerBox(a, b);
+      const img = shape.src ? pictureCache.get(shape.src) : undefined;
+      if (img) ctx.drawImage(img, r.x, r.y, r.w, r.h);
+      else {
+        ctx.strokeStyle = 'rgba(128, 128, 128, 0.6)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(r.x, r.y, r.w, r.h);
+      }
+      break;
+    }
     case 'step': {
       const [c] = shape.points;
       if (!c) break;
@@ -333,7 +365,8 @@ export function hitTestShape(shape: Shape, point: Point): boolean {
     case 'blur':
     case 'text':
     case 'step':
-    case 'tag': {
+    case 'tag':
+    case 'picture': {
       const b = shapeBounds(shape);
       return (
         point.x >= b.x - HIT_PADDING &&
@@ -553,6 +586,18 @@ export function transformShape(shape: Shape, transform: ImageTransform, W: numbe
     const oy = a.y - (b.y + b.height / 2);
     return { ...shape, points: [{ x: c.x + ox, y: c.y + oy }] };
   }
+  if (shape.type === 'picture') {
+    // A picture moves with the page but stays upright and unmirrored, at its own size.
+    const b = shapeBounds(shape);
+    const c = transformPoint({ x: b.x + b.width / 2, y: b.y + b.height / 2 }, transform, W, H);
+    return {
+      ...shape,
+      points: [
+        { x: c.x - b.width / 2, y: c.y - b.height / 2 },
+        { x: c.x + b.width / 2, y: c.y + b.height / 2 },
+      ],
+    };
+  }
   return { ...shape, points: shape.points.map((p) => transformPoint(p, transform, W, H)) };
 }
 
@@ -579,6 +624,31 @@ export function sceneBounds(imageW: number, imageH: number, shapes: Shape[]): Re
   return { x: x1, y: y1, w: Math.ceil(x2) - x1, h: Math.ceil(y2) - y1 };
 }
 
+export interface FlattenOptions {
+  background?: string | null;
+  sceneShapes?: Shape[];
+  centered?: boolean;
+}
+
+/** The page image plus every picture shape: what a slide centers on. Integer-aligned. */
+export function focusBounds(imageW: number, imageH: number, shapes: Shape[]): Rect {
+  let x1 = 0;
+  let y1 = 0;
+  let x2 = imageW;
+  let y2 = imageH;
+  for (const s of shapes) {
+    if (s.type !== 'picture') continue;
+    const b = shapeBounds(s);
+    x1 = Math.min(x1, b.x);
+    y1 = Math.min(y1, b.y);
+    x2 = Math.max(x2, b.x + b.width);
+    y2 = Math.max(y2, b.y + b.height);
+  }
+  x1 = Math.floor(x1);
+  y1 = Math.floor(y1);
+  return { x: x1, y: y1, w: Math.ceil(x2) - x1, h: Math.ceil(y2) - y1 };
+}
+
 /** Outside the image, exported pages are white rather than transparent, so pasted results read the same everywhere. */
 const SCENE_BACKGROUND = '#ffffff';
 
@@ -588,28 +658,37 @@ const SCENE_BACKGROUND = '#ffffff';
  * map image coordinates (e.g. a region) onto the result. `background` fills
  * the scene outside the image; `null` leaves it transparent. `sceneShapes`
  * sizes the scene when it should cover more than the shapes drawn (reveal
- * steps keep one size while shapes are hidden).
+ * steps keep one size while shapes are hidden). `centered` grows the scene
+ * evenly on both sides so the image and pictures (`focus`) sit in its middle:
+ * slides keep them in place wherever the tags go.
  */
 export async function flattenPage(
   imageDataUrl: string,
   shapes: Shape[],
-  background: string | null = SCENE_BACKGROUND,
-  sceneShapes: Shape[] = shapes
-): Promise<{ canvas: HTMLCanvasElement; origin: Point }> {
-  const img = await loadImage(imageDataUrl);
-  const area = sceneBounds(img.naturalWidth, img.naturalHeight, sceneShapes);
+  { background = SCENE_BACKGROUND, sceneShapes = shapes, centered = false }: FlattenOptions = {}
+): Promise<{ canvas: HTMLCanvasElement; origin: Point; focus: Rect }> {
+  const [img] = await Promise.all([loadImage(imageDataUrl), preloadPictures(shapes)]);
+  const W = img.naturalWidth;
+  const H = img.naturalHeight;
+  let area = sceneBounds(W, H, sceneShapes);
+  const focus = focusBounds(W, H, sceneShapes);
+  if (centered) {
+    const dx = Math.max(focus.x - area.x, area.x + area.w - (focus.x + focus.w));
+    const dy = Math.max(focus.y - area.y, area.y + area.h - (focus.y + focus.h));
+    area = { x: focus.x - dx, y: focus.y - dy, w: focus.w + 2 * dx, h: focus.h + 2 * dy };
+  }
   const canvas = document.createElement('canvas');
   canvas.width = area.w;
   canvas.height = area.h;
   const ctx = canvas.getContext('2d')!;
-  if (background && (area.x < 0 || area.y < 0 || area.w > img.naturalWidth || area.h > img.naturalHeight)) {
+  if (background && (area.x < 0 || area.y < 0 || area.w > W || area.h > H)) {
     ctx.fillStyle = background;
     ctx.fillRect(0, 0, area.w, area.h);
   }
   ctx.translate(-area.x, -area.y);
   ctx.drawImage(img, 0, 0);
   drawShapes(ctx, shapes);
-  return { canvas, origin: { x: -area.x, y: -area.y } };
+  return { canvas, origin: { x: -area.x, y: -area.y }, focus };
 }
 
 export async function flattenToCanvas(imageDataUrl: string, shapes: Shape[]): Promise<HTMLCanvasElement> {

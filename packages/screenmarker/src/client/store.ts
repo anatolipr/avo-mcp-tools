@@ -267,6 +267,13 @@ export class AnnotatorStore {
     this.#updateActiveShapes((shapes) => shapes.map((s) => (s.id === shape.id ? shape : s)));
   }
 
+  /** Replaces several shapes by id in one undoable step. */
+  replaceShapes(next: Shape[]): void {
+    if (next.length === 0) return;
+    const byId = new Map(next.map((s) => [s.id, s]));
+    this.#updateActiveShapes((shapes) => shapes.map((s) => byId.get(s.id) ?? s));
+  }
+
   /** Translates the given shapes by (dx, dy). Undoable as a single step. */
   moveShapes(ids: string[], dx: number, dy: number): void {
     if ((dx === 0 && dy === 0) || ids.length === 0) return;

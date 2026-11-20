@@ -1,4 +1,4 @@
-export type ShapeType = 'rect' | 'ellipse' | 'arrow' | 'line' | 'text' | 'step' | 'pen' | 'highlight' | 'blur' | 'tag';
+export type ShapeType = 'rect' | 'ellipse' | 'arrow' | 'line' | 'text' | 'step' | 'pen' | 'highlight' | 'blur' | 'tag' | 'picture';
 export type Tool = ShapeType | 'select';
 
 export interface Point {
@@ -13,7 +13,7 @@ export interface Shape {
   // rect / ellipse / arrow / line / pen: stroke thickness. blur: pixel block
   // size multiplier. Unused by highlight (fixed fill), text, and step.
   lineWidth: number;
-  // rect / ellipse / arrow / line / highlight / blur: two corners (or ends).
+  // rect / ellipse / arrow / line / highlight / blur / picture: two corners (or ends).
   // pen: full stroke path. text: top-left anchor. step: center.
   // tag: arrow tip (or the bubble's top-left when tagArrow is 'none').
   points: Point[];
@@ -30,6 +30,8 @@ export interface Shape {
   // tag only: which edge of the bubble the pointer comes out of, and where
   // along it. 'none' is a plain note with no pointer.
   tagArrow?: TagArrow;
+  // picture only: an extra image (data URL) placed on the page, stretched to its two corners.
+  src?: string;
 }
 
 /** Clockwise around the bubble, three positions per side, plus 'none' (no pointer). */
