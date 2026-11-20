@@ -953,15 +953,18 @@ export class ScreenMarker extends LitElement {
   /**
    * The scene box the editor canvas covers, in image coordinates: at least
    * the whole visible stage (centered on the image, so empty space all
-   * around is usable for tags and shapes without the image moving), grown
-   * to fit any content drawn beyond it.
+   * around is usable for tags and shapes without the image moving), plus a
+   * wide margin around the content (scroll or pan to reach it), so any tool,
+   * not only tags, can start a shape well outside the image even when the
+   * image fills the window.
    */
   #editorArea(W: number, H: number, content: Rect): Rect {
     const stage = this.#stageRef.value;
     const scale = this.#displayScale();
     const viewW = Math.min(MAX_AREA_SIDE, Math.max(W, ((stage?.clientWidth ?? 0) - 32) / scale));
     const viewH = Math.min(MAX_AREA_SIDE, Math.max(H, ((stage?.clientHeight ?? 0) - 32) / scale));
-    const edge = 24 / scale;
+    const side = Math.max(content.w, content.h);
+    const edge = Math.max(24 / scale, Math.min(side * 0.3, (MAX_AREA_SIDE - side) / 2));
     const x1 = Math.floor(Math.min(W / 2 - viewW / 2, content.x - edge));
     const y1 = Math.floor(Math.min(H / 2 - viewH / 2, content.y - edge));
     const x2 = Math.ceil(Math.max(W / 2 + viewW / 2, content.x + content.w + edge));
@@ -2019,7 +2022,8 @@ export class ScreenMarker extends LitElement {
       if (this.#statusMsg !== msg) return;
       this.#statusMsg = '';
       this.requestUpdate();
-    }, 2000);
+      // Long messages (e.g. a link's expiry) stay up long enough to read.
+    }, Math.max(2000, msg.length * 50));
   }
 
   #pagesWithImages() {
@@ -3230,6 +3234,8 @@ export class ScreenMarker extends LitElement {
               message=${this.#presenting.message}
               @presenter-close=${this.#closePresenter}
               @presenter-edit-copy=${this.#editPublicCopy}
+              @presenter-copy-link=${this.#sharePresentation}
+              status=${this.#statusMsg}
             ></screen-marker-presenter>
           `
         : ''}

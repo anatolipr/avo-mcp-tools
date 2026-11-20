@@ -28,7 +28,11 @@ export interface Slide {
  * +/- and Cmd/Ctrl +/-, Cmd/Ctrl+wheel or pinch zoom, 0 fits again, and a
  * zoomed slide scrolls.
  *
- * Events: `presenter-close`, `presenter-edit-copy`.
+ * Copy link: in editor mode asks the host (`presenter-copy-link`) to save and
+ * create a view-only link; on a public link it copies the page's own URL.
+ * `status` shows the host's status messages as a toast over the slide.
+ *
+ * Events: `presenter-close`, `presenter-edit-copy`, `presenter-copy-link`.
  */
 export class ScreenMarkerPresenter extends LitElement {
   static properties = {
@@ -44,6 +48,8 @@ export class ScreenMarkerPresenter extends LitElement {
     publicView: { type: Boolean, attribute: 'public-view' },
     heading: { type: String },
     message: { type: String },
+    status: { type: String },
+    ownToast: { state: true },
     idle: { state: true },
   };
 
@@ -65,6 +71,9 @@ export class ScreenMarkerPresenter extends LitElement {
   declare publicView: boolean;
   declare heading: string;
   declare message: string;
+  declare status: string;
+  declare ownToast: string;
+  #toastTimer: ReturnType<typeof setTimeout> | undefined;
   declare idle: boolean;
   #idleTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -82,6 +91,8 @@ export class ScreenMarkerPresenter extends LitElement {
     this.publicView = false;
     this.heading = '';
     this.message = '';
+    this.status = '';
+    this.ownToast = '';
     this.idle = false;
   }
 
@@ -164,6 +175,10 @@ export class ScreenMarkerPresenter extends LitElement {
     .top > * {
       pointer-events: auto;
     }
+    .top-actions {
+      display: flex;
+      gap: 6px;
+    }
     button {
       font: inherit;
       font-size: 13px;
@@ -223,6 +238,20 @@ export class ScreenMarkerPresenter extends LitElement {
     }
     .dots i.on {
       background: rgba(255, 255, 255, 0.85);
+    }
+    .toast {
+      position: absolute;
+      left: 50%;
+      bottom: 72px;
+      transform: translateX(-50%);
+      max-width: min(560px, calc(100% - 32px));
+      padding: 8px 14px;
+      border-radius: 8px;
+      background: rgba(30, 30, 32, 0.92);
+      font-size: 13px;
+      text-align: center;
+      pointer-events: none;
+      z-index: 6;
     }
     .count {
       font-size: 13px;
@@ -374,6 +403,23 @@ export class ScreenMarkerPresenter extends LitElement {
     else void this.requestFullscreen?.().catch(() => {});
   }
 
+  #copyLink(): void {
+    if (this.publicView) {
+      void navigator.clipboard
+        .writeText(location.href)
+        .then(() => this.#showToast('Link copied: anyone with it can view this presentation'))
+        .catch((err: Error) => this.#showToast(`Copy failed: ${err.message}`));
+      return;
+    }
+    this.dispatchEvent(new CustomEvent('presenter-copy-link', { bubbles: true, composed: true }));
+  }
+
+  #showToast(msg: string): void {
+    this.ownToast = msg;
+    clearTimeout(this.#toastTimer);
+    this.#toastTimer = setTimeout(() => (this.ownToast = ''), 3000);
+  }
+
   #close(): void {
     this.dispatchEvent(new CustomEvent('presenter-close', { bubbles: true, composed: true }));
   }
@@ -472,11 +518,19 @@ export class ScreenMarkerPresenter extends LitElement {
     return html`
       <div class="top">
         <span>${title}</span>
-        ${this.publicView
-          ? html`<button @click=${() => this.dispatchEvent(new CustomEvent('presenter-edit-copy', { bubbles: true, composed: true }))}>
-              Edit a copy
-            </button>`
-          : html`<button @click=${() => this.#close()} title="Close (Esc)">✕ Close</button>`}
+        <span class="top-actions">
+          <button
+            @click=${() => this.#copyLink()}
+            title=${this.publicView ? 'Copy this link' : 'Save, then copy a view-only link anyone can open'}
+          >
+            🔗 Copy link
+          </button>
+          ${this.publicView
+            ? html`<button @click=${() => this.dispatchEvent(new CustomEvent('presenter-edit-copy', { bubbles: true, composed: true }))}>
+                Edit a copy
+              </button>`
+            : html`<button @click=${() => this.#close()} title="Close (Esc)">✕ Close</button>`}
+        </span>
       </div>
       <div class="slide ${scale === null ? 'unsized' : ''}" @click=${this.#onSlideClick}>
         ${src
@@ -520,6 +574,7 @@ export class ScreenMarkerPresenter extends LitElement {
             </div>
           `
         : ''}
+      ${this.ownToast || this.status ? html`<div class="toast">${this.ownToast || this.status}</div>` : ''}
       ${this.laser && this.laserPos ? html`<div class="laser" style="left:${this.laserPos.x}px; top:${this.laserPos.y}px"></div>` : ''}
     `;
   }

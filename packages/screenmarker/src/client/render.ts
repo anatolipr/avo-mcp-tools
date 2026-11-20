@@ -697,7 +697,15 @@ export function sceneBounds(imageW: number, imageH: number, shapes: Shape[]): Re
   let y2 = imageH;
   for (const s of shapes) {
     const b = shapeBounds(s);
-    const pad = s.type === 'tag' ? (s.fontSize ?? DEFAULT_FONT_SIZE) * 0.6 : s.lineWidth / 2 + 2;
+    // Room for what draws past a shape's points: a tag's pointer, an arrowhead's wings, a lens shadow.
+    const pad =
+      s.type === 'tag'
+        ? (s.fontSize ?? DEFAULT_FONT_SIZE) * 0.6
+        : s.type === 'arrow'
+          ? s.lineWidth / 2 + 12 + s.lineWidth * 2.5
+          : s.type === 'magnifier'
+            ? magnifierRadii(s).lens * 0.3
+            : s.lineWidth / 2 + 2;
     x1 = Math.min(x1, b.x - pad);
     y1 = Math.min(y1, b.y - pad);
     x2 = Math.max(x2, b.x + b.width + pad);
