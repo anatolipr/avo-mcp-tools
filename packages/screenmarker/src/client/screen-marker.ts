@@ -29,15 +29,20 @@ import { screenMarkerStyles } from './styles.js';
 import {
   cloudNameFromHash,
   createPresentationLink,
+  listRecentDocuments,
   loadCloudDocument,
   loadPublicDocument,
   mountAccountUi,
+  openLiveChannel,
+  type LiveChannel,
   publicToken,
   saveCloudDocument,
   setCloudNameInHash,
   showFilePicker,
 } from './cloud.js';
 import './presenter.js';
+import type { Slide } from './presenter.js';
+import { pageThumbnail, recentThumbnail, rememberRecentThumbnail } from './thumbs.js';
 import { TAG_ARROWS, type Page, type Point, type Rect, type Shape, type ShapeType, type TagArrow, type Tool } from './types.js';
 
 const TOOLS: { type: Tool; label: string; icon: string; key: string }[] = [
@@ -170,6 +175,38 @@ function offsetShape(shape: Shape, dx: number, dy: number): Shape {
   return { ...shape, points: shape.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
 }
 
+/** Shift-drag for lines/arrows: snap the direction from `a` to the nearest 45°. */
+function snapAngle(a: Point, b: Point): Point {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.hypot(dx, dy);
+  const angle = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+  return { x: a.x + Math.cos(angle) * len, y: a.y + Math.sin(angle) * len };
+}
+
+/** Shift-drag for boxes: make the box from `a` to `b` square (keeping the drag's direction). */
+function squareFrom(a: Point, b: Point): Point {
+  const side = Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+  return { x: a.x + Math.sign(b.x - a.x || 1) * side, y: a.y + Math.sign(b.y - a.y || 1) * side };
+}
+
+const BOX_DRAWN: ShapeType[] = ['rect', 'ellipse', 'highlight', 'blur'];
+
+type MenuItem =
+  | { label: string; run: () => void; shortcut?: string; disabled?: boolean; danger?: boolean }
+  | { colors: true }
+  | 'sep';
+
+type SaveState = 'saved' | 'saving' | 'dirty' | 'error' | 'conflict' | 'remote';
+
+function relativeTime(ms: number): string {
+  const s = (Date.now() - ms) / 1000;
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -251,8 +288,18 @@ export class ScreenMarker extends LitElement {
   #dragOverSide: 'before' | 'after' | null = null;
   #justMovedPageId: string | null = null;
   #theme: ThemeMode = loadTheme();
-  #presenting: { slides: string[]; index: number; publicView: boolean; heading: string; message: string } | null = null;
+  #presenting: { slides: Slide[]; index: number; publicView: boolean; heading: string; message: string } | null = null;
   #cloudBusy = false;
+  // Autosave / live channel for the open cloud document.
+  #saveState: SaveState = 'saved';
+  #lastSavedPages: Page[] | null = null;
+  #autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+  #channel: { name: string; ch: LiveChannel } | null = null;
+  #peers = 0;
+  #recent: { name: string; openedAt: number }[] | null = null;
+  #thumbUrls = new WeakMap<Page, string | null>();
+  #notesOpen = false;
+  #menu: { x: number; y: number; items: MenuItem[] } | null = null;
   #cloudName: string | null = cloudNameFromHash();
   // The document behind a public link, kept for "Edit a copy".
   #publicDoc: { pages: Page[]; activePageId: string } | null = null;
@@ -285,7 +332,8 @@ export class ScreenMarker extends LitElement {
     this.addEventListener('drop', this.#onDrop);
     document.addEventListener('folderfoo-file-open', this.#onCloudFileChosen);
     if (publicToken) void this.#openPublicPresentation(publicToken);
-    void mountAccountUi();
+    void mountAccountUi().then(() => this.#loadRecent());
+    window.addEventListener('folderfoo-auth-change', this.#onAuthChange);
     this.#store.restore().then(async () => {
       this.requestUpdate();
       await this.updateComplete;
@@ -304,7 +352,10 @@ export class ScreenMarker extends LitElement {
     window.removeEventListener('keyup', this.#onKeyup);
     window.removeEventListener('blur', this.#onWindowBlur);
     document.removeEventListener('folderfoo-file-open', this.#onCloudFileChosen);
+    window.removeEventListener('folderfoo-auth-change', this.#onAuthChange);
     this.#stageObserver.disconnect();
+    this.#channel?.ch.close();
+    clearTimeout(this.#autosaveTimer);
   }
 
   #onDragOver = (e: DragEvent) => {
@@ -354,6 +405,13 @@ export class ScreenMarker extends LitElement {
 
   #onKeydown = (e: KeyboardEvent) => {
     if (this.#presenting) return;
+    if (this.#menu) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this.#closeMenu();
+      }
+      return;
+    }
     const typing = fromEditable(e);
     const mod = e.metaKey || e.ctrlKey;
 
@@ -962,19 +1020,34 @@ export class ScreenMarker extends LitElement {
 
     const drag = this.#shapeDrag;
     if (drag?.kind === 'move') {
-      drag.delta = { x: pt.x - drag.start.x, y: pt.y - drag.start.y };
+      let dx = pt.x - drag.start.x;
+      let dy = pt.y - drag.start.y;
+      // Shift locks the move to the dominant axis.
+      if (e.shiftKey) {
+        if (Math.abs(dx) > Math.abs(dy)) dy = 0;
+        else dx = 0;
+      }
+      drag.delta = { x: dx, y: dy };
       void this.#redraw();
       return;
     }
     if (drag?.kind === 'resize') {
-      drag.draft = this.#resizedShape(drag, pt);
+      drag.draft = this.#resizedShape(drag, pt, e.shiftKey);
       void this.#redraw();
       return;
     }
 
     if (this.#drawing) {
-      if (tool === 'pen') this.#currentPoints.push(pt);
-      else this.#currentPoints = [this.#currentPoints[0]!, pt];
+      if (tool === 'pen') {
+        this.#currentPoints.push(pt);
+      } else {
+        const a = this.#currentPoints[0]!;
+        let b = pt;
+        // Shift: lines/arrows snap to 45°, boxes become squares/circles.
+        if (e.shiftKey && (tool === 'line' || tool === 'arrow')) b = snapAngle(a, pt);
+        else if (e.shiftKey && BOX_DRAWN.includes(tool as ShapeType)) b = squareFrom(a, pt);
+        this.#currentPoints = [a, b];
+      }
       void this.#redraw();
       return;
     }
@@ -982,16 +1055,28 @@ export class ScreenMarker extends LitElement {
     this.#updateHoverCursor(pt);
   };
 
-  #resizedShape(drag: Extract<ShapeDrag, { kind: 'resize' }>, pt: Point): Shape {
+  #resizedShape(drag: Extract<ShapeDrag, { kind: 'resize' }>, pt: Point, shift = false): Shape {
     const o = drag.orig;
     if (drag.grab === 0 || drag.grab === 1) {
       const points = [...o.points];
-      points[drag.grab] = pt;
+      // Shift snaps the dragged end to 45° around the other end.
+      points[drag.grab] = shift ? snapAngle(o.points[1 - drag.grab]!, pt) : pt;
       return { ...o, points };
     }
     if (drag.grab === 'move') return o;
     const from = boundsRect(o);
-    const [l, t, r, b] = resizeBox(from, drag.grab, pt.x - drag.start.x, pt.y - drag.start.y);
+    let [l, t, r, b] = resizeBox(from, drag.grab, pt.x - drag.start.x, pt.y - drag.start.y);
+    if (shift && drag.grab.length === 2 && from.w > 0 && from.h > 0) {
+      // Shift on a corner keeps the aspect ratio, anchored at the opposite corner.
+      const ax = drag.grab.includes('w') ? from.x + from.w : from.x;
+      const ay = drag.grab.includes('n') ? from.y + from.h : from.y;
+      const k = Math.max(Math.abs(r - l) / from.w, Math.abs(b - t) / from.h);
+      const w = from.w * k;
+      const h = from.h * k;
+      const mx = drag.grab.includes('w') ? -1 : 1;
+      const my = drag.grab.includes('n') ? -1 : 1;
+      [l, t, r, b] = [ax, ay, ax + mx * w, ay + my * h];
+    }
     return mapShapeToBox(o, from, sortedRect(l, t, r, b));
   }
 
@@ -1583,8 +1668,123 @@ export class ScreenMarker extends LitElement {
   }
 
   #setCloudName(name: string | null): void {
+    if (name !== this.#cloudName) {
+      this.#channel?.ch.close();
+      this.#channel = null;
+      this.#peers = 0;
+      clearTimeout(this.#autosaveTimer);
+      this.#saveState = 'saved';
+      this.#lastSavedPages = name ? this.#store.pages.value : null;
+    }
     this.#cloudName = name;
     setCloudNameInHash(name);
+    this.requestUpdate();
+  }
+
+  /** Records the pages as matching what is stored, so autosave only fires on later edits. */
+  #markSaved(pages: Page[] = this.#store.pages.value): void {
+    this.#lastSavedPages = pages;
+    this.#saveState = pages === this.#store.pages.value ? 'saved' : 'dirty';
+    this.requestUpdate();
+  }
+
+  /** Called after every render: a cloud document with unsaved edits saves itself shortly after the last change. */
+  #checkAutosave(): void {
+    if (!this.#cloudName || this.#presenting?.publicView) return;
+    // No baseline yet (e.g. a #name from the URL that is still loading):
+    // never push the local session over the cloud copy before it's read.
+    if (this.#lastSavedPages === null) return;
+    if (this.#store.pages.value === this.#lastSavedPages) return;
+    if (this.#saveState === 'conflict' || this.#saveState === 'remote') return;
+    if (this.#saveState !== 'saving' && this.#saveState !== 'dirty') {
+      this.#saveState = 'dirty';
+      this.requestUpdate();
+    }
+    clearTimeout(this.#autosaveTimer);
+    this.#autosaveTimer = setTimeout(() => void this.#autosave(), 1500);
+  }
+
+  async #autosave(): Promise<void> {
+    const name = this.#cloudName;
+    if (!name || this.#saveState === 'saving' || this.#saveState === 'conflict' || this.#saveState === 'remote') return;
+    const pages = this.#store.pages.value;
+    if (pages === this.#lastSavedPages) return;
+    this.#saveState = 'saving';
+    this.requestUpdate();
+    try {
+      await saveCloudDocument(name, documentValue(pages, this.#store.activePageId.value));
+      if (name !== this.#cloudName) return;
+      this.#markSaved(pages);
+      void rememberRecentThumbnail(name, pages.find((p) => p.imageDataUrl));
+    } catch (err) {
+      if (name !== this.#cloudName) return;
+      this.#saveState = (err as { conflict?: boolean }).conflict ? 'conflict' : 'error';
+      this.requestUpdate();
+    }
+  }
+
+  /** Joins the document's live channel: reloads when another tab/device saves it, and counts who else has it open. */
+  async #joinChannel(name: string): Promise<void> {
+    if (this.#channel?.name === name) return;
+    this.#channel?.ch.close();
+    this.#channel = null;
+    const ch = await openLiveChannel(name);
+    if (!ch) return;
+    if (name !== this.#cloudName) {
+      ch.close();
+      return;
+    }
+    this.#channel = { name, ch };
+    ch.on('presence', (peers) => {
+      this.#peers = peers.length;
+      this.requestUpdate();
+    });
+    ch.on('file.saved', (event) => {
+      if (event.fromSelf || name !== this.#cloudName) return;
+      if (this.#store.pages.value !== this.#lastSavedPages) {
+        // Unsaved local edits: don't overwrite them; let the user choose.
+        this.#saveState = 'remote';
+        this.#flashStatus(`${event.by.fullname || event.by.username} saved a newer version`);
+        this.requestUpdate();
+        return;
+      }
+      void this.#openCloudDocument(name, { confirmReplace: false, keepView: true });
+    });
+    ch.on('file.trashed', () => this.#flashStatus('This document was moved to the trash in folderfoo'));
+  }
+
+  #reloadFromCloud = () => {
+    if (this.#cloudName) void this.#openCloudDocument(this.#cloudName, { confirmReplace: false, keepView: true });
+  };
+
+  #saveStateLabel(): string {
+    switch (this.#saveState) {
+      case 'saving':
+        return 'Saving…';
+      case 'dirty':
+        return 'Unsaved changes';
+      case 'error':
+        return 'Save failed — retrying on next change';
+      case 'conflict':
+      case 'remote':
+        return 'Changed elsewhere';
+      default:
+        return 'Saved';
+    }
+  }
+
+  #onAuthChange = () => {
+    this.#recent = null;
+    void this.#loadRecent();
+  };
+
+  async #loadRecent(): Promise<void> {
+    if (publicToken) return;
+    try {
+      this.#recent = (await listRecentDocuments()).slice(0, 12);
+    } catch {
+      this.#recent = [];
+    }
     this.requestUpdate();
   }
 
@@ -1593,20 +1793,25 @@ export class ScreenMarker extends LitElement {
     if (name) void this.#openCloudDocument(name, { confirmReplace: true });
   };
 
-  async #openCloudDocument(name: string, { confirmReplace }: { confirmReplace: boolean }): Promise<void> {
+  async #openCloudDocument(name: string, { confirmReplace, keepView = false }: { confirmReplace: boolean; keepView?: boolean }): Promise<void> {
     if (confirmReplace && this.#hasContent() && name !== this.#cloudName) {
       if (!window.confirm(`Open "${name}"? It will replace everything currently open. You can Undo (Cmd/Ctrl+Z) afterward.`)) return;
     }
     this.#commitTextEdit();
     try {
       const { pages, activePageId } = parseDocumentValue(await loadCloudDocument(name));
-      this.#store.loadDocument(pages, activePageId);
+      // A live reload keeps you on the page you were looking at, when it still exists.
+      const current = this.#store.activePageId.value;
+      const stay = keepView && pages.some((p) => p.id === current) ? current : activePageId;
+      this.#store.loadDocument(pages, stay);
       this.#setCloudName(name);
+      this.#markSaved();
       this.#clearRegion();
+      void this.#joinChannel(name);
       await this.updateComplete;
       await this.#redraw();
-      this.#fitToWindow();
-      this.#flashStatus(`Opened "${name}"`);
+      if (!keepView) this.#fitToWindow();
+      this.#flashStatus(keepView ? `Updated to the latest "${name}"` : `Opened "${name}"`);
     } catch (err) {
       const e = err as Error & { status?: number };
       this.#flashStatus(e.status === 404 ? `"${name}" not found` : `Open failed: ${e.message}`);
@@ -1625,12 +1830,17 @@ export class ScreenMarker extends LitElement {
     this.#cloudBusy = true;
     this.requestUpdate();
     try {
-      await saveCloudDocument(name, documentValue(this.#store.pages.value, this.#store.activePageId.value));
+      const pages = this.#store.pages.value;
+      await saveCloudDocument(name, documentValue(pages, this.#store.activePageId.value));
       this.#setCloudName(name);
+      this.#markSaved(pages);
+      void rememberRecentThumbnail(name, pages.find((p) => p.imageDataUrl));
+      void this.#joinChannel(name);
       this.#flashStatus(`Saved to folderfoo as "${name}"`);
       return name;
     } catch (err) {
       const e = err as Error & { conflict?: boolean };
+      this.#saveState = e.conflict ? 'conflict' : 'error';
       this.#flashStatus(
         e.conflict
           ? `"${name}" was changed elsewhere since you opened it. Open it again, or use Save as, then retry.`
@@ -1658,20 +1868,37 @@ export class ScreenMarker extends LitElement {
 
   // ---------- presentation ----------
 
-  /** One slide per page that has an image: the page flattened with its annotations and tags. */
-  async #renderSlides(pages: Page[]): Promise<string[]> {
+  /**
+   * One slide per page that has an image: the page flattened with its
+   * annotations. A page set to "reveal" gets one build per tag / step marker
+   * (in the order they were added), each showing one more.
+   */
+  async #renderSlides(pages: Page[], withNotes: boolean): Promise<Slide[]> {
     const withImages = pages.filter((p): p is Page & { imageDataUrl: string } => p.imageDataUrl !== null);
-    return Promise.all(withImages.map(async (p) => (await flattenPage(p.imageDataUrl, p.shapes)).canvas.toDataURL('image/png')));
+    const toUrl = async (p: Page & { imageDataUrl: string }, shapes: Shape[]) =>
+      (await flattenPage(p.imageDataUrl, shapes)).canvas.toDataURL('image/png');
+    return Promise.all(
+      withImages.map(async (p) => {
+        const revealed = p.reveal ? p.shapes.filter((s) => s.type === 'tag' || s.type === 'step') : [];
+        const builds: string[] = [];
+        for (let k = 0; k <= revealed.length; k++) {
+          const hidden = new Set(revealed.slice(k).map((s) => s.id));
+          builds.push(await toUrl(p, p.shapes.filter((s) => !hidden.has(s.id))));
+        }
+        return { builds, title: p.title ?? '', notes: withNotes ? (p.notes ?? '') : '' };
+      })
+    );
   }
 
-  #present = async () => {
+  #present = async (fromPageId?: string) => {
     this.#commitTextEdit();
     const pages = this.#store.pages.value;
     const withImages = pages.filter((p) => p.imageDataUrl !== null);
     if (!withImages.length) return;
     try {
-      const slides = await this.#renderSlides(pages);
-      const index = Math.max(0, withImages.findIndex((p) => p.id === this.#store.activePageId.value));
+      const slides = await this.#renderSlides(pages, true);
+      const start = fromPageId ?? this.#store.activePageId.value;
+      const index = Math.max(0, withImages.findIndex((p) => p.id === start));
       this.#presenting = { slides, index, publicView: false, heading: this.#cloudName ?? '', message: '' };
       this.requestUpdate();
     } catch (err) {
@@ -1685,7 +1912,8 @@ export class ScreenMarker extends LitElement {
     try {
       const { content, owner, path } = await loadPublicDocument(token);
       this.#publicDoc = parseDocumentValue(content);
-      const slides = await this.#renderSlides(this.#publicDoc.pages);
+      // Speaker notes stay out of a shared view.
+      const slides = await this.#renderSlides(this.#publicDoc.pages, false);
       this.#presenting = {
         slides,
         index: 0,
@@ -1719,6 +1947,248 @@ export class ScreenMarker extends LitElement {
     await this.#redraw();
     this.#fitToWindow();
   };
+
+  // ---------- context menus ----------
+
+  #openMenu(e: MouseEvent, items: MenuItem[]): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.#commitTextEdit();
+    this.#menu = { x: e.clientX, y: e.clientY, items };
+    this.requestUpdate();
+  }
+
+  #closeMenu = () => {
+    this.#menu = null;
+    this.requestUpdate();
+  };
+
+  #onCanvasContextMenu = (e: MouseEvent) => {
+    if (!this.#store.activePage.imageDataUrl) return;
+    const pt = this.#canvasPoint(e);
+    const hit = hitTestShapes(this.#store.activePage.shapes, pt);
+    if (hit) {
+      if (!this.#store.selectedIds.includes(hit.id)) this.#store.selectShapes([hit.id]);
+      const editable = this.#store.selectedIds.length === 1 && (hit.type === 'text' || hit.type === 'tag' || hit.type === 'step');
+      this.#openMenu(e, [
+        ...(editable ? [{ label: hit.type === 'step' ? 'Edit number' : 'Edit text', shortcut: 'Enter', run: () => this.#startTextEdit(hit) }] : []),
+        { label: 'Duplicate', shortcut: '⌘D', run: () => this.#store.duplicateSelectedShapes() },
+        { label: 'Copy', shortcut: '⌘C', run: () => this.#store.copySelection() },
+        'sep',
+        { label: 'Bring to front', shortcut: '⌘]', run: () => this.#store.reorderSelectedShapes('front') },
+        { label: 'Send to back', shortcut: '⌘[', run: () => this.#store.reorderSelectedShapes('back') },
+        'sep',
+        { colors: true },
+        'sep',
+        { label: 'Delete', shortcut: '⌫', danger: true, run: () => this.#store.deleteSelectedShapes() },
+      ]);
+      return;
+    }
+    this.#openMenu(e, [
+      { label: 'Paste', shortcut: '⌘V', disabled: !this.#store.hasClipboard(), run: () => this.#store.paste() },
+      {
+        label: 'Select all',
+        shortcut: '⌘A',
+        disabled: !this.#store.activePage.shapes.length,
+        run: () => this.#store.selectShapes(this.#store.activePage.shapes.map((s) => s.id)),
+      },
+      'sep',
+      { label: 'Copy page image', run: () => void this.#copyCurrentPage() },
+      { label: 'Present from this page', run: () => void this.#present() },
+      { label: 'Fit to window', shortcut: 'F', run: () => void this.#fitToWindow() },
+    ]);
+  };
+
+  #onPageContextMenu(e: MouseEvent, pageId: string, index: number): void {
+    const count = this.#store.pages.value.length;
+    const page = this.#store.pages.value[index];
+    this.#openMenu(e, [
+      { label: 'Duplicate page', shortcut: '⇧⌘D', run: () => this.#duplicatePage(pageId) },
+      { label: 'Move up', disabled: index === 0, run: () => this.#store.movePage(pageId, -1) && this.#flashMovedTab(pageId) },
+      { label: 'Move down', disabled: index === count - 1, run: () => this.#store.movePage(pageId, 1) && this.#flashMovedTab(pageId) },
+      'sep',
+      { label: 'Present from here', disabled: !page?.imageDataUrl, run: () => void this.#present(pageId) },
+      'sep',
+      { label: 'Delete page', danger: true, run: () => this.#closePageWithConfirm(pageId) },
+    ]);
+  }
+
+  #renderMenu() {
+    const m = this.#menu;
+    if (!m) return '';
+    // Keep the menu on screen near the click.
+    const left = Math.min(m.x, window.innerWidth - 230);
+    const top = Math.min(m.y, window.innerHeight - 40 - m.items.length * 30);
+    const current = this.#currentStyle().color;
+    return html`
+      <div class="menu-backdrop" @pointerdown=${this.#closeMenu} @contextmenu=${(e: Event) => { e.preventDefault(); this.#closeMenu(); }}></div>
+      <div class="menu" style="left:${Math.max(4, left)}px; top:${Math.max(4, top)}px" @contextmenu=${(e: Event) => e.preventDefault()}>
+        ${m.items.map((item) => {
+          if (item === 'sep') return html`<div class="menu-sep"></div>`;
+          if ('colors' in item) {
+            return html`<div class="menu-colors">
+              ${COLORS.map(
+                (c) => html`<button
+                  class="swatch ${current.toLowerCase() === c ? 'active' : ''}"
+                  style="background:${c}"
+                  title=${c}
+                  @click=${() => {
+                    this.#applyStyle({ color: c });
+                    this.#closeMenu();
+                  }}
+                ></button>`
+              )}
+            </div>`;
+          }
+          return html`<button
+            class="menu-item ${item.danger ? 'danger' : ''}"
+            ?disabled=${item.disabled}
+            @click=${() => {
+              this.#closeMenu();
+              item.run();
+            }}
+          >
+            <span>${item.label}</span><kbd>${item.shortcut ?? ''}</kbd>
+          </button>`;
+        })}
+      </div>
+    `;
+  }
+
+  // ---------- page strip / slide panel / recent ----------
+
+  #thumbFor(page: Page): string | null {
+    if (this.#thumbUrls.has(page)) return this.#thumbUrls.get(page) ?? null;
+    void pageThumbnail(page).then((url) => {
+      this.#thumbUrls.set(page, url);
+      this.requestUpdate();
+    });
+    this.#thumbUrls.set(page, null);
+    return null;
+  }
+
+  #renderPageStrip(activeId: string) {
+    const pages = this.#store.pages.value;
+    return html`
+      <nav
+        class="page-strip"
+        @dragover=${(e: DragEvent) => {
+          if (this.#draggingPageId) e.preventDefault();
+        }}
+        @drop=${(e: DragEvent) => {
+          // A drop on the strip's empty space (not on a page, which handles
+          // its own drop) moves the dragged page to the end.
+          e.preventDefault();
+          const fromId = this.#draggingPageId;
+          this.#draggingPageId = null;
+          this.#dragOverPageId = null;
+          this.#dragOverSide = null;
+          if (fromId && this.#store.reorderPageToEnd(fromId)) this.#flashMovedTab(fromId);
+          else this.requestUpdate();
+        }}
+      >
+        ${pages.map((p, i) => {
+          const thumb = this.#thumbFor(p);
+          return html`
+            <div
+              class="page-item ${p.id === activeId ? 'active' : ''} ${this.#dragOverPageId === p.id
+                ? `drag-over-${this.#dragOverSide}`
+                : ''} ${this.#justMovedPageId === p.id ? 'just-moved' : ''}"
+              draggable="true"
+              title=${p.title || this.#pageLabel(i)}
+              @click=${() => this.#switchPage(p.id)}
+              @contextmenu=${(e: MouseEvent) => this.#onPageContextMenu(e, p.id, i)}
+              @dragstart=${(e: DragEvent) => this.#onTabDragStart(e, p.id)}
+              @dragover=${(e: DragEvent) => this.#onTabDragOver(e, p.id)}
+              @drop=${(e: DragEvent) => this.#onTabDrop(e, p.id)}
+              @dragend=${this.#onTabDragEnd}
+            >
+              <span class="page-num">${i + 1}</span>
+              <div class="page-thumb">
+                ${thumb ? html`<img src=${thumb} alt="" draggable="false" />` : html`<span>${p.imageDataUrl ? '…' : 'Empty'}</span>`}
+              </div>
+              ${p.title ? html`<div class="page-title">${p.title}</div>` : ''}
+              <div class="page-actions">
+                <button
+                  title="Duplicate page (Shift+Cmd/Ctrl+D)"
+                  @click=${(e: Event) => {
+                    e.stopPropagation();
+                    this.#duplicatePage(p.id);
+                  }}
+                >
+                  ⧉
+                </button>
+                <button title="Delete page" @click=${(e: Event) => this.#closePage(e, p.id)}>×</button>
+              </div>
+            </div>
+          `;
+        })}
+        <button class="page-add" @click=${() => this.#addPage()} title="Add page">+ Page</button>
+      </nav>
+    `;
+  }
+
+  #renderSlidePanel(page: Page) {
+    return html`
+      <div class="slide-panel">
+        <input
+          class="slide-title"
+          placeholder="Slide title"
+          .value=${live(page.title ?? '')}
+          @input=${(e: Event) => this.#store.updatePageMeta(page.id, { title: (e.target as HTMLInputElement).value })}
+        />
+        <label class="slide-reveal" title="When presenting, show this page's tags and step markers one per click, in the order you added them">
+          <input
+            type="checkbox"
+            .checked=${live(!!page.reveal)}
+            @change=${(e: Event) => this.#store.updatePageMeta(page.id, { reveal: (e.target as HTMLInputElement).checked })}
+          />
+          Reveal tags &amp; steps one at a time
+        </label>
+        <button class=${this.#notesOpen ? 'active' : ''} @click=${() => {
+          this.#notesOpen = !this.#notesOpen;
+          this.requestUpdate();
+        }}>
+          Notes${page.notes ? ' •' : ''}
+        </button>
+      </div>
+      ${this.#notesOpen
+        ? html`<textarea
+            class="slide-notes"
+            rows="3"
+            placeholder="Speaker notes — shown while you present (N), not on shared links"
+            .value=${live(page.notes ?? '')}
+            @input=${(e: Event) => this.#store.updatePageMeta(page.id, { notes: (e.target as HTMLTextAreaElement).value })}
+          ></textarea>`
+        : ''}
+    `;
+  }
+
+  #renderEmpty() {
+    const recent = !this.#hasContent() ? (this.#recent ?? []) : [];
+    return html`
+      <div class="empty">
+        <div>Paste a screenshot (Cmd/Ctrl+V), drag one in, or use "Open image…" above.</div>
+        ${recent.length
+          ? html`
+              <div class="recent-heading">Recent documents</div>
+              <div class="recent-grid">
+                ${recent.map((r) => {
+                  const thumb = recentThumbnail(r.name);
+                  return html`
+                    <button class="recent-card" @click=${() => void this.#openCloudDocument(r.name, { confirmReplace: true })} title=${r.name}>
+                      <div class="recent-thumb">${thumb ? html`<img src=${thumb} alt="" />` : html`<span>☁</span>`}</div>
+                      <div class="recent-name">${r.name.split('/').pop()}</div>
+                      <div class="recent-when">${relativeTime(r.openedAt)}</div>
+                    </button>
+                  `;
+                })}
+              </div>
+            `
+          : ''}
+      </div>
+    `;
+  }
 
   // ---------- copy / export ----------
 
@@ -1848,7 +2318,7 @@ export class ScreenMarker extends LitElement {
   #dragOverSideFor(e: DragEvent): 'before' | 'after' {
     const el = e.currentTarget as HTMLElement;
     const rect = el.getBoundingClientRect();
-    return e.clientX - rect.left < rect.width / 2 ? 'before' : 'after';
+    return e.clientY - rect.top < rect.height / 2 ? 'before' : 'after';
   }
 
   #onTabDragOver = (e: DragEvent, id: string): void => {
@@ -1909,6 +2379,7 @@ export class ScreenMarker extends LitElement {
 
   updated(): void {
     void this.#redraw();
+    this.#checkAutosave();
     if (this.#focusTextEdit && this.#textInputRef.value) {
       this.#focusTextEdit = false;
       const input = this.#textInputRef.value;
@@ -1956,60 +2427,19 @@ export class ScreenMarker extends LitElement {
       >
         ${THEME_ICON[this.#theme]}
       </button>
-      <div
-        class="tabs"
-        @dragover=${(e: DragEvent) => {
-          if (this.#draggingPageId) e.preventDefault();
-        }}
-        @drop=${(e: DragEvent) => {
-          // Fires for a drop anywhere in the tab bar not claimed by a
-          // specific tab (which stopPropagation()s its own drop) — i.e.
-          // the empty space after the last tab, and the + button. Treated
-          // uniformly as "move to end" so there's always a generously-sized
-          // target for putting a page last, not just the narrow + button.
-          e.preventDefault();
-          const fromId = this.#draggingPageId;
-          this.#draggingPageId = null;
-          this.#dragOverPageId = null;
-          this.#dragOverSide = null;
-          if (fromId) {
-            const moved = this.#store.reorderPageToEnd(fromId);
-            if (moved) this.#flashMovedTab(fromId);
-            else this.requestUpdate();
-          } else {
-            this.requestUpdate();
-          }
-        }}
-      >
-        ${this.#store.pages.value.map(
-          (p, i) => html`
-            <div
-              class="tab ${p.id === page.id ? 'active' : ''} ${
-                this.#dragOverPageId === p.id ? `drag-over-${this.#dragOverSide}` : ''
-              } ${this.#justMovedPageId === p.id ? 'just-moved' : ''}"
-              draggable="true"
-              @click=${() => this.#switchPage(p.id)}
-              @dragstart=${(e: DragEvent) => this.#onTabDragStart(e, p.id)}
-              @dragover=${(e: DragEvent) => this.#onTabDragOver(e, p.id)}
-              @drop=${(e: DragEvent) => this.#onTabDrop(e, p.id)}
-              @dragend=${this.#onTabDragEnd}
-            >
-              ${this.#pageLabel(i)}
-              <span
-                class="tab-close"
-                title="Duplicate page (Shift+Cmd/Ctrl+D)"
-                @click=${(e: Event) => {
-                  e.stopPropagation();
-                  this.#duplicatePage(p.id);
-                }}
-                >⧉</span
-              >
-              <span class="tab-close" title="Close page" @click=${(e: Event) => this.#closePage(e, p.id)}>×</span>
-            </div>
-          `
-        )}
-        <div class="tab-add" @click=${() => this.#addPage()} title="Add page">+</div>
-        ${this.#cloudName ? html`<span class="cloud-name" title="Saved in folderfoo">☁ ${this.#cloudName}</span>` : ''}
+      <div class="titlebar">
+        <span class="app-name">screenmarker</span>
+        ${this.#cloudName
+          ? html`
+              <span class="cloud-name" title="Saved in folderfoo">☁ ${this.#cloudName}</span>
+              <span class="save-state ${this.#saveState}">${this.#saveStateLabel()}</span>
+              ${this.#saveState === 'conflict' || this.#saveState === 'remote'
+                ? html`<button @click=${this.#reloadFromCloud} title="Discard local edits and load the saved version">Reload</button>
+                    <button @click=${() => void this.#saveToCloud(true)} title="Keep your version under a new name">Save as…</button>`
+                : ''}
+              ${this.#peers ? html`<span class="peers" title="Also open elsewhere">👥 ${this.#peers}</span>` : ''}
+            `
+          : ''}
       </div>
 
       <div class="toolbar">
@@ -2152,7 +2582,7 @@ export class ScreenMarker extends LitElement {
           <button ?disabled=${noImage || this.#cloudBusy} @click=${this.#sharePresentation} title="Save, then copy a view-only presentation link anyone can open">
             🔗 Share
           </button>
-          <button ?disabled=${noImage} @click=${this.#present} title="Present all pages as slides">▶ Present</button>
+          <button ?disabled=${noImage} @click=${() => this.#present()} title="Present all pages as slides">▶ Present</button>
         </div>
         <button class="button-primary" ?disabled=${noImage} @click=${this.#copyImage}>📋 Copy Image</button>
         <button class="button-primary" ?disabled=${noImage} @click=${this.#copyCurrentPage}>📋 Copy Current Page</button>
@@ -2160,6 +2590,9 @@ export class ScreenMarker extends LitElement {
         <button ?disabled=${noImage} @click=${this.#download}>Download</button>
       </div>
 
+      <div class="workspace">
+      ${this.#renderPageStrip(page.id)}
+      <div class="main">
       <div
         class="stage"
         ${ref(this.#stageRef)}
@@ -2178,13 +2611,18 @@ export class ScreenMarker extends LitElement {
                   @pointermove=${this.#onPointerMove}
                   @pointerup=${this.#onPointerUp}
                   @dblclick=${this.#onDoubleClick}
+                  @contextmenu=${this.#onCanvasContextMenu}
                 ></canvas>
                 ${this.#regionActions()} ${this.#textEditor()} ${this.#tagPanel()}
               </div>
             `
-          : html`<div class="empty">Paste a screenshot (Cmd/Ctrl+V), drag one in, or use "Open image…" above.</div>`}
+          : this.#renderEmpty()}
+      </div>
+      ${page.imageDataUrl ? this.#renderSlidePanel(page) : ''}
+      </div>
       </div>
       <div class="status">${this.#statusMsg}</div>
+      ${this.#renderMenu()}
 
       ${this.#previewUrl
         ? html`

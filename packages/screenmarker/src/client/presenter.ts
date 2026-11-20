@@ -1,14 +1,23 @@
 import { LitElement, html, css } from 'lit';
 
+/** One slide: its build images (one when nothing is revealed step by step), plus title and speaker notes. */
+export interface Slide {
+  builds: string[];
+  title: string;
+  notes: string;
+}
+
 /**
  * Full-screen slide viewer: one slide per page (image + annotations +
  * tags, pre-flattened by the caller into image URLs). Used both for
  * presenting the open document and for a shared public link, where it is
  * the whole UI (`public-view`: no exit back to the editor, only "Edit a copy").
  *
- * Keys: → / Space / PageDown / Enter next, ← / PageUp / Backspace previous,
- * Home / End, F fullscreen, Esc close (editor mode only). Clicking the right
- * or left half of the slide also steps forward / back.
+ * Keys: → / Space / PageDown / Enter next (next reveal step, then next
+ * slide), ← / PageUp / Backspace previous, Home / End, F fullscreen,
+ * L laser pointer (hold, or tap to toggle), N speaker notes (editor mode
+ * only), Esc close (editor mode only). Clicking the right or left half of
+ * the slide also steps forward / back.
  *
  * Events: `presenter-close`, `presenter-edit-copy`.
  */
@@ -16,14 +25,23 @@ export class ScreenMarkerPresenter extends LitElement {
   static properties = {
     slides: { attribute: false },
     index: { type: Number },
+    build: { state: true },
+    laser: { state: true },
+    laserPos: { state: true },
+    showNotes: { state: true },
     publicView: { type: Boolean, attribute: 'public-view' },
     heading: { type: String },
     message: { type: String },
     idle: { state: true },
   };
 
-  declare slides: string[];
+  declare slides: Slide[];
   declare index: number;
+  declare build: number;
+  declare laser: boolean;
+  declare laserPos: { x: number; y: number } | null;
+  declare showNotes: boolean;
+  #laserDownAt = 0;
   declare publicView: boolean;
   declare heading: string;
   declare message: string;
@@ -34,6 +52,10 @@ export class ScreenMarkerPresenter extends LitElement {
     super();
     this.slides = [];
     this.index = 0;
+    this.build = 0;
+    this.laser = false;
+    this.laserPos = null;
+    this.showNotes = false;
     this.publicView = false;
     this.heading = '';
     this.message = '';
@@ -127,6 +149,49 @@ export class ScreenMarkerPresenter extends LitElement {
       opacity: 0.35;
       cursor: default;
     }
+    .laser {
+      position: fixed;
+      width: 16px;
+      height: 16px;
+      margin: -8px 0 0 -8px;
+      border-radius: 50%;
+      background: radial-gradient(circle, #ff2d2d 0 35%, rgba(255, 45, 45, 0.45) 55%, rgba(255, 45, 45, 0) 72%);
+      box-shadow: 0 0 14px 4px rgba(255, 40, 40, 0.55);
+      pointer-events: none;
+      z-index: 5;
+    }
+    :host([data-laser]) .slide {
+      cursor: none;
+    }
+    .notes {
+      flex: none;
+      max-height: 28vh;
+      overflow: auto;
+      padding: 12px 24px 64px;
+      border-top: 1px solid rgba(255, 255, 255, 0.12);
+      font-size: 16px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      background: #151517;
+    }
+    .notes.empty {
+      opacity: 0.5;
+      font-style: italic;
+    }
+    .dots {
+      display: inline-flex;
+      gap: 3px;
+      margin-left: 2px;
+    }
+    .dots i {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.25);
+    }
+    .dots i.on {
+      background: rgba(255, 255, 255, 0.85);
+    }
     .count {
       font-size: 13px;
       min-width: 56px;
@@ -138,14 +203,16 @@ export class ScreenMarkerPresenter extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     window.addEventListener('keydown', this.#onKey, true);
-    window.addEventListener('pointermove', this.#wake);
+    window.addEventListener('keyup', this.#onKeyUp, true);
+    window.addEventListener('pointermove', this.#onMove);
     this.#wake();
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener('keydown', this.#onKey, true);
-    window.removeEventListener('pointermove', this.#wake);
+    window.removeEventListener('keyup', this.#onKeyUp, true);
+    window.removeEventListener('pointermove', this.#onMove);
     clearTimeout(this.#idleTimer);
     if (document.fullscreenElement === this) void document.exitFullscreen();
   }
@@ -161,10 +228,44 @@ export class ScreenMarkerPresenter extends LitElement {
     }, 2500);
   };
 
-  #go(i: number): void {
+  #onMove = (e: PointerEvent) => {
+    if (this.laser) this.laserPos = { x: e.clientX, y: e.clientY };
+    if (!this.laser) this.#wake();
+  };
+
+  #setLaser(on: boolean): void {
+    this.laser = on;
+    this.toggleAttribute('data-laser', on);
+    if (!on) this.laserPos = null;
+  }
+
+  #go(i: number, build = 0): void {
     const n = this.slides.length;
     if (!n) return;
     this.index = Math.max(0, Math.min(n - 1, i));
+    const builds = this.slides[this.index]!.builds.length;
+    this.build = build < 0 ? builds - 1 : Math.min(build, builds - 1);
+  }
+
+  /** Next reveal step on this slide, else the next slide. */
+  #next(): void {
+    const builds = this.slides[this.index]?.builds.length ?? 1;
+    if (this.build < builds - 1) this.build++;
+    else if (this.index < this.slides.length - 1) this.#go(this.index + 1);
+  }
+
+  /** Previous reveal step, else the previous slide fully revealed. */
+  #prev(): void {
+    if (this.build > 0) this.build--;
+    else if (this.index > 0) this.#go(this.index - 1, -1);
+  }
+
+  willUpdate(changed: Map<string, unknown>): void {
+    // A new deck (or start index) from the host starts that slide at its first step.
+    if (changed.has('slides') || changed.has('index')) {
+      const builds = this.slides[this.index]?.builds.length ?? 1;
+      if (this.build >= builds) this.build = 0;
+    }
   }
 
   #toggleFullscreen(): void {
@@ -186,19 +287,32 @@ export class ScreenMarkerPresenter extends LitElement {
       case 'PageDown':
       case ' ':
       case 'Enter':
-        this.#go(this.index + 1);
+        this.#next();
         break;
       case 'ArrowLeft':
       case 'ArrowUp':
       case 'PageUp':
       case 'Backspace':
-        this.#go(this.index - 1);
+        this.#prev();
+        break;
+      case 'l':
+      case 'L':
+        // Hold L for the laser; a quick tap toggles it on until the next tap.
+        if (!e.repeat) {
+          this.#laserDownAt = Date.now();
+          if (!this.laser) this.#setLaser(true);
+          else this.#laserDownAt = -1; // this press turns it off on release
+        }
+        break;
+      case 'n':
+      case 'N':
+        if (!this.publicView) this.showNotes = !this.showNotes;
         break;
       case 'Home':
         this.#go(0);
         break;
       case 'End':
-        this.#go(this.slides.length - 1);
+        this.#go(this.slides.length - 1, -1);
         break;
       case 'f':
       case 'F':
@@ -218,18 +332,30 @@ export class ScreenMarkerPresenter extends LitElement {
     }
   };
 
+  #onKeyUp = (e: KeyboardEvent) => {
+    if (e.key !== 'l' && e.key !== 'L') return;
+    e.stopImmediatePropagation();
+    const held = this.#laserDownAt > 0 && Date.now() - this.#laserDownAt > 250;
+    if (this.#laserDownAt === -1 || held) this.#setLaser(false);
+    this.#laserDownAt = 0;
+  };
+
   #onSlideClick = (e: MouseEvent) => {
+    if (this.laser) return; // pointing, not navigating
     const el = e.currentTarget as HTMLElement;
     const rect = el.getBoundingClientRect();
-    this.#go(this.index + (e.clientX - rect.left < rect.width / 2 ? -1 : 1));
+    if (e.clientX - rect.left < rect.width / 2) this.#prev();
+    else this.#next();
   };
 
   render() {
     const n = this.slides.length;
-    const src = this.slides[this.index];
+    const slide = this.slides[this.index];
+    const src = slide?.builds[this.build];
+    const title = slide?.title || this.heading;
     return html`
       <div class="top">
-        <span>${this.heading}</span>
+        <span>${title}</span>
         ${this.publicView
           ? html`<button @click=${() => this.dispatchEvent(new CustomEvent('presenter-edit-copy', { bubbles: true, composed: true }))}>
               Edit a copy
@@ -239,16 +365,33 @@ export class ScreenMarkerPresenter extends LitElement {
       <div class="slide" @click=${this.#onSlideClick}>
         ${src ? html`<img src=${src} alt="Slide ${this.index + 1} of ${n}" />` : html`<div class="message">${this.message}</div>`}
       </div>
+      ${this.showNotes && !this.publicView
+        ? html`<div class="notes ${slide?.notes ? '' : 'empty'}">${slide?.notes || 'No notes for this slide.'}</div>`
+        : ''}
       ${n
         ? html`
             <div class="bar">
-              <button ?disabled=${this.index === 0} @click=${() => this.#go(this.index - 1)} title="Previous (←)">‹</button>
+              <button ?disabled=${this.index === 0 && this.build === 0} @click=${() => this.#prev()} title="Previous (←)">‹</button>
               <span class="count">${this.index + 1} / ${n}</span>
-              <button ?disabled=${this.index >= n - 1} @click=${() => this.#go(this.index + 1)} title="Next (→)">›</button>
+              ${slide && slide.builds.length > 1
+                ? html`<span class="dots" title="Reveal steps">${slide.builds.map((_, i) => html`<i class=${i <= this.build ? 'on' : ''}></i>`)}</span>`
+                : ''}
+              <button
+                ?disabled=${this.index >= n - 1 && this.build >= (slide?.builds.length ?? 1) - 1}
+                @click=${() => this.#next()}
+                title="Next (→)"
+              >
+                ›
+              </button>
+              <button class=${this.laser ? 'on' : ''} @click=${() => this.#setLaser(!this.laser)} title="Laser pointer (hold or tap L)">●</button>
+              ${this.publicView
+                ? ''
+                : html`<button @click=${() => (this.showNotes = !this.showNotes)} title="Speaker notes (N)">Notes</button>`}
               <button @click=${() => this.#toggleFullscreen()} title="Fullscreen (F)">⛶</button>
             </div>
           `
         : ''}
+      ${this.laser && this.laserPos ? html`<div class="laser" style="left:${this.laserPos.x}px; top:${this.laserPos.y}px"></div>` : ''}
     `;
   }
 }

@@ -391,4 +391,293 @@ export const screenMarkerStyles = css`
     .group button {
       padding: 6px 8px;
     }
+
+    .titlebar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 44px;
+      padding: 0 104px 0 14px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      user-select: none;
+    }
+    .titlebar .app-name {
+      font-weight: 600;
+      opacity: 0.85;
+    }
+    .titlebar .cloud-name {
+      margin: 0;
+      padding: 0;
+      max-width: 36vw;
+    }
+    .titlebar button {
+      padding: 3px 8px;
+      font-size: 12px;
+    }
+    .save-state {
+      font-size: 12px;
+      opacity: 0.6;
+    }
+    .save-state.dirty,
+    .save-state.saving {
+      opacity: 0.8;
+    }
+    .save-state.error,
+    .save-state.conflict,
+    .save-state.remote {
+      opacity: 1;
+      color: #e5484d;
+    }
+    .peers {
+      font-size: 12px;
+      opacity: 0.75;
+    }
+    .workspace {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+    }
+    .main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .page-strip {
+      flex: none;
+      width: 148px;
+      overflow-y: auto;
+      padding: 10px 8px;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      user-select: none;
+    }
+    .page-item {
+      position: relative;
+      padding: 4px 4px 4px 18px;
+      border-radius: 8px;
+      border: 2px solid transparent;
+      cursor: pointer;
+    }
+    .page-item:hover {
+      background: rgba(128, 128, 128, 0.1);
+    }
+    .page-item.active {
+      border-color: var(--accent);
+    }
+    .page-item.just-moved {
+      animation: tab-flash 1.5s ease-out;
+    }
+    .page-item.drag-over-before::before,
+    .page-item.drag-over-after::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: var(--accent);
+      border-radius: 2px;
+    }
+    .page-item.drag-over-before::before {
+      top: -7px;
+    }
+    .page-item.drag-over-after::after {
+      bottom: -7px;
+    }
+    .page-num {
+      position: absolute;
+      left: 3px;
+      top: 4px;
+      font-size: 11px;
+      opacity: 0.6;
+    }
+    .page-thumb {
+      aspect-ratio: 4 / 3;
+      display: grid;
+      place-items: center;
+      background: rgba(128, 128, 128, 0.12);
+      border-radius: 4px;
+      overflow: hidden;
+      font-size: 11px;
+      opacity: 0.95;
+    }
+    .page-thumb img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .page-thumb span {
+      opacity: 0.5;
+    }
+    .page-title {
+      margin-top: 3px;
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .page-actions {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      display: none;
+      gap: 2px;
+    }
+    .page-item:hover .page-actions {
+      display: flex;
+    }
+    .page-actions button {
+      padding: 0 5px;
+      font-size: 12px;
+      line-height: 18px;
+      background: var(--panel);
+    }
+    .page-add {
+      font-size: 12px;
+      opacity: 0.8;
+    }
+    .slide-panel {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 14px;
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+      font-size: 13px;
+    }
+    .slide-title {
+      flex: 1;
+      min-width: 120px;
+      max-width: 420px;
+      font: inherit;
+      padding: 5px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .slide-reveal {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .slide-notes {
+      margin: 0;
+      padding: 8px 14px;
+      border: none;
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      font: 13px/1.5 system-ui, sans-serif;
+      resize: vertical;
+      outline: none;
+    }
+    .empty {
+      margin: auto;
+      max-width: 760px;
+    }
+    .recent-heading {
+      margin: 28px 0 10px;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      opacity: 0.7;
+    }
+    .recent-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 12px;
+      text-align: left;
+    }
+    .recent-card {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 6px;
+      opacity: 1;
+    }
+    .recent-thumb {
+      aspect-ratio: 4 / 3;
+      display: grid;
+      place-items: center;
+      background: rgba(128, 128, 128, 0.12);
+      border-radius: 4px;
+      overflow: hidden;
+      font-size: 22px;
+    }
+    .recent-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .recent-name {
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .recent-when {
+      font-size: 11px;
+      opacity: 0.6;
+    }
+    .menu-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 150;
+    }
+    .menu {
+      position: fixed;
+      z-index: 151;
+      min-width: 210px;
+      padding: 4px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3);
+      display: flex;
+      flex-direction: column;
+    }
+    .menu-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      border: none;
+      background: none;
+      text-align: left;
+      padding: 6px 10px;
+      border-radius: 5px;
+    }
+    .menu-item:hover:not(:disabled) {
+      background: var(--accent);
+      color: #fff;
+    }
+    .menu-item.danger {
+      color: #e5484d;
+    }
+    .menu-item.danger:hover:not(:disabled) {
+      background: #e5484d;
+      color: #fff;
+    }
+    .menu-item kbd {
+      font: inherit;
+      opacity: 0.55;
+    }
+    .menu-sep {
+      height: 1px;
+      margin: 4px 6px;
+      background: var(--border);
+    }
+    .menu-colors {
+      display: flex;
+      gap: 6px;
+      padding: 4px 10px;
+    }
 `;

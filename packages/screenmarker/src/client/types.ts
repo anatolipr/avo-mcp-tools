@@ -55,6 +55,12 @@ export interface Page {
   name: string;
   imageDataUrl: string | null;
   shapes: Shape[];
+  // Slide title, shown on the page's thumbnail and as the presenter heading.
+  title?: string;
+  // Speaker notes: shown only while presenting the open document.
+  notes?: string;
+  // Present this page's tags and step markers one per click, in the order added.
+  reveal?: boolean;
 }
 
 /** Axis-aligned rectangle in canvas (image) pixels. */

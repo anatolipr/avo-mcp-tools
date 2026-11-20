@@ -35,6 +35,7 @@ interface AuthGuard {
   createPublicLink(path: string, type: 'file' | 'folder'): Promise<{ token: string; expiresAt: string }>;
   getPublicLink(token: string): Promise<{ content?: unknown; owner: string; path: string; type: string }>;
   getCurrentUser(): Promise<{ username: string; fullname: string } | null>;
+  listRecent(): Promise<{ files: { address: string; openedAt: number }[] }>;
   redeemShareTokenFromUrl(): void;
   checkShareLinkJoins(): void;
 }
@@ -157,4 +158,32 @@ export function setCloudNameInHash(name: string | null): void {
   const url = new URL(window.location.href);
   url.hash = name ? encodeURIComponent(name) : '';
   window.history.replaceState(null, '', url.toString());
+}
+
+/** Recently opened documents for the signed-in user, newest first; [] when signed out (never opens the login modal). */
+export async function listRecentDocuments(): Promise<{ name: string; openedAt: number }[]> {
+  const guard = await authGuard();
+  if (!(await guard.getCurrentUser().catch(() => null))) return [];
+  const { files } = await guard.listRecent();
+  return files.map((f) => ({ name: f.address, openedAt: f.openedAt }));
+}
+
+export interface LiveChannel {
+  on(event: 'file.saved', fn: (e: { fromSelf: boolean; by: { username: string; fullname?: string } }) => void): void;
+  on(event: 'presence', fn: (peers: { sessionId: string; username: string; fullname?: string; label?: string }[]) => void): void;
+  on(event: 'file.trashed' | 'closed', fn: (arg?: unknown) => void): void;
+  close(): void;
+}
+
+/** Joins a saved document's live channel (folderfoo's "the channel is the file"); null if unavailable. */
+export async function openLiveChannel(name: string): Promise<LiveChannel | null> {
+  try {
+    await authGuard();
+    const { openChannel } = await importElement<{
+      openChannel(opts: { tenantId: string; file: string; meta?: object }): LiveChannel;
+    }>('channel-client.js');
+    return openChannel({ tenantId: TENANT_ID, file: name, meta: {} });
+  } catch {
+    return null;
+  }
 }

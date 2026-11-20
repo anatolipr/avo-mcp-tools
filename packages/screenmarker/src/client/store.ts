@@ -235,6 +235,23 @@ export class AnnotatorStore {
     }
   }
 
+  /** Updates a page's slide metadata (title / notes / reveal). Not undoable: typing in the slide panel would flood the history. */
+  updatePageMeta(pageId: string, meta: Partial<Pick<Page, 'title' | 'notes' | 'reveal'>>): void {
+    this.pages.update((pages) => pages.map((p) => (p.id === pageId ? { ...p, ...meta } : p)));
+  }
+
+  /** Moves a page one position up/down in the list. Not undoable. Returns whether it moved. */
+  movePage(pageId: string, direction: -1 | 1): boolean {
+    const pages = this.pages.value;
+    const index = pages.findIndex((p) => p.id === pageId);
+    const target = index + direction;
+    if (index === -1 || target < 0 || target >= pages.length) return false;
+    const next = [...pages];
+    [next[index], next[target]] = [next[target]!, next[index]!];
+    this.pages.set(next);
+    return true;
+  }
+
   setImage(pageId: string, dataUrl: string): void {
     this.pages.update((pages) =>
       pages.map((p) => (p.id === pageId ? { ...p, imageDataUrl: dataUrl } : p))
