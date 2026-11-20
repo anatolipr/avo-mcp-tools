@@ -288,7 +288,8 @@ export class ScreenMarker extends LitElement {
   #dragOverSide: 'before' | 'after' | null = null;
   #justMovedPageId: string | null = null;
   #theme: ThemeMode = loadTheme();
-  #presenting: { slides: Slide[]; index: number; publicView: boolean; heading: string; message: string } | null = null;
+  // `zoom` is the editor zoom to open at; without it each slide fits the screen (public links).
+  #presenting: { slides: Slide[]; index: number; publicView: boolean; heading: string; message: string; zoom?: number } | null = null;
   #cloudBusy = false;
   // Autosave / live channel for the open cloud document.
   #saveState: SaveState = 'saved';
@@ -1883,17 +1884,24 @@ export class ScreenMarker extends LitElement {
    */
   async #renderSlides(pages: Page[], withNotes: boolean): Promise<Slide[]> {
     const withImages = pages.filter((p): p is Page & { imageDataUrl: string } => p.imageDataUrl !== null);
-    const toUrl = async (p: Page & { imageDataUrl: string }, shapes: Shape[]) =>
-      (await flattenPage(p.imageDataUrl, shapes)).canvas.toDataURL('image/png');
+    // Transparent outside the image, so margin tags sit on the presenter's
+    // dark stage as they do in the editor, not on an exported-white box.
     return Promise.all(
       withImages.map(async (p) => {
         const revealed = p.reveal ? p.shapes.filter((s) => s.type === 'tag' || s.type === 'step') : [];
         const builds: string[] = [];
+        let width = 0;
+        let height = 0;
         for (let k = 0; k <= revealed.length; k++) {
           const hidden = new Set(revealed.slice(k).map((s) => s.id));
-          builds.push(await toUrl(p, p.shapes.filter((s) => !hidden.has(s.id))));
+          const shown = p.shapes.filter((s) => !hidden.has(s.id));
+          // Every build is sized by all shapes, so revealing never shifts or rescales the slide.
+          const { canvas } = await flattenPage(p.imageDataUrl, shown, null, p.shapes);
+          width = canvas.width;
+          height = canvas.height;
+          builds.push(canvas.toDataURL('image/png'));
         }
-        return { builds, title: p.title ?? '', notes: withNotes ? (p.notes ?? '') : '' };
+        return { builds, width, height, title: p.title ?? '', notes: withNotes ? (p.notes ?? '') : '' };
       })
     );
   }
@@ -1907,7 +1915,7 @@ export class ScreenMarker extends LitElement {
       const slides = await this.#renderSlides(pages, true);
       const start = fromPageId ?? this.#store.activePageId.value;
       const index = Math.max(0, withImages.findIndex((p) => p.id === start));
-      this.#presenting = { slides, index, publicView: false, heading: this.#cloudName ?? '', message: '' };
+      this.#presenting = { slides, index, publicView: false, heading: this.#cloudName ?? '', message: '', zoom: this.#store.zoom.value };
       this.requestUpdate();
     } catch (err) {
       this.#flashStatus(`Present failed: ${(err as Error).message}`);
@@ -2731,6 +2739,7 @@ export class ScreenMarker extends LitElement {
             <screen-marker-presenter
               .slides=${this.#presenting.slides}
               .index=${this.#presenting.index}
+              .zoom=${this.#presenting.zoom ?? null}
               ?public-view=${this.#presenting.publicView}
               heading=${this.#presenting.heading}
               message=${this.#presenting.message}

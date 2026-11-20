@@ -585,17 +585,25 @@ const SCENE_BACKGROUND = '#ffffff';
 /**
  * Renders a page (image + annotations) to a canvas covering its full
  * scene. `origin` is where image (0, 0) landed, for callers that need to
- * map image coordinates (e.g. a region) onto the result.
+ * map image coordinates (e.g. a region) onto the result. `background` fills
+ * the scene outside the image; `null` leaves it transparent. `sceneShapes`
+ * sizes the scene when it should cover more than the shapes drawn (reveal
+ * steps keep one size while shapes are hidden).
  */
-export async function flattenPage(imageDataUrl: string, shapes: Shape[]): Promise<{ canvas: HTMLCanvasElement; origin: Point }> {
+export async function flattenPage(
+  imageDataUrl: string,
+  shapes: Shape[],
+  background: string | null = SCENE_BACKGROUND,
+  sceneShapes: Shape[] = shapes
+): Promise<{ canvas: HTMLCanvasElement; origin: Point }> {
   const img = await loadImage(imageDataUrl);
-  const area = sceneBounds(img.naturalWidth, img.naturalHeight, shapes);
+  const area = sceneBounds(img.naturalWidth, img.naturalHeight, sceneShapes);
   const canvas = document.createElement('canvas');
   canvas.width = area.w;
   canvas.height = area.h;
   const ctx = canvas.getContext('2d')!;
-  if (area.x < 0 || area.y < 0 || area.w > img.naturalWidth || area.h > img.naturalHeight) {
-    ctx.fillStyle = SCENE_BACKGROUND;
+  if (background && (area.x < 0 || area.y < 0 || area.w > img.naturalWidth || area.h > img.naturalHeight)) {
+    ctx.fillStyle = background;
     ctx.fillRect(0, 0, area.w, area.h);
   }
   ctx.translate(-area.x, -area.y);

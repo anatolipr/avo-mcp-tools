@@ -3,6 +3,9 @@ import { LitElement, html, css } from 'lit';
 /** One slide: its build images (one when nothing is revealed step by step), plus title and speaker notes. */
 export interface Slide {
   builds: string[];
+  // Size of every build image, in image pixels.
+  width: number;
+  height: number;
   title: string;
   notes: string;
 }
@@ -17,7 +20,10 @@ export interface Slide {
  * slide), ← / PageUp / Backspace previous, Home / End, F fullscreen,
  * L laser pointer (hold, or tap to toggle), N speaker notes (editor mode
  * only), Esc close (editor mode only). Clicking the right or left half of
- * the slide also steps forward / back.
+ * the slide also steps forward / back. Zoom: `zoom` (editor zoom, image
+ * pixels to device pixels) opens at that size, else slides fit the screen;
+ * +/- and Cmd/Ctrl +/-, Cmd/Ctrl+wheel or pinch zoom, 0 fits again, and a
+ * zoomed slide scrolls.
  *
  * Events: `presenter-close`, `presenter-edit-copy`.
  */
@@ -25,6 +31,8 @@ export class ScreenMarkerPresenter extends LitElement {
   static properties = {
     slides: { attribute: false },
     index: { type: Number },
+    zoom: { attribute: false },
+    scale: { state: true },
     build: { state: true },
     laser: { state: true },
     laserPos: { state: true },
@@ -37,6 +45,9 @@ export class ScreenMarkerPresenter extends LitElement {
 
   declare slides: Slide[];
   declare index: number;
+  declare zoom: number | null;
+  // CSS pixels per slide pixel; null fits the slide to the screen.
+  declare scale: number | null;
   declare build: number;
   declare laser: boolean;
   declare laserPos: { x: number; y: number } | null;
@@ -52,6 +63,8 @@ export class ScreenMarkerPresenter extends LitElement {
     super();
     this.slides = [];
     this.index = 0;
+    this.zoom = null;
+    this.scale = null;
     this.build = 0;
     this.laser = false;
     this.laserPos = null;
@@ -86,7 +99,19 @@ export class ScreenMarkerPresenter extends LitElement {
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
-      box-shadow: 0 6px 40px rgba(0, 0, 0, 0.6);
+      /* Follows the image's alpha, so transparent margins around tags cast no box. */
+      filter: drop-shadow(0 6px 30px rgba(0, 0, 0, 0.6));
+    }
+    /* Flex + auto margins, not grid centering, so an overflowing slide can scroll to every edge. */
+    .slide.zoomed {
+      display: flex;
+      overflow: auto;
+    }
+    .slide.zoomed img {
+      flex: none;
+      margin: auto;
+      max-width: none;
+      max-height: none;
     }
     .message {
       opacity: 0.75;
@@ -205,6 +230,7 @@ export class ScreenMarkerPresenter extends LitElement {
     window.addEventListener('keydown', this.#onKey, true);
     window.addEventListener('keyup', this.#onKeyUp, true);
     window.addEventListener('pointermove', this.#onMove);
+    this.addEventListener('wheel', this.#onWheel, { passive: false });
     this.#wake();
   }
 
@@ -213,6 +239,7 @@ export class ScreenMarkerPresenter extends LitElement {
     window.removeEventListener('keydown', this.#onKey, true);
     window.removeEventListener('keyup', this.#onKeyUp, true);
     window.removeEventListener('pointermove', this.#onMove);
+    this.removeEventListener('wheel', this.#onWheel);
     clearTimeout(this.#idleTimer);
     if (document.fullscreenElement === this) void document.exitFullscreen();
   }
@@ -260,7 +287,55 @@ export class ScreenMarkerPresenter extends LitElement {
     else if (this.index > 0) this.#go(this.index - 1, -1);
   }
 
+  #dpr(): number {
+    return window.devicePixelRatio || 1;
+  }
+
+  /** Current CSS pixels per slide pixel, measured when fitting. */
+  #currentScale(): number {
+    if (this.scale !== null) return this.scale;
+    const img = this.renderRoot.querySelector('.slide img');
+    const w = this.slides[this.index]?.width;
+    return img && w ? img.getBoundingClientRect().width / w : 1 / this.#dpr();
+  }
+
+  /** Sets the zoom, keeping the slide point under (clientX, clientY) fixed; defaults to the view center. */
+  async #zoomTo(scale: number, clientX?: number, clientY?: number): Promise<void> {
+    const dpr = this.#dpr();
+    // Same limits as the editor (10%–400%), in its device-pixel terms.
+    scale = Math.min(4 / dpr, Math.max(0.1 / dpr, scale));
+    const view = this.renderRoot.querySelector<HTMLElement>('.slide');
+    const img = view?.querySelector('img');
+    if (!view || !img) {
+      this.scale = scale;
+      return;
+    }
+    const v = view.getBoundingClientRect();
+    const x = clientX ?? v.left + v.width / 2;
+    const y = clientY ?? v.top + v.height / 2;
+    const r = img.getBoundingClientRect();
+    const fx = (x - r.left) / r.width;
+    const fy = (y - r.top) / r.height;
+    this.scale = scale;
+    await this.updateComplete;
+    const r2 = img.getBoundingClientRect();
+    view.scrollLeft += r2.left + fx * r2.width - x;
+    view.scrollTop += r2.top + fy * r2.height - y;
+  }
+
+  #zoomBy(factor: number, clientX?: number, clientY?: number): void {
+    void this.#zoomTo(this.#currentScale() * factor, clientX, clientY);
+  }
+
+  /** Cmd/Ctrl+wheel and trackpad pinch zoom around the cursor; a plain wheel scrolls a zoomed slide. */
+  #onWheel = (e: WheelEvent) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    this.#zoomBy(Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0025)), e.clientX, e.clientY);
+  };
+
   willUpdate(changed: Map<string, unknown>): void {
+    if (changed.has('zoom')) this.scale = this.zoom ? this.zoom / this.#dpr() : null;
     // A new deck (or start index) from the host starts that slide at its first step.
     if (changed.has('slides') || changed.has('index')) {
       const builds = this.slides[this.index]?.builds.length ?? 1;
@@ -279,9 +354,22 @@ export class ScreenMarkerPresenter extends LitElement {
 
   // Capture phase on window, so the editor underneath never sees these keys.
   #onKey = (e: KeyboardEvent) => {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.altKey) return;
+    // Zoom keys work bare and with Cmd/Ctrl (the editor's shortcuts); other modified keys pass through.
+    const zoomKey = e.key === '=' || e.key === '+' || e.key === '-' || e.key === '0';
+    if ((e.metaKey || e.ctrlKey) && !zoomKey) return;
     let handled = true;
     switch (e.key) {
+      case '=':
+      case '+':
+        this.#zoomBy(1.2);
+        break;
+      case '-':
+        this.#zoomBy(1 / 1.2);
+        break;
+      case '0':
+        this.scale = null;
+        break;
       case 'ArrowRight':
       case 'ArrowDown':
       case 'PageDown':
@@ -353,6 +441,7 @@ export class ScreenMarkerPresenter extends LitElement {
     const slide = this.slides[this.index];
     const src = slide?.builds[this.build];
     const title = slide?.title || this.heading;
+    const zoomed = this.scale !== null && !!slide?.width;
     return html`
       <div class="top">
         <span>${title}</span>
@@ -362,8 +451,14 @@ export class ScreenMarkerPresenter extends LitElement {
             </button>`
           : html`<button @click=${() => this.#close()} title="Close (Esc)">✕ Close</button>`}
       </div>
-      <div class="slide" @click=${this.#onSlideClick}>
-        ${src ? html`<img src=${src} alt="Slide ${this.index + 1} of ${n}" />` : html`<div class="message">${this.message}</div>`}
+      <div class="slide ${zoomed ? 'zoomed' : ''}" @click=${this.#onSlideClick}>
+        ${src
+          ? html`<img
+              src=${src}
+              alt="Slide ${this.index + 1} of ${n}"
+              style=${zoomed ? `width:${slide!.width * this.scale!}px; height:${slide!.height * this.scale!}px` : ''}
+            />`
+          : html`<div class="message">${this.message}</div>`}
       </div>
       ${this.showNotes && !this.publicView
         ? html`<div class="notes ${slide?.notes ? '' : 'empty'}">${slide?.notes || 'No notes for this slide.'}</div>`
@@ -387,6 +482,13 @@ export class ScreenMarkerPresenter extends LitElement {
               ${this.publicView
                 ? ''
                 : html`<button @click=${() => (this.showNotes = !this.showNotes)} title="Speaker notes (N)">Notes</button>`}
+              <button @click=${() => this.#zoomBy(1 / 1.2)} title="Zoom out (-, Cmd/Ctrl+scroll, pinch)">−</button>
+              <button
+                class="count"
+                @click=${() => (this.scale = null)}
+                title="Fit to screen (0)"
+              >${zoomed ? `${Math.round(this.scale! * this.#dpr() * 100)}%` : 'Fit'}</button>
+              <button @click=${() => this.#zoomBy(1.2)} title="Zoom in (+, Cmd/Ctrl+scroll, pinch)">+</button>
               <button @click=${() => this.#toggleFullscreen()} title="Fullscreen (F)">⛶</button>
             </div>
           `
