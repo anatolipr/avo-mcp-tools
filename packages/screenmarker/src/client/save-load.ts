@@ -1,4 +1,5 @@
 import type { Page } from './types.js';
+import { upgradePages } from './legacy.js';
 
 const FILE_FORMAT = 'screenmarker-document';
 const FILE_VERSION = 1;
@@ -19,7 +20,7 @@ export function documentValue(pages: Page[], activePageId: string): DocumentFile
   return { format: FILE_FORMAT, version: FILE_VERSION, pages, activePageId };
 }
 
-export function parseDocument(json: string): { pages: Page[]; activePageId: string } {
+export function parseDocument(json: string): Promise<{ pages: Page[]; activePageId: string }> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -30,7 +31,7 @@ export function parseDocument(json: string): { pages: Page[]; activePageId: stri
 }
 
 /** Validates an already-parsed document (from a file, or as folderfoo hands a stored value back). */
-export function parseDocumentValue(parsed: unknown): { pages: Page[]; activePageId: string } {
+export async function parseDocumentValue(parsed: unknown): Promise<{ pages: Page[]; activePageId: string }> {
   if (typeof parsed === 'string') return parseDocument(parsed);
   if (
     typeof parsed !== 'object' ||
@@ -43,7 +44,7 @@ export function parseDocumentValue(parsed: unknown): { pages: Page[]; activePage
   const file = parsed as DocumentFile;
   const activePageId =
     file.pages.find((p) => p.id === file.activePageId)?.id ?? file.pages[0]?.id ?? '';
-  return { pages: file.pages, activePageId };
+  return { pages: await upgradePages(file.pages), activePageId };
 }
 
 function defaultDocumentName(): string {

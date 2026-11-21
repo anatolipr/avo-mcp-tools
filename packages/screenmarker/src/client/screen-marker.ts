@@ -6,9 +6,10 @@ import { AnnotatorStore, makeId, type ShapeStyle } from './store.js';
 import {
   boxHandlePoints,
   contrastColor,
-  cropImageDataUrl,
+  cropPicture,
+  decodePicture,
+  focusBounds,
   drawHandles,
-  drawImageSelectionOutline,
   drawRegionOverlay,
   drawSelectionOutline,
   drawShapes,
@@ -22,12 +23,13 @@ import {
   sceneBounds,
   shapeBounds,
   shapesInRect,
-  transformImageDataUrl,
+  transformPicture,
   transformShape,
   type ImageTransform,
 } from './render.js';
 import { copyImageOnly, copyRegion, downloadImage } from './export.js';
-import { findText, recognizeLines } from './ocr.js';
+import { findSecrets, findText, recognizeLines } from './ocr.js';
+import { followAttachments, snapEnds, unsnap } from './attach.js';
 import { diffRegions } from './diff.js';
 import { pagesToMarkdown } from './markdown.js';
 import { documentValue, downloadDocument, parseDocumentValue, readDocumentFile } from './save-load.js';
@@ -125,8 +127,6 @@ const GRAB_CURSOR: Record<BoxGrab, string> = {
 
 type ShapeDrag =
   | { kind: 'move'; ids: string[]; start: Point; delta: Point; selectOnlyOnClick: string | null }
-  // The page image itself, dragged while selected; committed by moving every shape the other way.
-  | { kind: 'image'; start: Point; delta: Point }
   // grab 2: a magnifier's lens-radius handle.
   | { kind: 'resize'; orig: Shape; grab: BoxGrab | 0 | 1 | 2; start: Point; draft: Shape | null };
 
@@ -181,6 +181,16 @@ function mapShapeToBox(shape: Shape, from: Rect, to: Rect): Shape {
     ...shape,
     points: shape.points.map((p) => ({ x: to.x + (p.x - from.x) * sx, y: to.y + (p.y - from.y) * sy })),
   };
+}
+
+/** Whether box `outer` takes in all of `b` (a shapeBounds result). */
+function containsRect(outer: Rect, b: { x: number; y: number; width: number; height: number }): boolean {
+  return b.x >= outer.x && b.y >= outer.y && b.x + b.width <= outer.x + outer.w && b.y + b.height <= outer.y + outer.h;
+}
+
+/** Whether box `r` and `b` (a shapeBounds result) overlap. */
+function containsAny(r: Rect, b: { x: number; y: number; width: number; height: number }): boolean {
+  return b.x < r.x + r.w && b.x + b.width > r.x && b.y < r.y + r.h && b.y + b.height > r.y;
 }
 
 function offsetShape(shape: Shape, dx: number, dy: number): Shape {
@@ -277,7 +287,6 @@ export class ScreenMarker extends LitElement {
   #textInputRef = createRef<HTMLInputElement | HTMLTextAreaElement>();
   #loadDocumentInputRef = createRef<HTMLInputElement>();
   #imageInputRef = createRef<HTMLInputElement>();
-  #image: { src: string; img: HTMLImageElement } | null = null;
   // The canvas covers this box of the scene, in image coordinates (the
   // image sits at 0,0; the margin around it can hold tags and shapes).
   #area: Rect = { x: 0, y: 0, w: 0, h: 0 };
@@ -407,8 +416,8 @@ export class ScreenMarker extends LitElement {
     e.preventDefault();
     const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/'));
     if (!files.length) return;
-    // Onto a page that has an image, files become movable pictures centered at the drop point.
-    if (this.#store.activePage.imageDataUrl && this.#canvasRef.value) {
+    // Onto a page with content, files become pictures centered at the drop point.
+    if (this.#store.activePage.shapes.length && this.#canvasRef.value) {
       const at = this.#canvasPoint(e);
       for (const f of files) await this.#addPicture(f, at);
       return;
@@ -424,8 +433,8 @@ export class ScreenMarker extends LitElement {
       if (item.type.startsWith('image/')) {
         const file = item.getAsFile();
         if (!file) return;
-        // A page that already has an image gets the paste as an extra, movable picture.
-        if (this.#store.activePage.imageDataUrl) await this.#addPicture(file);
+        // A page with content gets the paste as a picture in the middle of the view.
+        if (this.#store.activePage.shapes.length) await this.#addPicture(file);
         else await this.#loadImageFile(file);
         return;
       }
@@ -448,7 +457,7 @@ export class ScreenMarker extends LitElement {
       const order = TAG_ARROWS.filter((a) => a !== 'none');
       const i = order.indexOf((tag.tagArrow ?? 'bottom-center') as (typeof order)[number]);
       this.#applyStyle({ tagArrow: order[(i + 1) % order.length]! });
-    } else if (!this.#spacePanned && this.#store.activePage.imageDataUrl) {
+    } else if (!this.#spacePanned && this.#store.activePage.shapes.length) {
       this.#openPreview();
     }
     this.requestUpdate();
@@ -486,7 +495,7 @@ export class ScreenMarker extends LitElement {
       return;
     }
 
-    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f' && this.#store.activePage.imageDataUrl) {
+    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f' && this.#store.activePage.shapes.length) {
       e.preventDefault();
       this.#openSearch();
       return;
@@ -539,17 +548,9 @@ export class ScreenMarker extends LitElement {
     }
 
     if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) {
-      const sel = this.#store.selection.value;
       if (selectedIds.length) {
         e.preventDefault();
         this.#store.deleteSelectedShapes();
-      } else if (sel?.type === 'image' && this.#store.activePage.shapes.length === 0) {
-        // Image selected with no other annotations on the page: delete the
-        // whole page (or, if it's the only page left, reset to a blank
-        // fresh-load state) rather than leaving an empty selected image.
-        // Same confirmation as the tab's × button.
-        e.preventDefault();
-        this.#closePageWithConfirm(this.#store.activePageId.value);
       }
       return;
     }
@@ -574,13 +575,6 @@ export class ScreenMarker extends LitElement {
         const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
         const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
         this.#store.moveShapes(selectedIds, dx, dy);
-      } else if (this.#store.selection.value?.type === 'image') {
-        // Nudging the page image moves every shape the other way (shapes are relative to it).
-        e.preventDefault();
-        const step = e.shiftKey ? 10 : 1;
-        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
-        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
-        void this.#commitImageMove({ x: dx, y: dy }, true);
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         this.#gotoAdjacentPage(e.key === 'ArrowLeft' ? -1 : 1);
@@ -661,20 +655,17 @@ export class ScreenMarker extends LitElement {
       this.#store.reorderSelectedShapes(e.key === ']' ? 'front' : 'back');
     } else if (key === 'c') {
       e.preventDefault();
-      const sel = this.#store.selection.value;
       if (selectedIds.length) {
         // In-app clipboard copy — pastes back as new, still-editable shapes.
         this.#store.copySelection();
         this.#flashStatus(selectedIds.length === 1 ? 'Shape copied' : `${selectedIds.length} shapes copied`);
-      } else if (sel?.type === 'image') {
-        // The image is selected: copy the page to the OS clipboard AND the
-        // in-app clipboard, so Cmd+V can still duplicate it onto another page.
-        this.#store.copySelection();
-        void this.#copyCurrentPage();
-      } else if (this.#store.activePage.imageDataUrl) {
+      } else if (this.#store.activePage.shapes.length) {
         // Nothing selected: copy the whole scene (all pages) to the OS clipboard.
         void this.#copyImage();
       }
+    } else if (key === 'x' && selectedIds.length) {
+      e.preventDefault();
+      this.#cutSelection();
     } else if (key === 'v' && this.#store.hasClipboard()) {
       e.preventDefault();
       this.#store.paste();
@@ -693,23 +684,30 @@ export class ScreenMarker extends LitElement {
     this.#canvasCursor = '';
   }
 
+  /** Puts an image on an empty page: a picture at (0, 0), at its own size, framed to fit. */
   async #loadImageFile(file: File): Promise<void> {
-    const dataUrl = await fileToDataUrl(file);
-    this.#store.setImage(this.#store.activePageId.value, dataUrl);
     // A new image: the old framing no longer applies.
     this.#store.setPageView(this.#store.activePageId.value, null);
     this.#clearRegion();
+    await this.#addPicture(file, null);
+    this.#store.selectShapes([]);
     await this.updateComplete;
     await this.#redraw();
     this.#fitToWindow();
   }
 
+  #cutSelection(): void {
+    const n = this.#store.cutSelection();
+    if (n) this.#flashStatus(`${n === 1 ? 'Shape' : `${n} shapes`} cut (Cmd/Ctrl+V puts ${n === 1 ? 'it' : 'them'} back)`);
+  }
+
   /**
    * Adds an image file to the active page as a picture shape at its natural
-   * size, centered on `at` (a drop) or else on the middle of the view.
-   * Selects it, ready to move or resize.
+   * size, centered on `at` (a drop) or else on the middle of the view; with
+   * `at` null, its top-left corner goes at (0, 0). Selects it, ready to move
+   * or resize.
    */
-  async #addPicture(file: File, at?: Point): Promise<void> {
+  async #addPicture(file: File, at?: Point | null): Promise<void> {
     const src = await fileToDataUrl(file);
     const img = new Image();
     img.src = src;
@@ -721,7 +719,7 @@ export class ScreenMarker extends LitElement {
     }
     const w = img.naturalWidth;
     const h = img.naturalHeight;
-    const c = at ?? this.#cam;
+    const c = at === null ? { x: w / 2, y: h / 2 } : (at ?? this.#cam);
     const x = Math.round(c.x - w / 2);
     const y = Math.round(c.y - h / 2);
     const shape: Shape = {
@@ -738,30 +736,29 @@ export class ScreenMarker extends LitElement {
     this.#store.addShape(shape);
     this.#store.activeTool.set('select');
     this.#store.selectShapes([shape.id]);
+    if (this.#store.autoRedact.value) void this.#redactSecrets([shape], true);
     await this.updateComplete;
     await this.#redraw();
   }
 
   /**
-   * Lines up the selected pictures to the right of the page image, in their
-   * current left-to-right order, each scaled to the image's height with an
-   * even gap: a ribbon of screenshots. One undo step.
+   * Lines up the selected pictures in their current left-to-right order: the
+   * leftmost stays put and the others follow it to the right, each scaled to
+   * its height, with an even gap — a ribbon of screenshots. One undo step.
    */
   async #arrangePicturesInRow(): Promise<void> {
-    const page = this.#store.activePage;
-    if (!page.imageDataUrl) return;
     const pictures = this.#store.selectedShapes
       .filter((s) => s.type === 'picture')
       .sort((a, b) => shapeBounds(a).x - shapeBounds(b).x);
-    if (!pictures.length) return;
-    const main = await this.#loadPageImage(page.imageDataUrl);
-    const H = main.naturalHeight;
+    if (pictures.length < 2) return;
+    const first = shapeBounds(pictures[0]!);
+    const H = first.height;
     const gap = pictureGap(H);
-    let x = main.naturalWidth + gap;
-    const next = pictures.map((p) => {
+    let x = first.x + first.width + gap;
+    const next = pictures.slice(1).map((p) => {
       const b = shapeBounds(p);
       const w = b.height ? (b.width * H) / b.height : b.width;
-      const moved: Shape = { ...p, points: [{ x, y: 0 }, { x: x + w, y: H }] };
+      const moved: Shape = { ...p, points: [{ x, y: first.y }, { x: x + w, y: first.y + H }] };
       x += w + gap;
       return moved;
     });
@@ -769,6 +766,18 @@ export class ScreenMarker extends LitElement {
     await this.updateComplete;
     await this.#redraw();
     this.#fitToWindow();
+  }
+
+  /** Moves each selected picture (with the annotations on it) to a new page of its own. */
+  #movePicturesToNewPages(): void {
+    const n = this.#store.movePicturesToNewPages(this.#store.selectedIds);
+    if (!n) return;
+    this.#clearRegion();
+    this.#flashStatus(n === 1 ? 'Moved the picture to a new page' : `Moved ${n} pictures to ${n} new pages`);
+    void this.updateComplete.then(async () => {
+      await this.#redraw();
+      await this.#restoreView();
+    });
   }
 
   #onFilePick = async (e: Event) => {
@@ -791,7 +800,7 @@ export class ScreenMarker extends LitElement {
 
     const hasContent =
       this.#store.pages.value.length > 1 ||
-      this.#store.pages.value.some((p) => p.imageDataUrl !== null || p.shapes.length > 0);
+      this.#store.pages.value.some((p) => p.shapes.length > 0);
     if (hasContent && !window.confirm('Load this document? It will replace everything currently open. You can Undo (Cmd/Ctrl+Z) afterward.')) {
       return;
     }
@@ -811,15 +820,6 @@ export class ScreenMarker extends LitElement {
 
   // ---------- drawing ----------
 
-  async #loadPageImage(src: string): Promise<HTMLImageElement> {
-    if (this.#image?.src === src) return this.#image.img;
-    const img = new Image();
-    img.src = src;
-    await img.decode();
-    this.#image = { src, img };
-    return img;
-  }
-
   /** The page's shapes as they should look right now — with any in-progress move, resize, or new shape applied, and the text being edited hidden (the input overlay shows it instead). */
   #displayShapes(): Shape[] {
     const drag = this.#shapeDrag;
@@ -827,16 +827,37 @@ export class ScreenMarker extends LitElement {
     const shapes: Shape[] = [];
     for (const s of this.#store.activePage.shapes) {
       if (this.#textEdit?.id === s.id) continue;
-      if (movingIds?.has(s.id) && drag?.kind === 'move') shapes.push(offsetShape(s, drag.delta.x, drag.delta.y));
-      else if (drag?.kind === 'resize' && drag.orig.id === s.id && drag.draft) shapes.push(drag.draft);
+      // What is being dragged shows where the pointer puts it (its ends loose until dropped).
+      if (movingIds?.has(s.id) && drag?.kind === 'move') shapes.push(unsnap(offsetShape(s, drag.delta.x, drag.delta.y)));
+      else if (drag?.kind === 'resize' && drag.orig.id === s.id && drag.draft) shapes.push(unsnap(drag.draft));
       else shapes.push(s);
     }
     const tool = this.#store.activeTool.value;
     if (this.#drawing && this.#currentPoints.length >= 2 && this.#isShapeTool(tool)) {
       shapes.push(this.#newShape(tool, this.#currentPoints));
     }
-    return shapes;
+    // Arrows attached to something being dragged follow it live.
+    return this.#store.snapArrows.value && drag ? followAttachments(shapes) : shapes;
   }
+
+  /** The text/tag/picture the arrow or line being drawn (or whose end is dragged) will attach to. */
+  #snapPreviewTargets(shapes: Shape[]): Shape[] {
+    if (!this.#store.snapArrows.value) return [];
+    const drag = this.#shapeDrag;
+    let conn: Shape | null = null;
+    const tool = this.#store.activeTool.value;
+    if (this.#drawing && (tool === 'arrow' || tool === 'line')) conn = shapes[shapes.length - 1] ?? null;
+    else if (drag?.kind === 'resize' && drag.draft && (drag.grab === 0 || drag.grab === 1)) conn = drag.draft;
+    if (!conn || (conn.type !== 'arrow' && conn.type !== 'line')) return [];
+    const ends = snapEnds(conn, shapes).ends ?? [];
+    return ends.map((e) => e && shapes.find((s) => s.id === e.id)).filter((s): s is Shape => !!s);
+  }
+
+  #toggleSnapArrows = () => {
+    const on = !this.#store.snapArrows.value;
+    this.#store.snapArrows.set(on);
+    this.#flashStatus(on ? 'Snapping on: arrow and line ends attach to text and pictures' : 'Snapping off: arrow and line ends stay where you put them');
+  };
 
   #isShapeTool(tool: Tool): tool is ShapeType {
     return tool !== 'select';
@@ -854,9 +875,9 @@ export class ScreenMarker extends LitElement {
     if (SIZED_BY_FONT.includes(type)) shape.fontSize = this.#store.activeFontSize.value;
     if (type === 'tag') shape.tagArrow = this.#store.activeTagArrow.value;
     if (type === 'magnifier') {
-      // A lens about a fifth of the page image's shorter side reads well at any resolution.
-      const img = this.#image?.img;
-      const side = img ? Math.min(img.naturalWidth, img.naturalHeight) : 400;
+      // A lens about a fifth of the shorter side of the page's pictures reads well at any resolution.
+      const f = focusBounds(this.#store.activePage.shapes);
+      const side = f.w && f.h ? Math.min(f.w, f.h) : 400;
       shape.lensRadius = Math.max(40, Math.round(side * 0.1));
       shape.magnify = DEFAULT_MAGNIFY;
     }
@@ -866,14 +887,11 @@ export class ScreenMarker extends LitElement {
   async #redraw(): Promise<void> {
     const page = this.#store.activePage;
     const canvas = this.#canvasRef.value;
-    if (!canvas || !page.imageDataUrl) return;
+    if (!canvas || !page.shapes.length) return;
 
-    const img = await this.#loadPageImage(page.imageDataUrl);
-    const W = img.naturalWidth;
-    const H = img.naturalHeight;
     const shapes = this.#displayShapes();
     await preloadPictures(shapes);
-    const content = sceneBounds(W, H, shapes);
+    const content = sceneBounds(shapes);
     const area = this.#editorArea();
     const prev = this.#area;
     const sizeChanged = prev.x !== area.x || prev.y !== area.y || canvas.width !== area.w || canvas.height !== area.h;
@@ -887,38 +905,22 @@ export class ScreenMarker extends LitElement {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.translate(-area.x, -area.y);
-    // The empty space around the image stays transparent (the stage shows
-    // through); only the image itself gets a drop shadow to stand out.
-    // While the page image is being dragged it draws at its drag offset; shapes stay put.
-    const imageDrag = this.#shapeDrag?.kind === 'image' ? this.#shapeDrag.delta : { x: 0, y: 0 };
-    ctx.save();
-    ctx.translate(imageDrag.x, imageDrag.y);
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
-    ctx.shadowBlur = 16 / this.#displayScale();
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, W, H);
-    ctx.shadowColor = 'transparent';
-    ctx.drawImage(img, 0, 0);
-    ctx.restore();
-    drawShapes(ctx, shapes);
+    // The empty space around the pictures stays transparent (the stage shows
+    // through); pictures get a drop shadow to stand out.
+    drawShapes(ctx, shapes, 16 / this.#displayScale());
     this.#drawSearchHits(ctx);
 
     const unit = 1 / this.#displayScale();
     const selected = new Set(this.#store.selectedIds);
     const selectedShapes = shapes.filter((s) => selected.has(s.id));
     for (const s of selectedShapes) drawSelectionOutline(ctx, s, unit);
+    // While an arrow/line end is placed, outline what it will snap to.
+    for (const t of this.#snapPreviewTargets(shapes)) drawSelectionOutline(ctx, t, unit);
     const handleShape = selectedShapes.length === 1 ? selectedShapes[0]! : null;
     if (handleShape && this.#store.activeTool.value === 'select' && this.#shapeDrag?.kind !== 'move') {
       const pts = this.#handlePoints(handleShape);
       if (pts.length) drawHandles(ctx, pts, HANDLE_CSS_PX * unit);
     }
-    if (this.#store.selection.value?.type === 'image') {
-      ctx.save();
-      ctx.translate(imageDrag.x, imageDrag.y);
-      drawImageSelectionOutline(ctx, W, H);
-      ctx.restore();
-    }
-
     const region = this.#activeRegion();
     if (region) drawRegionOverlay(ctx, region, HANDLE_CSS_PX * unit, area);
     // canvas.width/height just changed the wrap's target size (#canvasWrapStyle
@@ -1149,9 +1151,8 @@ export class ScreenMarker extends LitElement {
   async #fitToWindow(): Promise<void> {
     const page = this.#store.activePage;
     const stage = this.#stageRef.value;
-    if (!stage || !page.imageDataUrl) return;
-    const img = await this.#loadPageImage(page.imageDataUrl);
-    const c = sceneBounds(img.naturalWidth, img.naturalHeight, page.shapes);
+    if (!stage || !page.shapes.length) return;
+    const c = sceneBounds(page.shapes);
     const dpr = window.devicePixelRatio || 1;
     const availW = stage.clientWidth - 32;
     const availH = stage.clientHeight - 32;
@@ -1162,7 +1163,7 @@ export class ScreenMarker extends LitElement {
   }
 
   #onPointerDown = (e: PointerEvent) => {
-    if (this.#spaceHeld || !this.#store.activePage.imageDataUrl || e.button !== 0) return;
+    if (this.#spaceHeld || !this.#store.activePage.shapes.length || e.button !== 0) return;
     this.#commitTextEdit();
     const tool = this.#store.activeTool.value;
     const pt = this.#canvasPoint(e);
@@ -1189,7 +1190,9 @@ export class ScreenMarker extends LitElement {
         return;
       }
       const hit = hitTestShapes(this.#store.activePage.shapes, pt);
-      if (hit) {
+      // A picture is grabbed only once selected: pressing on an unselected one
+      // starts a selection region (a click selects it, Shift+click adds it).
+      if (hit && (hit.type !== 'picture' || this.#store.selectedIds.includes(hit.id))) {
         const wasSelected = this.#store.selectedIds.includes(hit.id);
         if (e.shiftKey) this.#store.toggleShapeSelected(hit.id);
         else if (!wasSelected) this.#store.selectShapes([hit.id]);
@@ -1211,12 +1214,6 @@ export class ScreenMarker extends LitElement {
       }
       if (region && regionGrab === 'move') {
         this.#regionDrag = { grab: 'move', start: pt, orig: region, additive: false };
-        capture();
-        return;
-      }
-      // A selected page image drags like a picture; unselected, a drag on it still draws a selection region.
-      if (!e.shiftKey && this.#store.selection.value?.type === 'image' && this.#insideImage(pt)) {
-        this.#shapeDrag = { kind: 'image', start: pt, delta: { x: 0, y: 0 } };
         capture();
         return;
       }
@@ -1275,7 +1272,7 @@ export class ScreenMarker extends LitElement {
     }
 
     const drag = this.#shapeDrag;
-    if (drag?.kind === 'move' || drag?.kind === 'image') {
+    if (drag?.kind === 'move') {
       let dx = pt.x - drag.start.x;
       let dy = pt.y - drag.start.y;
       // Shift locks the move to the dominant axis.
@@ -1351,13 +1348,13 @@ export class ScreenMarker extends LitElement {
       const handle = selected.length === 1 ? this.#shapeHandleAt(selected[0]!, pt) : null;
       const region = this.#activeRegion();
       const regionGrab = region ? boxGrabAt(region, pt, this.#handleTolerance()) : null;
+      const hit = hitTestShapes(this.#store.activePage.shapes, pt);
       if (handle === 2) cursor = 'ew-resize';
       else if (handle === 0 || handle === 1) cursor = 'grab';
       else if (handle) cursor = GRAB_CURSOR[handle];
       else if (regionGrab && regionGrab !== 'move') cursor = GRAB_CURSOR[regionGrab];
-      else if (hitTestShapes(this.#store.activePage.shapes, pt)) cursor = 'move';
+      else if (hit && (hit.type !== 'picture' || this.#store.selectedIds.includes(hit.id))) cursor = 'move';
       else if (regionGrab === 'move') cursor = 'move';
-      else if (this.#store.selection.value?.type === 'image' && this.#insideImage(pt)) cursor = 'move';
     } else if (tool === 'text') {
       cursor = 'text';
     }
@@ -1374,13 +1371,20 @@ export class ScreenMarker extends LitElement {
       const r = this.#region?.rect;
       if (regionDrag.grab === 'create') {
         if (!r || r.w < CLICK_THRESHOLD || r.h < CLICK_THRESHOLD) {
-          // A plain click on empty space: select the image (if on it), or nothing.
+          // A plain click: select the picture under it (Shift toggles it), or nothing.
           this.#region = null;
-          if (!regionDrag.additive) {
-            this.#store.selection.set(this.#insideImage(regionDrag.start) ? { type: 'image' } : null);
+          const pic = this.#pictureAt(regionDrag.start);
+          if (regionDrag.additive) {
+            if (pic) this.#store.toggleShapeSelected(pic.id);
+          } else {
+            this.#store.selectShapes(pic ? [pic.id] : []);
           }
         } else {
-          const hits = shapesInRect(this.#store.activePage.shapes, r).map((s) => s.id);
+          // Other shapes are picked when the box touches them; pictures (often
+          // the backdrop the box is drawn on) only when it takes them in whole.
+          const hits = shapesInRect(this.#store.activePage.shapes, r)
+            .filter((s) => s.type !== 'picture' || containsRect(r, shapeBounds(s)))
+            .map((s) => s.id);
           this.#store.selectShapes(regionDrag.additive ? [...new Set([...this.#store.selectedIds, ...hits])] : hits);
         }
       }
@@ -1391,10 +1395,6 @@ export class ScreenMarker extends LitElement {
     const drag = this.#shapeDrag;
     if (drag) {
       this.#shapeDrag = null;
-      if (drag.kind === 'image') {
-        void this.#commitImageMove(drag.delta);
-        return;
-      }
       if (drag.kind === 'move') {
         const { x: dx, y: dy } = drag.delta;
         if (Math.hypot(dx, dy) >= CLICK_THRESHOLD) this.#store.moveShapes(drag.ids, dx, dy);
@@ -1424,34 +1424,31 @@ export class ScreenMarker extends LitElement {
       const hit = start ? hitTestShapes(this.#store.activePage.shapes, start) : null;
       if (hit && e.shiftKey) this.#store.toggleShapeSelected(hit.id);
       else if (hit) this.#store.selection.set({ type: 'shapes', ids: [hit.id] });
-      else this.#store.selection.set(start && this.#insideImage(start) ? { type: 'image' } : null);
+      else this.#store.selection.set(null);
     } else if (points.length >= 2) {
       this.#store.addShape(this.#newShape(tool, points));
     }
     void this.#redraw();
   };
 
-  /**
-   * Shapes are stored relative to the page image, so moving the image by d
-   * moves every shape by -d instead (one undo step).
-   */
-  async #commitImageMove(d: Point, nudge = false): Promise<void> {
-    if (!nudge && Math.hypot(d.x, d.y) < CLICK_THRESHOLD) {
-      void this.#redraw();
+  /** Resizes a picture to its image's own pixel size, keeping its center. */
+  async #resetPictureSize(shape: Shape): Promise<void> {
+    if (!shape.src) return;
+    const img = new Image();
+    img.src = shape.src;
+    try {
+      await img.decode();
+    } catch {
       return;
     }
-    const ids = this.#store.activePage.shapes.map((s) => s.id);
-    if (!ids.length) {
-      // Nothing to move relative to: the image alone has no position of its own.
-      void this.#redraw();
-      return;
-    }
-    this.#clearRegion();
-    this.#store.moveShapes(ids, -d.x, -d.y);
-    // The camera moves with the shapes, so they stay put on screen and the image lands where dropped.
-    this.#cam = { x: this.#cam.x - d.x, y: this.#cam.y - d.y };
-    if (this.#store.activePage.view) this.#scheduleViewSave();
-    await this.#settleLayout();
+    const b = shapeBounds(shape);
+    const cx = b.x + b.width / 2;
+    const cy = b.y + b.height / 2;
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    this.#store.replaceShape({ ...shape, points: [{ x: cx - w / 2, y: cy - h / 2 }, { x: cx + w / 2, y: cy + h / 2 }] });
+    await this.updateComplete;
+    await this.#redraw();
   }
 
   // ---------- find text (OCR) ----------
@@ -1465,8 +1462,7 @@ export class ScreenMarker extends LitElement {
       this.#searchInputRef.value?.select();
     });
     // Start reading the page right away, so results are ready by the time a word is typed.
-    const src = this.#store.activePage.imageDataUrl;
-    if (src) void recognizeLines(src).catch(() => {});
+    for (const p of this.#store.activePage.shapes) if (p.type === 'picture' && p.src) void recognizeLines(p.src).catch(() => {});
   }
 
   #closeSearch = () => {
@@ -1479,8 +1475,8 @@ export class ScreenMarker extends LitElement {
   /** Runs the query against the active page's recognized text. */
   async #runSearch(): Promise<void> {
     const search = this.#search;
-    const src = this.#store.activePage.imageDataUrl;
-    if (!search || !src) return;
+    const pictures = this.#store.activePage.shapes.filter((s) => s.type === 'picture' && s.src);
+    if (!search) return;
     const pageId = this.#store.activePageId.value;
     const query = search.query;
     search.pageId = pageId;
@@ -1493,10 +1489,19 @@ export class ScreenMarker extends LitElement {
     search.status = 'Reading text…';
     this.requestUpdate();
     try {
-      const lines = await recognizeLines(src);
+      // Each picture is read on its own; its matches are mapped from its pixels onto the page.
+      const perPicture = await Promise.all(
+        pictures.map(async (p) => {
+          const [lines, img] = await Promise.all([recognizeLines(p.src!), decodePicture(p.src!)]);
+          const b = shapeBounds(p);
+          const sx = b.width / (img.naturalWidth || 1);
+          const sy = b.height / (img.naturalHeight || 1);
+          return findText(lines, query).map((r) => ({ x: b.x + r.x * sx, y: b.y + r.y * sy, w: r.w * sx, h: r.h * sy }));
+        })
+      );
       // Ignore a result for a query or page that has since changed.
       if (this.#search !== search || search.query !== query || this.#store.activePageId.value !== pageId) return;
-      search.hits = findText(lines, query);
+      search.hits = perPicture.flat();
       search.index = 0;
       search.status = search.hits.length ? '' : 'No matches';
     } catch (err) {
@@ -1611,15 +1616,14 @@ export class ScreenMarker extends LitElement {
   // ---------- image diff ----------
 
   /**
-   * Outlines where the active page's image differs from `otherSrc` with
-   * rectangles in the current color (one undo step).
+   * Outlines where picture `pic` (on the active page) differs from image
+   * `otherSrc` with rectangles in the current color (one undo step).
    */
-  async #highlightChanges(otherSrc: string, against: string): Promise<void> {
-    const src = this.#store.activePage.imageDataUrl;
-    if (!src) return;
+  async #highlightChanges(pic: Shape, otherSrc: string, against: string): Promise<void> {
+    if (!pic.src) return;
     this.#flashStatus('Comparing…');
     try {
-      const boxes = await diffRegions(src, otherSrc);
+      const [boxes, img] = await Promise.all([diffRegions(pic.src, otherSrc), decodePicture(pic.src)]);
       if (!boxes.length) {
         this.#flashStatus(`No differences from ${against}`);
         return;
@@ -1628,11 +1632,15 @@ export class ScreenMarker extends LitElement {
         this.#flashStatus(`Too many differences from ${against} (${boxes.length} areas): are these the same screen?`);
         return;
       }
+      // Boxes are in the picture's own pixels; map them onto the page.
+      const b = shapeBounds(pic);
+      const sx = b.width / (img.naturalWidth || 1);
+      const sy = b.height / (img.naturalHeight || 1);
       this.#store.addShapes(
         boxes.map((r) =>
           this.#newShape('rect', [
-            { x: r.x, y: r.y },
-            { x: r.x + r.w, y: r.y + r.h },
+            { x: b.x + r.x * sx, y: b.y + r.y * sy },
+            { x: b.x + (r.x + r.w) * sx, y: b.y + (r.y + r.h) * sy },
           ])
         )
       );
@@ -1643,12 +1651,75 @@ export class ScreenMarker extends LitElement {
     }
   }
 
-  /** The nearest earlier page that has an image. */
+  /**
+   * Blurs every word that looks like a secret (email, API key, token) in
+   * `pictures` (default: all on the page), using on-device text recognition.
+   * One undo step. `auto`: started by auto-redact on a new picture, so it says
+   * nothing when there is nothing to hide.
+   */
+  async #redactSecrets(pictures?: Shape[], auto = false): Promise<void> {
+    const pageId = this.#store.activePageId.value;
+    const list = (pictures ?? this.#store.activePage.shapes).filter((s) => s.type === 'picture' && s.src);
+    if (!list.length) return;
+    this.#flashStatus(auto ? 'Auto-redact: reading text…' : 'Reading text…');
+    try {
+      const boxes = (
+        await Promise.all(
+          list.map(async (p) => {
+            const [lines, img] = await Promise.all([recognizeLines(p.src!), decodePicture(p.src!)]);
+            const b = shapeBounds(p);
+            const sx = b.width / (img.naturalWidth || 1);
+            const sy = b.height / (img.naturalHeight || 1);
+            return findSecrets(lines).map((r) => ({ x: b.x + r.x * sx, y: b.y + r.y * sy, w: r.w * sx, h: r.h * sy }));
+          })
+        )
+      ).flat();
+      // The page changed (or the pictures went away) while reading: don't blur the wrong place.
+      const page = this.#store.activePage;
+      if (page.id !== pageId || !list.every((p) => page.shapes.some((s) => s.id === p.id))) return;
+      if (!boxes.length) {
+        this.#flashStatus(auto ? '' : 'No emails, keys, or tokens found');
+        return;
+      }
+      const pad = 3;
+      this.#store.addShapes(boxes.map((r) => this.#newShape('blur', [{ x: r.x - pad, y: r.y - pad }, { x: r.x + r.w + pad, y: r.y + r.h + pad }])));
+      this.#flashStatus(`Blurred ${boxes.length} possible secret${boxes.length === 1 ? '' : 's'} (Cmd/Ctrl+Z to undo)`);
+    } catch (err) {
+      this.#flashStatus(`Text recognition unavailable: ${(err as Error).message}`);
+    }
+  }
+
+  #toggleAutoRedact(): void {
+    const on = !this.#store.autoRedact.value;
+    this.#store.autoRedact.set(on);
+    this.#flashStatus(on ? 'Auto-redact on: new pictures get emails, keys, and tokens blurred' : 'Auto-redact off');
+  }
+
+  /** A page's main picture: its largest. */
+  #mainPicture(page: Page): Shape | null {
+    let best: Shape | null = null;
+    let area = -1;
+    for (const s of page.shapes) {
+      if (s.type !== 'picture' || !s.src) continue;
+      const b = shapeBounds(s);
+      if (b.width * b.height > area) [best, area] = [s, b.width * b.height];
+    }
+    return best;
+  }
+
+  /** The nearest earlier page that has a picture. */
   #previousImagePage(): Page | null {
     const pages = this.#store.pages.value;
     const i = pages.findIndex((p) => p.id === this.#store.activePageId.value);
-    for (let k = i - 1; k >= 0; k--) if (pages[k]!.imageDataUrl) return pages[k]!;
+    for (let k = i - 1; k >= 0; k--) if (this.#mainPicture(pages[k]!)) return pages[k]!;
     return null;
+  }
+
+  /** Outlines what changed in `pic` (default: this page's main picture) since the previous page's main picture. */
+  #highlightChangesVsPrevious(pic: Shape | null = this.#mainPicture(this.#store.activePage)): void {
+    const prev = this.#previousImagePage();
+    const other = prev && this.#mainPicture(prev);
+    if (pic && other?.src) void this.#highlightChanges(pic, other.src, 'the previous page');
   }
 
   // ---------- copy as markdown ----------
@@ -1677,13 +1748,20 @@ export class ScreenMarker extends LitElement {
     return { x: rect.left + (p.x - this.#area.x) * scale, y: rect.top + (p.y - this.#area.y) * scale };
   }
 
-  #insideImage(p: Point): boolean {
-    const img = this.#image?.img;
-    return !!img && p.x >= 0 && p.y >= 0 && p.x <= img.naturalWidth && p.y <= img.naturalHeight;
+  /** The topmost picture under `p`, if any. */
+  #pictureAt(p: Point): Shape | null {
+    const shapes = this.#store.activePage.shapes;
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const s = shapes[i]!;
+      if (s.type !== 'picture') continue;
+      const b = shapeBounds(s);
+      if (p.x >= b.x && p.y >= b.y && p.x <= b.x + b.width && p.y <= b.y + b.height) return s;
+    }
+    return null;
   }
 
   #onDoubleClick = (e: MouseEvent) => {
-    if (!this.#store.activePage.imageDataUrl) return;
+    if (!this.#store.activePage.shapes.length) return;
     const hit = hitTestShapes(this.#store.activePage.shapes, this.#canvasPoint(e));
     if (hit?.type === 'text' || hit?.type === 'tag' || hit?.type === 'step') this.#startTextEdit(hit);
   };
@@ -2024,25 +2102,21 @@ export class ScreenMarker extends LitElement {
     }
   };
 
-  /** Crops the active page's image to the region; annotations shift with it and stay editable. Undoable. */
+  /** Crops every picture the region overlaps to where it overlaps; annotations stay put and editable. Undoable. */
   #cropRegion = async () => {
     const sel = this.#activeRegion();
-    const page = this.#store.activePage;
-    const img = this.#image?.img;
-    if (!sel || !page.imageDataUrl || !img) return;
-    // Only the image can be cropped; a box reaching into the margin crops to where it overlaps the image.
-    const x1 = Math.max(0, sel.x);
-    const y1 = Math.max(0, sel.y);
-    const x2 = Math.min(img.naturalWidth, sel.x + sel.w);
-    const y2 = Math.min(img.naturalHeight, sel.y + sel.h);
-    if (x2 - x1 < 1 || y2 - y1 < 1) {
-      this.#flashStatus('The selection does not cover the image');
-      return;
-    }
-    const r: Rect = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+    if (!sel) return;
+    const shapes = this.#store.activePage.shapes;
     try {
-      const cropped = await cropImageDataUrl(page.imageDataUrl, r);
-      this.#store.cropActivePage(cropped, r.x, r.y);
+      const cropped = await Promise.all(
+        shapes.map(async (s) => (s.type === 'picture' && containsAny(sel, shapeBounds(s)) ? await cropPicture(s, sel) : s))
+      );
+      if (!shapes.some((s, i) => s.type === 'picture' && cropped[i] !== s)) {
+        this.#flashStatus('The selection does not cover a picture');
+        return;
+      }
+      // A picture the region only grazed (under a pixel) is dropped by cropPicture; keep it instead.
+      this.#store.replaceActivePageShapes(cropped.map((c, i) => c ?? shapes[i]!));
       this.#clearRegion();
       this.#flashStatus('Cropped (Cmd/Ctrl+Z to undo)');
     } catch (err) {
@@ -2072,7 +2146,7 @@ export class ScreenMarker extends LitElement {
         <button class="button-primary" @click=${this.#copyRegion} title="Copy selection, with annotations (Cmd/Ctrl+C)">
           📋 Copy selection
         </button>
-        <button @click=${this.#cropRegion} title="Crop image to selection (Enter)">✂ Crop selection</button>
+        <button @click=${this.#cropRegion} title="Crop the pictures under the selection to it (Enter)">✂ Crop selection</button>
         <button @click=${() => this.#clearRegion()} title="Clear selection (Esc)">✕</button>
       </div>
     `;
@@ -2080,20 +2154,35 @@ export class ScreenMarker extends LitElement {
 
   // ---------- image transforms ----------
 
-  /** Rotates or flips the active page's image, carrying every annotation along. Undoable. */
+  /**
+   * Rotates or flips the selected pictures in place; with none selected, the
+   * whole page (every picture and annotation) about its pictures' center.
+   * Undoable.
+   */
   async #transformImage(transform: ImageTransform): Promise<void> {
     const page = this.#store.activePage;
-    if (!page.imageDataUrl) return;
+    if (!page.shapes.length) return;
     this.#commitTextEdit();
+    const selected = new Set(this.#store.selectedShapes.filter((s) => s.type === 'picture').map((s) => s.id));
     try {
-      const img = await this.#loadPageImage(page.imageDataUrl);
-      const W = img.naturalWidth;
-      const H = img.naturalHeight;
-      const { dataUrl } = await transformImageDataUrl(page.imageDataUrl, transform);
-      this.#store.replaceActivePageContent(
-        dataUrl,
-        page.shapes.map((s) => transformShape(s, transform, W, H))
-      );
+      let next: Shape[];
+      if (selected.size) {
+        next = await Promise.all(page.shapes.map((s) => (selected.has(s.id) ? transformPicture(s, transform) : s)));
+      } else {
+        // transformShape works in a W×H frame at the origin: shift the pictures' box there and back.
+        const f = focusBounds(page.shapes);
+        const rotates = transform === 'rotate-cw' || transform === 'rotate-ccw';
+        const back = { x: f.x + (rotates ? (f.w - f.h) / 2 : 0), y: f.y + (rotates ? (f.h - f.w) / 2 : 0) };
+        next = await Promise.all(
+          page.shapes.map(async (s) => {
+            const moved = offsetShape(s, -f.x, -f.y);
+            const t = s.type === 'picture' ? await transformPicture(moved, transform) : moved;
+            return offsetShape(transformShape(t, transform, f.w, f.h), back.x, back.y);
+          })
+        );
+      }
+      this.#store.replaceActivePageShapes(next);
+      if (selected.size) this.#store.selectShapes([...selected]);
       this.#clearRegion();
     } catch (err) {
       this.#flashStatus(`Transform failed: ${(err as Error).message}`);
@@ -2114,7 +2203,7 @@ export class ScreenMarker extends LitElement {
   }
 
   #pagesWithImages() {
-    return this.#store.pages.value.filter((p) => p.imageDataUrl !== null);
+    return this.#store.pages.value.filter((p) => p.shapes.length > 0);
   }
 
   /**
@@ -2181,7 +2270,7 @@ export class ScreenMarker extends LitElement {
   #hasContent(): boolean {
     return (
       this.#store.pages.value.length > 1 ||
-      this.#store.pages.value.some((p) => p.imageDataUrl !== null || p.shapes.length > 0)
+      this.#store.pages.value.some((p) => p.shapes.length > 0)
     );
   }
 
@@ -2233,7 +2322,7 @@ export class ScreenMarker extends LitElement {
       await saveCloudDocument(name, documentValue(pages, this.#store.activePageId.value));
       if (name !== this.#cloudName) return;
       this.#markSaved(pages);
-      void rememberRecentThumbnail(name, pages.find((p) => p.imageDataUrl));
+      void rememberRecentThumbnail(name, pages.find((p) => p.shapes.length > 0));
     } catch (err) {
       if (name !== this.#cloudName) return;
       this.#saveState = (err as { conflict?: boolean }).conflict ? 'conflict' : 'error';
@@ -2317,7 +2406,7 @@ export class ScreenMarker extends LitElement {
     }
     this.#commitTextEdit();
     try {
-      const { pages, activePageId } = parseDocumentValue(await loadCloudDocument(name));
+      const { pages, activePageId } = await parseDocumentValue(await loadCloudDocument(name));
       // A live reload keeps you on the page you were looking at, when it still exists.
       const current = this.#store.activePageId.value;
       const stay = keepView && pages.some((p) => p.id === current) ? current : activePageId;
@@ -2352,7 +2441,7 @@ export class ScreenMarker extends LitElement {
       await saveCloudDocument(name, documentValue(pages, this.#store.activePageId.value));
       this.#setCloudName(name);
       this.#markSaved(pages);
-      void rememberRecentThumbnail(name, pages.find((p) => p.imageDataUrl));
+      void rememberRecentThumbnail(name, pages.find((p) => p.shapes.length > 0));
       void this.#joinChannel(name);
       this.#flashStatus(`Saved to folderfoo as "${name}"`);
       return name;
@@ -2392,7 +2481,7 @@ export class ScreenMarker extends LitElement {
    * (in the order they were added), each showing one more.
    */
   async #renderSlides(pages: Page[], withNotes: boolean): Promise<Slide[]> {
-    const withImages = pages.filter((p): p is Page & { imageDataUrl: string } => p.imageDataUrl !== null);
+    const withImages = pages.filter((p) => p.shapes.length > 0);
     // Transparent outside the image, so margin tags sit on the presenter's
     // dark stage as they do in the editor, not on an exported-white box.
     return Promise.all(
@@ -2408,7 +2497,7 @@ export class ScreenMarker extends LitElement {
           const shown = p.shapes.filter((s) => !hidden.has(s.id));
           // Every build is sized by all shapes, so revealing never shifts or rescales the slide;
           // centered, so the images stay put between pages whose tags sit on different sides.
-          const flat = await flattenPage(p.imageDataUrl, shown, {
+          const flat = await flattenPage(shown, {
             background: null,
             sceneShapes: p.shapes,
             centered: true,
@@ -2427,7 +2516,7 @@ export class ScreenMarker extends LitElement {
   #present = async (fromPageId?: string) => {
     this.#commitTextEdit();
     const pages = this.#store.pages.value;
-    const withImages = pages.filter((p) => p.imageDataUrl !== null);
+    const withImages = pages.filter((p) => p.shapes.length > 0);
     if (!withImages.length) return;
     try {
       const slides = await this.#renderSlides(pages, true);
@@ -2445,7 +2534,7 @@ export class ScreenMarker extends LitElement {
     this.requestUpdate();
     try {
       const { content, owner, path } = await loadPublicDocument(token);
-      this.#publicDoc = parseDocumentValue(content);
+      this.#publicDoc = await parseDocumentValue(content);
       // Speaker notes stay out of a shared view.
       const slides = await this.#renderSlides(this.#publicDoc.pages, false);
       this.#presenting = {
@@ -2498,19 +2587,36 @@ export class ScreenMarker extends LitElement {
   };
 
   #onCanvasContextMenu = (e: MouseEvent) => {
-    if (!this.#store.activePage.imageDataUrl) return;
+    if (!this.#store.activePage.shapes.length) return;
     const pt = this.#canvasPoint(e);
     const hit = hitTestShapes(this.#store.activePage.shapes, pt);
     if (hit) {
       if (!this.#store.selectedIds.includes(hit.id)) this.#store.selectShapes([hit.id]);
       const editable = this.#store.selectedIds.length === 1 && (hit.type === 'text' || hit.type === 'tag' || hit.type === 'step');
-      const hasPictures = this.#store.selectedShapes.some((s) => s.type === 'picture');
+      const pictures = this.#store.selectedShapes.filter((s) => s.type === 'picture');
+      const other = hit.type === 'picture' && pictures.length === 2 ? pictures.find((p) => p.id !== hit.id) : undefined;
+      const pictureItems: MenuItem[] = [
+        ...(pictures.length > 1 ? [{ label: 'Arrange pictures in a row', run: () => void this.#arrangePicturesInRow() }] : []),
+        ...(hit.type === 'picture' && this.#store.selectedIds.length === 1
+          ? [
+              { label: 'Original size', run: () => void this.#resetPictureSize(hit) },
+              {
+                label: 'Highlight changes vs previous page',
+                disabled: !this.#previousImagePage(),
+                run: () => this.#highlightChangesVsPrevious(hit),
+              },
+            ]
+          : []),
+        ...(other?.src ? [{ label: 'Highlight changes vs the other picture', run: () => void this.#highlightChanges(hit, other.src!, 'the other picture') }] : []),
+        ...(pictures.length ? [{ label: 'Redact secrets', run: () => void this.#redactSecrets(pictures) }] : []),
+        ...(pictures.length
+          ? [{ label: pictures.length === 1 ? 'Move to a new page' : `Move each to a new page (${pictures.length})`, run: () => this.#movePicturesToNewPages() }]
+          : []),
+      ];
       this.#openMenu(e, [
         ...(editable ? [{ label: hit.type === 'step' ? 'Edit number' : 'Edit text', shortcut: 'Enter', run: () => this.#startTextEdit(hit) }] : []),
-        ...(hasPictures ? [{ label: 'Arrange pictures in a row', run: () => void this.#arrangePicturesInRow() }] : []),
-        ...(hit.type === 'picture' && this.#store.selectedIds.length === 1
-          ? [{ label: 'Highlight changes vs page image', run: () => void this.#highlightChanges(hit.src!, 'this picture') }]
-          : []),
+        ...pictureItems,
+        ...(pictureItems.length ? ['sep' as const] : []),
         ...(hit.type === 'magnifier'
           ? [1.5, 2, 3, 4].map((m) => ({
               label: `${(hit.magnify ?? DEFAULT_MAGNIFY) === m ? '✓ ' : ''}Magnify ${m}×`,
@@ -2518,6 +2624,7 @@ export class ScreenMarker extends LitElement {
             }))
           : []),
         { label: 'Duplicate', shortcut: '⌘D', run: () => this.#store.duplicateSelectedShapes() },
+        { label: 'Cut', shortcut: '⌘X', run: () => this.#cutSelection() },
         { label: 'Copy', shortcut: '⌘C', run: () => this.#store.copySelection() },
         'sep',
         { label: 'Bring to front', shortcut: '⌘]', run: () => this.#store.reorderSelectedShapes('front') },
@@ -2541,14 +2648,9 @@ export class ScreenMarker extends LitElement {
       { label: 'Copy page image', run: () => void this.#copyCurrentPage() },
       { label: 'Copy as Markdown', run: () => void this.#copyAsMarkdown() },
       { label: 'Find text…', shortcut: '⌘F', run: () => this.#openSearch() },
-      {
-        label: 'Highlight changes vs previous page',
-        disabled: !this.#previousImagePage(),
-        run: () => {
-          const prev = this.#previousImagePage();
-          if (prev) void this.#highlightChanges(prev.imageDataUrl!, 'the previous page');
-        },
-      },
+      { label: 'Redact secrets', disabled: !this.#mainPicture(this.#store.activePage), run: () => void this.#redactSecrets() },
+      { label: `${this.#store.autoRedact.value ? '✓ ' : ''}Auto-redact new pictures`, run: () => this.#toggleAutoRedact() },
+      { label: `${this.#store.snapArrows.value ? '✓ ' : ''}Snap arrows to text and pictures`, run: this.#toggleSnapArrows },
       { label: 'Present from this page', run: () => void this.#present() },
       { label: 'Fit to window', shortcut: 'F', run: () => void this.#fitToWindow() },
     ]);
@@ -2562,7 +2664,7 @@ export class ScreenMarker extends LitElement {
       { label: 'Move up', disabled: index === 0, run: () => this.#store.movePage(pageId, -1) && this.#flashMovedTab(pageId) },
       { label: 'Move down', disabled: index === count - 1, run: () => this.#store.movePage(pageId, 1) && this.#flashMovedTab(pageId) },
       'sep',
-      { label: 'Present from here', disabled: !page?.imageDataUrl, run: () => void this.#present(pageId) },
+      { label: 'Present from here', disabled: !page?.shapes.length, run: () => void this.#present(pageId) },
       'sep',
       { label: 'Delete page', danger: true, run: () => this.#closePageWithConfirm(pageId) },
     ]);
@@ -2716,7 +2818,7 @@ export class ScreenMarker extends LitElement {
             >
               <span class="page-num">${i + 1}</span>
               <div class="page-thumb">
-                ${thumb ? html`<img src=${thumb} alt="" draggable="false" />` : html`<span>${p.imageDataUrl ? '…' : 'Empty'}</span>`}
+                ${thumb ? html`<img src=${thumb} alt="" draggable="false" />` : html`<span>${p.shapes.length ? '…' : 'Empty'}</span>`}
               </div>
               ${p.title ? html`<div class="page-title">${p.title}</div>` : ''}
               <div class="page-actions">
@@ -2901,7 +3003,7 @@ export class ScreenMarker extends LitElement {
   #commands(): Command[] {
     const store = this.#store;
     const page = store.activePage;
-    const hasImage = !!page.imageDataUrl;
+    const hasImage = page.shapes.length > 0;
     const selected = store.selectedShapes;
     const pages = store.pages.value;
     const cmds: Command[] = [];
@@ -2919,10 +3021,14 @@ export class ScreenMarker extends LitElement {
     add('share', 'Share presentation link', () => void this.#sharePresentation(), '', hasImage);
 
     add('find', 'Find text in image', () => this.#openSearch(), '⌘F', hasImage);
-    add('diff', 'Highlight changes vs previous page', () => {
-      const prev = this.#previousImagePage();
-      if (prev) void this.#highlightChanges(prev.imageDataUrl!, 'the previous page');
-    }, '', hasImage && !!this.#previousImagePage());
+    add('redact', 'Redact secrets (blur emails, keys, tokens)', () => void this.#redactSecrets(), '', !!this.#mainPicture(page));
+    add('snap', store.snapArrows.value ? 'Snap arrows to text and pictures: turn off' : 'Snap arrows to text and pictures: turn on', this.#toggleSnapArrows);
+    add(
+      'auto-redact',
+      store.autoRedact.value ? 'Auto-redact new pictures: turn off' : 'Auto-redact new pictures: turn on',
+      () => this.#toggleAutoRedact()
+    );
+    add('diff', 'Highlight changes vs previous page', () => this.#highlightChangesVsPrevious(), '', !!this.#mainPicture(page) && !!this.#previousImagePage());
 
     add('fit', 'Fit to window', () => void this.#fitToWindow(), 'F', hasImage);
     add('reset-view', 'Reset view (initial position)', this.#resetView, '', !!page.view);
@@ -3036,7 +3142,7 @@ export class ScreenMarker extends LitElement {
   #newDocument = () => {
     const hasContent =
       this.#store.pages.value.length > 1 ||
-      this.#store.pages.value.some((p) => p.imageDataUrl !== null || p.shapes.length > 0);
+      this.#store.pages.value.some((p) => p.shapes.length > 0);
     if (!hasContent) return;
     if (!window.confirm('Start a new document? This clears all pages. You can Undo (Cmd/Ctrl+Z) afterward.')) {
       return;
@@ -3083,7 +3189,7 @@ export class ScreenMarker extends LitElement {
   #closePageWithConfirm(id: string): void {
     const index = this.#store.pages.value.findIndex((p) => p.id === id);
     const target = this.#store.pages.value[index];
-    const hasContent = target && (target.imageDataUrl !== null || target.shapes.length > 0);
+    const hasContent = target && (target.shapes.length > 0);
     if (hasContent && !window.confirm(`Close "${this.#pageLabel(index)}"? You can Undo (Cmd/Ctrl+Z) afterward.`)) {
       return;
     }
@@ -3212,7 +3318,7 @@ export class ScreenMarker extends LitElement {
     const page = this.#store.activePage;
     const style = this.#currentStyle();
     const hasShapes = this.#store.selectedIds.length > 0;
-    const noImage = !page.imageDataUrl;
+    const noImage = !page.shapes.length;
     // Switching pages with the find bar open searches the new page.
     if (this.#search?.query && this.#search.pageId !== page.id) queueMicrotask(() => void this.#runSearch());
 
@@ -3318,6 +3424,13 @@ export class ScreenMarker extends LitElement {
         >
           ◼ Fill
         </button>
+        <button
+          class=${this.#store.snapArrows.value ? 'active' : ''}
+          title="Snap arrow and line ends to text and pictures, so they follow when those move"
+          @click=${this.#toggleSnapArrows}
+        >
+          🧲 Snap
+        </button>
         ${this.#store.activeTool.value === 'step'
           ? html`
               <label class="next-step" title="Number the next step marker gets; later ones count up from the highest on the page">
@@ -3412,7 +3525,7 @@ export class ScreenMarker extends LitElement {
         @pointerup=${this.#onStagePointerUp}
         @wheel=${this.#onWheel}
       >
-        ${page.imageDataUrl
+        ${page.shapes.length
           ? html`
               <div class="canvas-wrap ${this.#spaceHeld ? 'panning' : ''}" style=${this.#canvasWrapStyle()}>
                 <canvas
@@ -3429,7 +3542,7 @@ export class ScreenMarker extends LitElement {
             `
           : this.#renderEmpty()}
       </div>
-      ${page.imageDataUrl ? this.#renderSlidePanel(page) : ''}
+      ${page.shapes.length ? this.#renderSlidePanel(page) : ''}
       </div>
       </div>
       <div class="status">${this.#statusMsg}</div>

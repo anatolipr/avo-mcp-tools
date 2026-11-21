@@ -260,7 +260,11 @@ function drawTag(ctx: CanvasRenderingContext2D, shape: Shape): void {
   });
 }
 
-export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
+/**
+ * Draws one shape. `pictureShadow` (blur radius, in canvas units) gives
+ * pictures a soft drop shadow, so the editor shows where each one ends.
+ */
+export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape, pictureShadow = 0): void {
   ctx.save();
   ctx.strokeStyle = shape.color;
   ctx.fillStyle = shape.color;
@@ -347,8 +351,13 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
       if (!a || !b) break;
       const r = cornerBox(a, b);
       const img = shape.src ? pictureCache.get(shape.src) : undefined;
-      if (img) ctx.drawImage(img, r.x, r.y, r.w, r.h);
-      else {
+      if (img) {
+        if (pictureShadow) {
+          ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
+          ctx.shadowBlur = pictureShadow;
+        }
+        ctx.drawImage(img, r.x, r.y, r.w, r.h);
+      } else {
         ctx.strokeStyle = 'rgba(128, 128, 128, 0.6)';
         ctx.lineWidth = 1;
         ctx.strokeRect(r.x, r.y, r.w, r.h);
@@ -378,8 +387,8 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
   ctx.restore();
 }
 
-export function drawShapes(ctx: CanvasRenderingContext2D, shapes: Shape[]): void {
-  for (const shape of shapes) drawShape(ctx, shape);
+export function drawShapes(ctx: CanvasRenderingContext2D, shapes: Shape[], pictureShadow = 0): void {
+  for (const shape of shapes) drawShape(ctx, shape, pictureShadow);
 }
 
 const HIT_PADDING = 8;
@@ -558,17 +567,6 @@ export function boxHandlePoints(r: Rect): Point[] {
   return pts;
 }
 
-export function drawImageSelectionOutline(ctx: CanvasRenderingContext2D, width: number, height: number): void {
-  const inset = 3;
-  strokeZebraDashes(
-    ctx,
-    () => ctx.strokeRect(inset, inset, width - inset * 2, height - inset * 2),
-    3,
-    10,
-    10
-  );
-}
-
 /**
  * Region-select overlay: dims everything outside the region, outlines it
  * with zebra dashes, and draws eight resize handles. `handleSize` is in
@@ -598,14 +596,44 @@ async function loadImage(dataUrl: string): Promise<HTMLImageElement> {
   return img;
 }
 
-/** Returns a PNG data URL of just the background image cut to `r` — no annotations baked in. */
-export async function cropImageDataUrl(imageDataUrl: string, r: Rect): Promise<string> {
-  const img = await loadImage(imageDataUrl);
+/** A picture's image decoded, for its natural (own pixel) size. */
+export function decodePicture(src: string): Promise<HTMLImageElement> {
+  return loadImage(src);
+}
+
+/**
+ * Cuts picture `shape` down to where it overlaps `r` (page coordinates):
+ * its image is cropped to match, so it keeps its scale. Null when they do
+ * not overlap.
+ */
+export async function cropPicture(shape: Shape, r: Rect): Promise<Shape | null> {
+  const b = shapeBounds(shape);
+  const x1 = Math.max(b.x, r.x);
+  const y1 = Math.max(b.y, r.y);
+  const x2 = Math.min(b.x + b.width, r.x + r.w);
+  const y2 = Math.min(b.y + b.height, r.y + r.h);
+  if (x2 - x1 < 1 || y2 - y1 < 1 || !shape.src || !b.width || !b.height) return null;
+  const img = await loadImage(shape.src);
+  const sx = img.naturalWidth / b.width;
+  const sy = img.naturalHeight / b.height;
   const canvas = document.createElement('canvas');
-  canvas.width = r.w;
-  canvas.height = r.h;
-  canvas.getContext('2d')!.drawImage(img, -r.x, -r.y);
-  return canvas.toDataURL('image/png');
+  canvas.width = Math.max(1, Math.round((x2 - x1) * sx));
+  canvas.height = Math.max(1, Math.round((y2 - y1) * sy));
+  canvas.getContext('2d')!.drawImage(img, -(x1 - b.x) * sx, -(y1 - b.y) * sy);
+  return { ...shape, src: canvas.toDataURL('image/png'), points: [{ x: x1, y: y1 }, { x: x2, y: y2 }] };
+}
+
+/** Rotates or flips picture `shape`'s image, and its box about its center. */
+export async function transformPicture(shape: Shape, transform: ImageTransform): Promise<Shape> {
+  if (!shape.src) return shape;
+  const { dataUrl } = await transformImageDataUrl(shape.src, transform);
+  const b = shapeBounds(shape);
+  const rotates = transform === 'rotate-cw' || transform === 'rotate-ccw';
+  const w = rotates ? b.height : b.width;
+  const h = rotates ? b.width : b.height;
+  const cx = b.x + b.width / 2;
+  const cy = b.y + b.height / 2;
+  return { ...shape, src: dataUrl, points: [{ x: cx - w / 2, y: cy - h / 2 }, { x: cx + w / 2, y: cy + h / 2 }] };
 }
 
 export type ImageTransform = 'rotate-cw' | 'rotate-ccw' | 'flip-h' | 'flip-v';
@@ -686,15 +714,15 @@ export function transformShape(shape: Shape, transform: ImageTransform, W: numbe
 }
 
 /**
- * The page's content box in image coordinates: the image itself, grown to
- * take in any shape drawn past its edges (tags explaining something from
- * the margin, an arrow coming in from outside). Integer-aligned.
+ * The page's content box: every shape, pictures included, with room for
+ * what draws past a shape's points. Integer-aligned; empty for no shapes.
  */
-export function sceneBounds(imageW: number, imageH: number, shapes: Shape[]): Rect {
-  let x1 = 0;
-  let y1 = 0;
-  let x2 = imageW;
-  let y2 = imageH;
+export function sceneBounds(shapes: Shape[]): Rect {
+  if (!shapes.length) return { x: 0, y: 0, w: 0, h: 0 };
+  let x1 = Infinity;
+  let y1 = Infinity;
+  let x2 = -Infinity;
+  let y2 = -Infinity;
   for (const s of shapes) {
     const b = shapeBounds(s);
     // Room for what draws past a shape's points: a tag's pointer, an arrowhead's wings, a lens shadow.
@@ -705,7 +733,9 @@ export function sceneBounds(imageW: number, imageH: number, shapes: Shape[]): Re
           ? s.lineWidth / 2 + 12 + s.lineWidth * 2.5
           : s.type === 'magnifier'
             ? magnifierRadii(s).lens * 0.3
-            : s.lineWidth / 2 + 2;
+            : s.type === 'picture'
+              ? 0
+              : s.lineWidth / 2 + 2;
     x1 = Math.min(x1, b.x - pad);
     y1 = Math.min(y1, b.y - pad);
     x2 = Math.max(x2, b.x + b.width + pad);
@@ -724,14 +754,15 @@ export interface FlattenOptions {
   center?: Point;
 }
 
-/** The page image plus every picture shape: what a slide centers on. Integer-aligned. */
-export function focusBounds(imageW: number, imageH: number, shapes: Shape[]): Rect {
-  let x1 = 0;
-  let y1 = 0;
-  let x2 = imageW;
-  let y2 = imageH;
-  for (const s of shapes) {
-    if (s.type !== 'picture') continue;
+/** Every picture on the page (or, with none, all its content): what a slide centers on. Integer-aligned. */
+export function focusBounds(shapes: Shape[]): Rect {
+  const pictures = shapes.filter((s) => s.type === 'picture');
+  if (!pictures.length) return sceneBounds(shapes);
+  let x1 = Infinity;
+  let y1 = Infinity;
+  let x2 = -Infinity;
+  let y2 = -Infinity;
+  for (const s of pictures) {
     const b = shapeBounds(s);
     x1 = Math.min(x1, b.x);
     y1 = Math.min(y1, b.y);
@@ -747,25 +778,23 @@ export function focusBounds(imageW: number, imageH: number, shapes: Shape[]): Re
 const SCENE_BACKGROUND = '#ffffff';
 
 /**
- * Renders a page (image + annotations) to a canvas covering its full
- * scene. `origin` is where image (0, 0) landed, for callers that need to
- * map image coordinates (e.g. a region) onto the result. `background` fills
- * the scene outside the image; `null` leaves it transparent. `sceneShapes`
+ * Renders a page's shapes (pictures and annotations) to a canvas covering
+ * its full scene. `origin` is where page (0, 0) landed, for callers that
+ * need to map page coordinates (e.g. a region) onto the result.
+ * `background` fills the scene behind the content; `null` leaves it
+ * transparent. `sceneShapes`
  * sizes the scene when it should cover more than the shapes drawn (reveal
  * steps keep one size while shapes are hidden). `centered` grows the scene
  * evenly on both sides so the image and pictures (`focus`) sit in its middle:
  * slides keep them in place wherever the tags go.
  */
 export async function flattenPage(
-  imageDataUrl: string,
   shapes: Shape[],
   { background = SCENE_BACKGROUND, sceneShapes = shapes, centered = false, center }: FlattenOptions = {}
 ): Promise<{ canvas: HTMLCanvasElement; origin: Point; focus: Rect }> {
-  const [img] = await Promise.all([loadImage(imageDataUrl), preloadPictures(shapes)]);
-  const W = img.naturalWidth;
-  const H = img.naturalHeight;
-  let area = sceneBounds(W, H, sceneShapes);
-  const focus = focusBounds(W, H, sceneShapes);
+  await preloadPictures(shapes);
+  let area = sceneBounds(sceneShapes);
+  const focus = focusBounds(sceneShapes);
   if (centered && center) {
     const cx = Math.round(center.x);
     const cy = Math.round(center.y);
@@ -778,21 +807,20 @@ export async function flattenPage(
     area = { x: focus.x - dx, y: focus.y - dy, w: focus.w + 2 * dx, h: focus.h + 2 * dy };
   }
   const canvas = document.createElement('canvas');
-  canvas.width = area.w;
-  canvas.height = area.h;
+  canvas.width = Math.max(1, area.w);
+  canvas.height = Math.max(1, area.h);
   const ctx = canvas.getContext('2d')!;
-  if (background && (area.x < 0 || area.y < 0 || area.w > W || area.h > H)) {
+  if (background) {
     ctx.fillStyle = background;
     ctx.fillRect(0, 0, area.w, area.h);
   }
   ctx.translate(-area.x, -area.y);
-  ctx.drawImage(img, 0, 0);
   drawShapes(ctx, shapes);
   return { canvas, origin: { x: -area.x, y: -area.y }, focus };
 }
 
-export async function flattenToCanvas(imageDataUrl: string, shapes: Shape[], background: string | null = SCENE_BACKGROUND): Promise<HTMLCanvasElement> {
-  return (await flattenPage(imageDataUrl, shapes, { background })).canvas;
+export async function flattenToCanvas(shapes: Shape[], background: string | null = SCENE_BACKGROUND): Promise<HTMLCanvasElement> {
+  return (await flattenPage(shapes, { background })).canvas;
 }
 
 const SEPARATOR_LINE_WIDTH = 3;
@@ -802,14 +830,14 @@ const SEPARATOR_LINE_WIDTH = 3;
  * other (no gap), with a zebra-dashed line drawn right at each seam — so
  * multiple annotated pages become one pasteable image, and the separator
  * reads clearly against any page content instead of needing a plain-white
- * buffer around it. Pages without an image are skipped. `background` fills
+ * buffer around it. Empty pages are skipped. `background` fills
  * outside the images (null: transparent).
  */
 export async function flattenPagesToCanvas(pages: Page[], background: string | null = SCENE_BACKGROUND): Promise<HTMLCanvasElement> {
-  const withImages = pages.filter((p): p is Page & { imageDataUrl: string } => p.imageDataUrl !== null);
-  if (withImages.length === 0) throw new Error('no pages with an image');
+  const withContent = pages.filter((p) => p.shapes.length > 0);
+  if (withContent.length === 0) throw new Error('no pages with content');
 
-  const flattened = await Promise.all(withImages.map((p) => flattenToCanvas(p.imageDataUrl, p.shapes, background)));
+  const flattened = await Promise.all(withContent.map((p) => flattenToCanvas(p.shapes, background)));
 
   if (flattened.length === 1) return flattened[0]!;
 

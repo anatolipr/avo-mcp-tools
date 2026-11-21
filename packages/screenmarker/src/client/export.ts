@@ -28,8 +28,7 @@ export async function downloadImage(pages: Page[], background: string | null): P
 
 /** Copies region `r` of one page (image plus annotations, flattened) to the OS clipboard. */
 export async function copyRegion(page: Page, r: Rect, background: string | null): Promise<void> {
-  if (!page.imageDataUrl) throw new Error('page has no image');
-  const { canvas: full, origin } = await flattenPage(page.imageDataUrl, page.shapes, { background });
+  const { canvas: full, origin } = await flattenPage(page.shapes, { background });
   const canvas = document.createElement('canvas');
   canvas.width = r.w;
   canvas.height = r.h;

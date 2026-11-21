@@ -11,9 +11,13 @@ export interface Preferences {
   // Editor (and slide) background around the page: 'system' (white in light
   // mode, black in dark), 'theme' (the app's panel background), or #rrggbb.
   sceneBackground: string;
+  // Blur emails, keys, and tokens found in every newly added picture (opt-in: it runs text recognition).
+  autoRedact: boolean;
+  // Arrow and line ends snap to text, tags, and pictures, and follow them when they move.
+  snapArrows: boolean;
 }
 
-const DEFAULTS: Preferences = { color: '#ff3b30', lineWidth: 3, fontSize: 18, fill: false, exportBackground: 'theme', sceneBackground: 'system' };
+const DEFAULTS: Preferences = { color: '#ff3b30', lineWidth: 3, fontSize: 18, fill: false, exportBackground: 'theme', sceneBackground: 'system', autoRedact: false, snapArrows: true };
 
 /**
  * Last-used tool defaults (color, line width, font size, fill), shared across all
@@ -33,6 +37,8 @@ export function loadPreferences(): Preferences {
       fill: typeof parsed.fill === 'boolean' ? parsed.fill : DEFAULTS.fill,
       exportBackground: typeof parsed.exportBackground === 'string' ? parsed.exportBackground : DEFAULTS.exportBackground,
       sceneBackground: typeof parsed.sceneBackground === 'string' ? parsed.sceneBackground : DEFAULTS.sceneBackground,
+      autoRedact: typeof parsed.autoRedact === 'boolean' ? parsed.autoRedact : DEFAULTS.autoRedact,
+      snapArrows: typeof parsed.snapArrows === 'boolean' ? parsed.snapArrows : DEFAULTS.snapArrows,
     };
   } catch {
     return { ...DEFAULTS };

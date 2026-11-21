@@ -45,14 +45,14 @@ function pageItems(shapes: Shape[]): { numbered: string[]; bullets: string[] } {
  * Speaker notes are left out; they are for the presenter.
  */
 export async function pagesToMarkdown(pages: Page[], background: string | null): Promise<{ markdown: string; html: string }> {
-  const withImages = pages.filter((p): p is Page & { imageDataUrl: string } => p.imageDataUrl !== null);
+  const withImages = pages.filter((p) => p.shapes.length > 0);
   const dpr = window.devicePixelRatio || 1;
   const md: string[] = [];
   const html: string[] = [];
   for (const [i, p] of withImages.entries()) {
     const title = p.title?.trim() || (withImages.length > 1 ? `Page ${i + 1}` : '');
     const { numbered, bullets } = pageItems(p.shapes);
-    const { canvas } = await flattenPage(p.imageDataUrl, p.shapes, { background });
+    const { canvas } = await flattenPage(p.shapes, { background });
     if (title) {
       md.push(`## ${title}`, '');
       html.push(`<h2>${escapeHtml(title)}</h2>`);

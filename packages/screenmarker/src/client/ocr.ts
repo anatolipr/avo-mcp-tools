@@ -63,6 +63,29 @@ export function recognizeLines(imageDataUrl: string): Promise<OcrLine[]> {
   return p;
 }
 
+// What looks like a secret in one recognized word: an email address, a
+// well-known key/token prefix, a JWT, or a long run mixing letters and digits.
+const SECRET_PATTERNS = [
+  /[\w.+-]+@[\w-]+(\.[\w-]+)+/,
+  /\b(sk|pk|rk)[-_](live|test|proj|ant)?[-_]?[A-Za-z0-9_-]{12,}/,
+  /\b(ghp|gho|ghu|ghs|ghr|github_pat|glpat|xox[abprs])[-_][A-Za-z0-9_-]{10,}/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /\bAIza[0-9A-Za-z_-]{30,}/,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/,
+];
+
+function looksSecret(word: string): boolean {
+  if (SECRET_PATTERNS.some((re) => re.test(word))) return true;
+  // A long token of letters and digits (and - _ / + =) with both kinds in it: an API key, a hash, a session id.
+  const t = word.replace(/^[^\w]+|[^\w=]+$/g, '');
+  return t.length >= 24 && /^[A-Za-z0-9_\-/+=]+$/.test(t) && /[0-9]/.test(t) && /[A-Za-z]/.test(t);
+}
+
+/** Boxes of the words that look like secrets (emails, API keys, tokens), for "Redact secrets". */
+export function findSecrets(lines: OcrLine[]): Rect[] {
+  return lines.flatMap((words) => words.filter((w) => looksSecret(w.text)).map((w) => w.box));
+}
+
 /**
  * Boxes of every case-insensitive occurrence of `query` in the lines. A
  * match may span several words of one line; its box covers those words

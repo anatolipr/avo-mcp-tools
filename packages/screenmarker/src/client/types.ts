@@ -36,6 +36,15 @@ export interface Shape {
   // center; the lens has this radius and shows the spot at `magnify`×.
   lensRadius?: number;
   magnify?: number;
+  // arrow / line only: ends snapped to a text, tag, or picture (by id), as a
+  // spot in fractions of its box, so they follow it. null: a free end.
+  ends?: [ArrowEnd | null, ArrowEnd | null];
+}
+
+export interface ArrowEnd {
+  id: string;
+  fx: number;
+  fy: number;
 }
 
 /** Clockwise around the bubble, three positions per side, plus 'none' (no pointer). */
@@ -59,7 +68,6 @@ export type TagArrow = (typeof TAG_ARROWS)[number];
 export interface Page {
   id: string;
   name: string;
-  imageDataUrl: string | null;
   shapes: Shape[];
   // Slide title, shown on the page's thumbnail and as the presenter heading.
   title?: string;

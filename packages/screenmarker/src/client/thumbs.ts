@@ -19,8 +19,8 @@ export function pageThumbnail(page: Page, maxSide = 180, type = 'image/png'): Pr
 }
 
 async function render(page: Page, maxSide: number, type: string): Promise<string | null> {
-  if (!page.imageDataUrl) return null;
-  const { canvas } = await flattenPage(page.imageDataUrl, page.shapes);
+  if (!page.shapes.length) return null;
+  const { canvas } = await flattenPage(page.shapes);
   const scale = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
   const out = document.createElement('canvas');
   out.width = Math.max(1, Math.round(canvas.width * scale));
