@@ -1,4 +1,5 @@
 import type { Page, Point, Rect, Shape, TagArrow } from './types.js';
+import { drawRich, layoutRich, LINE_HEIGHT, type RichLayout } from './richtext.js';
 
 const DEFAULT_FONT_SIZE = 18;
 const TEXT_PAD_RATIO = 0.25;
@@ -7,13 +8,22 @@ function textFont(fontSize: number): string {
   return `bold ${fontSize}px system-ui, sans-serif`;
 }
 
-// One shared offscreen context for text measurement — shapeBounds runs
-// on every hit test, so don't allocate a canvas per call.
-let measureCtx: CanvasRenderingContext2D | null = null;
-function measureTextWidth(label: string, fontSize: number): number {
-  measureCtx ??= document.createElement('canvas').getContext('2d')!;
-  measureCtx.font = textFont(fontSize);
-  return measureCtx.measureText(label).width;
+export interface TextLayout {
+  rich: RichLayout;
+  // The text block (where lines are aligned), and the outer box (with the fill's padding).
+  inner: Rect;
+  box: Rect;
+}
+
+/** Where a text shape's lines go: its label laid out at its anchor, wrapped at its width if it has one. */
+export function layoutText(shape: Shape): TextLayout {
+  const a = shape.points[0] ?? { x: 0, y: 0 };
+  const fontSize = shape.fontSize ?? DEFAULT_FONT_SIZE;
+  const rich = layoutRich(shape.label ?? '', fontSize, shape.textStyle, shape.width ?? Infinity);
+  const w = shape.width ?? Math.max(fontSize, rich.width);
+  const h = Math.max(fontSize * LINE_HEIGHT, rich.height);
+  const pad = shape.fill ? fontSize * TEXT_PAD_RATIO : 0;
+  return { rich, inner: { x: a.x, y: a.y, w, h }, box: { x: a.x - pad, y: a.y - pad, w: w + pad * 2, h: h + pad * 2 } };
 }
 
 /** Black or white, whichever reads better on `color` (a #rrggbb hex). */
@@ -68,7 +78,7 @@ function drawMagnifier(ctx: CanvasRenderingContext2D, shape: Shape): void {
   sample.height = sample.width;
   const sctx = sample.getContext('2d')!;
   sctx.imageSmoothingQuality = 'high';
-  sctx.drawImage(ctx.canvas, s.x - r + t.e, s.y - r + t.f, r * 2, r * 2, 0, 0, sample.width, sample.height);
+  sctx.drawImage(ctx.canvas, (s.x - r) * t.a + t.e, (s.y - r) * t.d + t.f, r * 2 * t.a, r * 2 * t.d, 0, 0, sample.width, sample.height);
 
   const width = Math.max(2, shape.lineWidth);
   const d = Math.hypot(l.x - s.x, l.y - s.y);
@@ -137,10 +147,13 @@ function pixelate(ctx: CanvasRenderingContext2D, r: Rect, blockSize: number): vo
   // with its origin offset); reading back from ctx.canvas needs raw device
   // pixels, so undo that translation for the source rect only.
   const t = ctx.getTransform();
-  const x = Math.max(0, Math.floor(r.x + t.e));
-  const y = Math.max(0, Math.floor(r.y + t.f));
-  const w = Math.min(ctx.canvas.width - x, Math.ceil(r.w + (r.x + t.e - x)));
-  const h = Math.min(ctx.canvas.height - y, Math.ceil(r.h + (r.y + t.f - y)));
+  const rx = r.x * t.a + t.e;
+  const ry = r.y * t.d + t.f;
+  const x = Math.max(0, Math.floor(rx));
+  const y = Math.max(0, Math.floor(ry));
+  const w = Math.min(ctx.canvas.width - x, Math.ceil(r.w * t.a + (rx - x)));
+  const h = Math.min(ctx.canvas.height - y, Math.ceil(r.h * t.d + (ry - y)));
+  blockSize *= t.a;
   if (w < 1 || h < 1) return;
   const small = document.createElement('canvas');
   small.width = Math.max(1, Math.ceil(w / blockSize));
@@ -163,31 +176,12 @@ export interface TagLayout {
   tip: Point;
   // The pointer triangle's two base corners on the bubble edge; null for 'none'.
   base: [Point, Point] | null;
-  lines: string[];
+  rich: RichLayout;
   fontSize: number;
   padX: number;
   padY: number;
   lineHeight: number;
   radius: number;
-}
-
-/** Greedy word wrap honoring literal newlines, like CSS `white-space: pre-wrap`. */
-function wrapText(label: string, fontSize: number, maxWidth: number): string[] {
-  const out: string[] = [];
-  for (const para of label.split('\n')) {
-    let line = '';
-    for (const word of para.split(/(\s+)/)) {
-      const next = line + word;
-      if (line && measureTextWidth(next.trimEnd(), fontSize) > maxWidth) {
-        out.push(line.trimEnd());
-        line = word.trimStart();
-      } else {
-        line = next;
-      }
-    }
-    out.push(line);
-  }
-  return out;
 }
 
 /** Where a tag's bubble and pointer sit, given its tip point, text, size, and arrow position. */
@@ -196,14 +190,13 @@ export function layoutTag(shape: Shape): TagLayout {
   const tip = shape.points[0] ?? { x: 0, y: 0 };
   const padX = fontSize * 0.6;
   const padY = fontSize * 0.4;
-  const lineHeight = fontSize * 1.3;
+  const lineHeight = fontSize * LINE_HEIGHT;
   const radius = fontSize * 0.45;
-  const lines = wrapText(shape.label || ' ', fontSize, fontSize * 16);
-  const textW = Math.max(...lines.map((l) => measureTextWidth(l, fontSize)));
-  const w = Math.max(fontSize * 2, textW + padX * 2);
-  const h = lines.length * lineHeight + padY * 2;
+  const rich = layoutRich(shape.label || ' ', fontSize, shape.textStyle, fontSize * 16);
+  const w = Math.max(fontSize * 2, rich.width + padX * 2);
+  const h = Math.max(lineHeight, rich.height) + padY * 2;
   const arrow = shape.tagArrow ?? DEFAULT_TAG_ARROW;
-  const base = { fontSize, padX, padY, lineHeight, radius, lines, tip };
+  const base = { fontSize, padX, padY, lineHeight, radius, rich, tip };
   if (arrow === 'none') return { ...base, box: { x: tip.x, y: tip.y, w, h }, base: null };
 
   const len = fontSize * 0.75;
@@ -252,12 +245,8 @@ function drawTag(ctx: CanvasRenderingContext2D, shape: Shape): void {
   }
   ctx.fill();
   ctx.restore();
-  ctx.fillStyle = contrastColor(shape.color);
-  ctx.font = textFont(L.fontSize);
-  ctx.textBaseline = 'middle';
-  L.lines.forEach((line, i) => {
-    ctx.fillText(line, box.x + L.padX, box.y + L.padY + L.lineHeight * (i + 0.5));
-  });
+  const inner = box.w - L.padX * 2;
+  drawRich(ctx, L.rich, { x: box.x + L.padX, y: box.y + L.padY }, inner, shape.textStyle?.align, contrastColor(shape.color));
 }
 
 /**
@@ -323,19 +312,15 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: Shape, pictureSh
       break;
     }
     case 'text': {
-      const [a] = shape.points;
-      if (!a || !shape.label) break;
+      if (!shape.points[0] || !shape.label) break;
       const fontSize = shape.fontSize ?? DEFAULT_FONT_SIZE;
-      ctx.font = textFont(fontSize);
-      ctx.textBaseline = 'top';
+      const L = layoutText(shape);
       if (shape.fill) {
-        const b = shapeBounds(shape);
         ctx.beginPath();
-        ctx.roundRect(b.x, b.y, b.width, b.height, fontSize * 0.2);
+        ctx.roundRect(L.box.x, L.box.y, L.box.w, L.box.h, fontSize * 0.2);
         ctx.fill();
-        ctx.fillStyle = contrastColor(shape.color);
       }
-      ctx.fillText(shape.label, a.x, a.y);
+      drawRich(ctx, L.rich, L.inner, L.inner.w, shape.textStyle?.align, shape.fill ? contrastColor(shape.color) : shape.color);
       break;
     }
     case 'tag': {
@@ -407,12 +392,8 @@ function distanceToSegment(p: Point, a: Point, b: Point): number {
 
 export function shapeBounds(shape: Shape): { x: number; y: number; width: number; height: number } {
   if (shape.type === 'text') {
-    const a = shape.points[0] ?? { x: 0, y: 0 };
-    const fontSize = shape.fontSize ?? DEFAULT_FONT_SIZE;
-    const width = Math.max(fontSize, measureTextWidth(shape.label ?? '', fontSize));
-    if (!shape.fill) return { x: a.x, y: a.y, width, height: fontSize * 1.2 };
-    const pad = fontSize * TEXT_PAD_RATIO;
-    return { x: a.x - pad, y: a.y - pad, width: width + pad * 2, height: fontSize * 1.2 + pad * 2 };
+    const { box } = layoutText(shape);
+    return { x: box.x, y: box.y, width: box.w, height: box.h };
   }
   if (shape.type === 'tag') {
     const { box, tip } = layoutTag(shape);
@@ -752,6 +733,8 @@ export interface FlattenOptions {
   centered?: boolean;
   // With `centered`: center on this point (a page's saved view) instead of the images.
   center?: Point;
+  // Canvas pixels per page pixel (2 renders text-only slides crisply on HiDPI screens).
+  pixelRatio?: number;
 }
 
 /** Every picture on the page (or, with none, all its content): what a slide centers on. Integer-aligned. */
@@ -790,7 +773,7 @@ const SCENE_BACKGROUND = '#ffffff';
  */
 export async function flattenPage(
   shapes: Shape[],
-  { background = SCENE_BACKGROUND, sceneShapes = shapes, centered = false, center }: FlattenOptions = {}
+  { background = SCENE_BACKGROUND, sceneShapes = shapes, centered = false, center, pixelRatio = 1 }: FlattenOptions = {}
 ): Promise<{ canvas: HTMLCanvasElement; origin: Point; focus: Rect }> {
   await preloadPictures(shapes);
   let area = sceneBounds(sceneShapes);
@@ -807,9 +790,10 @@ export async function flattenPage(
     area = { x: focus.x - dx, y: focus.y - dy, w: focus.w + 2 * dx, h: focus.h + 2 * dy };
   }
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, area.w);
-  canvas.height = Math.max(1, area.h);
+  canvas.width = Math.max(1, Math.round(area.w * pixelRatio));
+  canvas.height = Math.max(1, Math.round(area.h * pixelRatio));
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(pixelRatio, pixelRatio);
   if (background) {
     ctx.fillStyle = background;
     ctx.fillRect(0, 0, area.w, area.h);

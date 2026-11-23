@@ -1,5 +1,5 @@
 import { Signal, effect } from 'avosignals';
-import type { Page, Shape, TagArrow, Tool } from './types.js';
+import type { Page, Shape, TagArrow, TextStyle, Tool } from './types.js';
 import { loadSession, saveSession } from './persistence.js';
 import { getTabId } from './tab-identity.js';
 import { loadPreferences, savePreferences } from './preferences.js';
@@ -30,7 +30,8 @@ export type Selection = { type: 'shapes'; ids: string[] } | null;
 // `inPlace`: the next paste lands where the shapes were (they were cut, not copied).
 type Clipboard = { shapes: Shape[]; inPlace: boolean } | null;
 
-export type ShapeStyle = { color?: string; lineWidth?: number; fontSize?: number; fill?: boolean; tagArrow?: TagArrow };
+// textStyle is merged into a label's existing style (set one property without touching the others).
+export type ShapeStyle = { color?: string; lineWidth?: number; fontSize?: number; fill?: boolean; tagArrow?: TagArrow; textStyle?: TextStyle };
 
 const initialPrefs = loadPreferences();
 
@@ -50,6 +51,7 @@ export class AnnotatorStore {
   activeFontSize = new Signal<number>(initialPrefs.fontSize);
   activeFill = new Signal<boolean>(initialPrefs.fill);
   activeTagArrow = new Signal<TagArrow>('bottom-center');
+  activeTextStyle = new Signal<TextStyle>({});
   exportBackground = new Signal<string>(initialPrefs.exportBackground);
   sceneBackground = new Signal<string>(initialPrefs.sceneBackground);
   autoRedact = new Signal<boolean>(initialPrefs.autoRedact);
@@ -340,6 +342,7 @@ export class AnnotatorStore {
           next.fill = style.fill;
         }
         if (style.tagArrow !== undefined && s.type === 'tag') next.tagArrow = style.tagArrow;
+        if (style.textStyle && (s.type === 'text' || s.type === 'tag')) next.textStyle = { ...s.textStyle, ...style.textStyle };
         return next;
       })
     );

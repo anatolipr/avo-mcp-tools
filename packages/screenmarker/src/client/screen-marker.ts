@@ -10,6 +10,7 @@ import {
   decodePicture,
   focusBounds,
   drawHandles,
+  drawMarquee,
   drawRegionOverlay,
   drawSelectionOutline,
   drawShapes,
@@ -17,6 +18,7 @@ import {
   flattenPagesToCanvas,
   hitTestShapes,
   layoutTag,
+  layoutText,
   magnifierRadii,
   DEFAULT_MAGNIFY,
   preloadPictures,
@@ -53,7 +55,8 @@ import './palette.js';
 import type { Command } from './palette.js';
 import type { Slide } from './presenter.js';
 import { pageThumbnail, recentThumbnail, rememberRecentThumbnail } from './thumbs.js';
-import { TAG_ARROWS, type Page, type Point, type Rect, type Shape, type ShapeType, type TagArrow, type Tool } from './types.js';
+import { TAG_ARROWS, type Page, type Point, type Rect, type Shape, type ShapeType, type TagArrow, type TextFont, type TextStyle, type Tool } from './types.js';
+import { FONT_FAMILIES, FONT_LABELS, LINE_HEIGHT, layoutRich } from './richtext.js';
 
 const TOOLS: { type: Tool; label: string; icon: string; key: string }[] = [
   { type: 'select', label: 'Select', icon: '↖', key: 'v' },
@@ -139,6 +142,9 @@ type TextEdit = {
   fontSize: number;
   fill: boolean;
   tagArrow: TagArrow;
+  textStyle: TextStyle;
+  // text only: wrap width (image pixels); undefined grows with the text.
+  width?: number;
 };
 
 function sortedRect(x1: number, y1: number, x2: number, y2: number): Rect {
@@ -833,7 +839,7 @@ export class ScreenMarker extends LitElement {
       else shapes.push(s);
     }
     const tool = this.#store.activeTool.value;
-    if (this.#drawing && this.#currentPoints.length >= 2 && this.#isShapeTool(tool)) {
+    if (this.#drawing && this.#currentPoints.length >= 2 && this.#isShapeTool(tool) && tool !== 'text') {
       shapes.push(this.#newShape(tool, this.#currentPoints));
     }
     // Arrows attached to something being dragged follow it live.
@@ -887,7 +893,7 @@ export class ScreenMarker extends LitElement {
   async #redraw(): Promise<void> {
     const page = this.#store.activePage;
     const canvas = this.#canvasRef.value;
-    if (!canvas || !page.shapes.length) return;
+    if (!canvas) return;
 
     const shapes = this.#displayShapes();
     await preloadPictures(shapes);
@@ -923,6 +929,11 @@ export class ScreenMarker extends LitElement {
     }
     const region = this.#activeRegion();
     if (region) drawRegionOverlay(ctx, region, HANDLE_CSS_PX * unit, area);
+    // The text box being dragged out with the Text tool.
+    const [ta, tb] = this.#currentPoints;
+    if (this.#drawing && this.#store.activeTool.value === 'text' && ta && tb) {
+      drawMarquee(ctx, sortedRect(ta.x, ta.y, tb.x, tb.y), unit);
+    }
     // canvas.width/height just changed the wrap's target size (#canvasWrapStyle
     // reads it) — re-render once so the wrap picks up the new box on first load.
     if (sizeChanged) this.requestUpdate();
@@ -932,8 +943,18 @@ export class ScreenMarker extends LitElement {
   #handlePoints(shape: Shape): Point[] {
     if (shape.type === 'arrow' || shape.type === 'line') return shape.points.slice(0, 2);
     if (shape.type === 'magnifier') return this.#magnifierHandles(shape);
+    if (shape.type === 'text') return this.#textWidthHandles(shape);
     if (BOX_RESIZABLE.includes(shape.type)) return boxHandlePoints(boundsRect(shape));
     return [];
+  }
+
+  /** A text box's width handles: the middle of its left (w) and right (e) edges. */
+  #textWidthHandles(shape: Shape): Point[] {
+    const b = boundsRect(shape);
+    return [
+      { x: b.x, y: b.y + b.h / 2 },
+      { x: b.x + b.w, y: b.y + b.h / 2 },
+    ];
   }
 
   /** A magnifier's handles: the spot (0), the lens center (1), and the lens radius on its right edge (2). */
@@ -953,6 +974,10 @@ export class ScreenMarker extends LitElement {
     if (shape.type === 'arrow' || shape.type === 'line') {
       const i = shape.points.slice(0, 2).findIndex((p) => Math.hypot(p.x - pt.x, p.y - pt.y) <= tol);
       return i === 0 || i === 1 ? i : null;
+    }
+    if (shape.type === 'text') {
+      const i = this.#textWidthHandles(shape).findIndex((p) => Math.hypot(p.x - pt.x, p.y - pt.y) <= tol);
+      return i === 0 ? 'w' : i === 1 ? 'e' : null;
     }
     if (!BOX_RESIZABLE.includes(shape.type)) return null;
     const grab = boxGrabAt(boundsRect(shape), pt, tol);
@@ -1151,19 +1176,28 @@ export class ScreenMarker extends LitElement {
   async #fitToWindow(): Promise<void> {
     const page = this.#store.activePage;
     const stage = this.#stageRef.value;
-    if (!stage || !page.shapes.length) return;
-    const c = sceneBounds(page.shapes);
+    if (!stage) return;
     const dpr = window.devicePixelRatio || 1;
+    if (!page.shapes.length) {
+      // A blank page: 100% on screen (one image pixel per CSS pixel), (0, 0) in the middle.
+      this.#store.setZoom(dpr);
+      this.#cam = { x: 0, y: 0 };
+      await this.#settleLayout();
+      return;
+    }
+    const c = sceneBounds(page.shapes);
     const availW = stage.clientWidth - 32;
     const availH = stage.clientHeight - 32;
     if (availW <= 0 || availH <= 0 || !c.w || !c.h) return;
-    this.#store.setZoom(Math.min(1, (availW * dpr) / c.w, (availH * dpr) / c.h));
+    // Screenshots open at most at their own pixel size; slides made of text and shapes at most at 100% on screen.
+    const cap = page.shapes.some((s) => s.type === 'picture') ? 1 : dpr;
+    this.#store.setZoom(Math.min(cap, (availW * dpr) / c.w, (availH * dpr) / c.h));
     this.#cam = { x: c.x + c.w / 2, y: c.y + c.h / 2 };
     await this.#settleLayout();
   }
 
   #onPointerDown = (e: PointerEvent) => {
-    if (this.#spaceHeld || !this.#store.activePage.shapes.length || e.button !== 0) return;
+    if (this.#spaceHeld || e.button !== 0) return;
     this.#commitTextEdit();
     const tool = this.#store.activeTool.value;
     const pt = this.#canvasPoint(e);
@@ -1228,8 +1262,15 @@ export class ScreenMarker extends LitElement {
       // immediately blur (and so commit/close) the editor opened below.
       e.preventDefault();
       const hit = hitTestShapes(this.#store.activePage.shapes, pt);
-      if (hit?.type === 'text') this.#startTextEdit(hit);
-      else this.#startTextEdit(null, pt);
+      if (hit?.type === 'text') {
+        this.#startTextEdit(hit);
+        return;
+      }
+      // A click types at the point; a drag first draws the box (its width wraps the text). See #onPointerUp.
+      this.#drawing = true;
+      this.#dragStart = pt;
+      this.#currentPoints = [pt];
+      capture();
       return;
     }
 
@@ -1321,6 +1362,16 @@ export class ScreenMarker extends LitElement {
       return { ...o, points };
     }
     if (drag.grab === 'move') return o;
+    if (o.type === 'text') {
+      // Dragging a side sets the wrap width; the left side moves the anchor with it.
+      const L = layoutText(o);
+      const dx = pt.x - drag.start.x;
+      const min = (o.fontSize ?? 18) * 2;
+      const width = Math.max(min, Math.round(L.inner.w + (drag.grab === 'w' ? -dx : dx)));
+      const a = o.points[0]!;
+      const x = drag.grab === 'w' ? a.x + L.inner.w - width : a.x;
+      return { ...o, width, points: [{ x, y: a.y }] };
+    }
     const from = boundsRect(o);
     let [l, t, r, b] = resizeBox(from, drag.grab, pt.x - drag.start.x, pt.y - drag.start.y);
     // Pictures keep their aspect ratio on a corner drag unless Shift is held; other boxes only with Shift.
@@ -1417,6 +1468,14 @@ export class ScreenMarker extends LitElement {
     this.#dragStart = null;
 
     if (!this.#isShapeTool(tool)) return;
+    if (tool === 'text' && start) {
+      const end = points[1] ?? pt;
+      const box = sortedRect(start.x, start.y, end.x, end.y);
+      if (dragDistance < CLICK_THRESHOLD || box.w < CLICK_THRESHOLD * 4) this.#startTextEdit(null, start);
+      else this.#startTextEdit(null, { x: box.x, y: box.y }, 'text', undefined, Math.round(box.w));
+      void this.#redraw();
+      return;
+    }
     if (dragDistance < CLICK_THRESHOLD) {
       // A click (no real drag) with a draw tool active would only produce a
       // degenerate zero-size shape — treat it as "select whatever's under
@@ -1761,7 +1820,6 @@ export class ScreenMarker extends LitElement {
   }
 
   #onDoubleClick = (e: MouseEvent) => {
-    if (!this.#store.activePage.shapes.length) return;
     const hit = hitTestShapes(this.#store.activePage.shapes, this.#canvasPoint(e));
     if (hit?.type === 'text' || hit?.type === 'tag' || hit?.type === 'step') this.#startTextEdit(hit);
   };
@@ -1773,7 +1831,7 @@ export class ScreenMarker extends LitElement {
 
   // ---------- inline text editing ----------
 
-  #startTextEdit(shape: Shape | null, anchor?: Point, kind: 'text' | 'tag' = 'text', initialValue?: string): void {
+  #startTextEdit(shape: Shape | null, anchor?: Point, kind: 'text' | 'tag' = 'text', initialValue?: string, width?: number): void {
     this.#commitTextEdit();
     this.#textEdit = shape
       ? {
@@ -1785,6 +1843,8 @@ export class ScreenMarker extends LitElement {
           fontSize: shape.fontSize ?? 18,
           fill: !!shape.fill,
           tagArrow: shape.tagArrow ?? 'bottom-center',
+          textStyle: { ...shape.textStyle },
+          width: shape.width,
         }
       : {
           kind,
@@ -1795,6 +1855,8 @@ export class ScreenMarker extends LitElement {
           fontSize: this.#store.activeFontSize.value,
           fill: this.#store.activeFill.value,
           tagArrow: this.#store.activeTagArrow.value,
+          textStyle: { ...this.#store.activeTextStyle.value },
+          width: kind === 'text' ? width : undefined,
         };
     if (initialValue !== undefined) this.#textEdit.value = initialValue;
     if (shape) this.#store.selectShapes([shape.id]);
@@ -1809,7 +1871,8 @@ export class ScreenMarker extends LitElement {
     const edit = this.#textEdit;
     if (!edit) return;
     this.#textEdit = null;
-    const label = edit.value.trim();
+    // Keep leading spaces on the first line (list indent); drop blank lines around the text.
+    const label = edit.value.replace(/^(\s*\n)+/, '').trimEnd();
     if (edit.kind === 'step') {
       const shape = this.#store.activePage.shapes.find((s) => s.id === edit.id);
       const n = Number.parseInt(label, 10);
@@ -1826,8 +1889,12 @@ export class ScreenMarker extends LitElement {
       shape.label = label;
       shape.color = edit.color;
       shape.fontSize = edit.fontSize;
+      if (Object.keys(edit.textStyle).length) shape.textStyle = { ...edit.textStyle };
       if (edit.kind === 'tag') shape.tagArrow = edit.tagArrow;
-      else shape.fill = edit.fill;
+      else {
+        shape.fill = edit.fill;
+        if (edit.width) shape.width = edit.width;
+      }
       this.#store.addShape(shape);
       this.#store.selectShapes([shape.id]);
     }
@@ -1842,7 +1909,19 @@ export class ScreenMarker extends LitElement {
   #onTextKeydown = (e: KeyboardEvent) => {
     // Keep global shortcuts (tool keys, Delete, Cmd+Z…) out of the text field.
     e.stopPropagation();
-    // Tags are multi-line: Shift+Enter adds a line, Enter saves.
+    const mod = e.metaKey || e.ctrlKey;
+    const fmt = mod && !e.altKey ? ({ b: 'bold', i: 'italic', u: 'underline' } as const)[e.key.toLowerCase() as 'b' | 'i' | 'u'] : undefined;
+    if (fmt && this.#textEdit?.kind !== 'step') {
+      e.preventDefault();
+      this.#formatText(e.target as HTMLTextAreaElement, fmt);
+      return;
+    }
+    if (mod && e.shiftKey && e.key.toLowerCase() === 'x' && this.#textEdit?.kind !== 'step') {
+      e.preventDefault();
+      this.#wrapSelection(e.target as HTMLTextAreaElement, '~~');
+      return;
+    }
+    // Labels are multi-line: Shift+Enter adds a line, Enter saves.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       this.#commitTextEdit();
@@ -1907,6 +1986,7 @@ export class ScreenMarker extends LitElement {
         `line-height:${L.lineHeight * scale}px`,
         `padding:${L.padY * scale}px ${L.padX * scale}px`,
         `border-radius:${L.radius * scale}px`,
+        this.#editorFontCss(edit.textStyle),
         `color:${contrastColor(edit.color)}`,
         `background:${edit.color}`,
       ].join(';');
@@ -1930,31 +2010,100 @@ export class ScreenMarker extends LitElement {
     }
     const fontPx = edit.fontSize * scale;
     const pad = edit.fill ? edit.fontSize * 0.25 * scale : 0;
+    // The raw text (Markdown markers and all) sizes the field; it wraps at the box width if there is one.
+    const raw = layoutRich(edit.value || ' ', edit.fontSize, edit.textStyle, edit.width ?? Infinity, true);
+    const w = edit.width ?? Math.max(edit.fontSize * 2, raw.width + edit.fontSize * 0.6);
     const style = [
       `left:${(edit.anchor.x - ox) * scale - pad}px`,
       `top:${(edit.anchor.y - oy) * scale - pad}px`,
       `font-size:${fontPx}px`,
+      `line-height:${LINE_HEIGHT}`,
       `padding:${pad}px`,
-      `width:calc(${Math.max(2, edit.value.length + 1)}ch + ${pad * 2}px)`,
+      // +2: the dashed border sits inside the box (border-box).
+      `width:${w * scale + pad * 2 + 2}px`,
+      `height:${Math.max(raw.height, edit.fontSize * LINE_HEIGHT) * scale + pad * 2 + 2}px`,
+      this.#editorFontCss(edit.textStyle),
       `color:${edit.fill ? contrastColor(edit.color) : edit.color}`,
       edit.fill ? `background:${edit.color}` : '',
     ].join(';');
     return html`
-      <input
+      <textarea
         ${ref(this.#textInputRef)}
-        class="text-editor"
+        class="text-editor label-editor"
         style=${style}
+        rows="1"
         .value=${live(edit.value)}
         placeholder="Text"
         @input=${(e: Event) => {
-          edit.value = (e.target as HTMLInputElement).value;
+          edit.value = (e.target as HTMLTextAreaElement).value;
           this.requestUpdate();
         }}
         @keydown=${this.#onTextKeydown}
         @blur=${() => this.#commitTextEdit()}
         @pointerdown=${(e: Event) => e.stopPropagation()}
-      />
+      ></textarea>
     `;
+  }
+
+  /** CSS for the in-place editor so it looks like the label's base style. */
+  #editorFontCss(t: TextStyle): string {
+    return [
+      `font-family:${FONT_FAMILIES[t.font ?? 'sans']}`,
+      `font-weight:${t.bold ?? true ? 'bold' : 'normal'}`,
+      `font-style:${t.italic ? 'italic' : 'normal'}`,
+      `text-decoration:${t.underline ? 'underline' : 'none'}`,
+      `text-align:${t.align ?? 'left'}`,
+    ].join(';');
+  }
+
+  /**
+   * Cmd/Ctrl+B / I / U in the editor: with text selected, wraps it in the
+   * Markdown marker (or unwraps it); with nothing selected, toggles that
+   * style for the whole label.
+   */
+  #formatText(field: HTMLTextAreaElement, mark: 'bold' | 'italic' | 'underline'): void {
+    if (field.selectionStart !== field.selectionEnd) {
+      this.#wrapSelection(field, mark === 'bold' ? '**' : mark === 'italic' ? '*' : '__');
+      return;
+    }
+    this.#toggleTextStyle(mark);
+  }
+
+  #wrapSelection(field: HTMLTextAreaElement, marker: string): void {
+    const edit = this.#textEdit;
+    if (!edit) return;
+    const { selectionStart: a, selectionEnd: b, value } = field;
+    const before = value.slice(0, a);
+    const inner = value.slice(a, b);
+    const after = value.slice(b);
+    const n = marker.length;
+    let next: string;
+    let selA: number;
+    let selB: number;
+    if (before.endsWith(marker) && after.startsWith(marker)) {
+      next = before.slice(0, -n) + inner + after.slice(n);
+      selA = a - n;
+      selB = b - n;
+    } else if (inner.length > n * 2 && inner.startsWith(marker) && inner.endsWith(marker)) {
+      next = before + inner.slice(n, -n) + after;
+      selA = a;
+      selB = b - n * 2;
+    } else {
+      next = before + marker + inner + marker + after;
+      selA = a + n;
+      selB = b + n;
+    }
+    edit.value = next;
+    field.value = next;
+    field.setSelectionRange(selA, selB);
+    this.requestUpdate();
+  }
+
+  /** Flips one on/off style (bold is on unless turned off) for the selected labels and the open editor. */
+  #toggleTextStyle(mark: 'bold' | 'italic' | 'underline'): void {
+    const current = this.#currentStyle().textStyle;
+    const on = mark === 'bold' ? (current.bold ?? true) : !!current[mark];
+    this.#applyStyle({ textStyle: { [mark]: !on } });
   }
 
   // ---------- tag pointer panel ----------
@@ -2217,6 +2366,49 @@ export class ScreenMarker extends LitElement {
     return SIZED_BY_FONT.includes(this.#store.activeTool.value as ShapeType);
   }
 
+  /** Whether the toolbar shows text formatting: a label is being edited, the selection is all labels, or a label tool is active. */
+  #textStyleContext(): boolean {
+    const edit = this.#textEdit;
+    if (edit) return edit.kind !== 'step';
+    const selected = this.#store.selectedShapes;
+    if (selected.length) return selected.every((s) => s.type === 'text' || s.type === 'tag');
+    const tool = this.#store.activeTool.value;
+    return tool === 'text' || tool === 'tag';
+  }
+
+  #renderTextStyleControls(t: TextStyle) {
+    // mousedown preventDefault keeps focus (and so the open editor) in the text field.
+    const keep = (e: Event) => e.preventDefault();
+    const align = t.align ?? 'left';
+    return html`
+      <div class="group text-style">
+        <button class=${t.bold ?? true ? 'active' : ''} @mousedown=${keep} @click=${() => this.#toggleTextStyle('bold')} title="Bold (Cmd/Ctrl+B; with text selected while typing: **bold** just that part)"><b>B</b></button>
+        <button class=${t.italic ? 'active' : ''} @mousedown=${keep} @click=${() => this.#toggleTextStyle('italic')} title="Italic (Cmd/Ctrl+I; *italic* for part of the text)"><i>I</i></button>
+        <button class=${t.underline ? 'active' : ''} @mousedown=${keep} @click=${() => this.#toggleTextStyle('underline')} title="Underline (Cmd/Ctrl+U; __underline__ for part of the text)"><u>U</u></button>
+        ${(['left', 'center', 'right'] as const).map(
+          (a) => html`<button
+            class=${align === a ? 'active' : ''}
+            @mousedown=${keep}
+            @click=${() => this.#applyStyle({ textStyle: { align: a } })}
+            title="Align ${a}"
+          >${a === 'left' ? '⇤' : a === 'center' ? '↔' : '⇥'}</button>`
+        )}
+        <select
+          title="Font"
+          .value=${live(t.font ?? 'sans')}
+          @change=${(e: Event) => this.#applyStyle({ textStyle: { font: (e.target as HTMLSelectElement).value as TextFont } })}
+        >
+          ${(Object.keys(FONT_LABELS) as TextFont[]).map((f) => html`<option value=${f}>${FONT_LABELS[f]}</option>`)}
+        </select>
+        <span
+          class="md-help"
+          title=${'Formatting while typing:\n**bold**  *italic*  __underline__  ~~strike~~  `code`\n# Heading, ## Smaller heading\n- bullet (indent with 2 spaces)\n1. numbered\n[ ] to-do, [x] done\nShift+Enter: new line · Enter: done'}
+          >?</span
+        >
+      </div>
+    `;
+  }
+
   /** The style value the toolbar should show: from the first selected shape, else the tool default. */
   #currentStyle() {
     const first = this.#store.selectedShapes[0];
@@ -2226,6 +2418,7 @@ export class ScreenMarker extends LitElement {
       fontSize: first?.fontSize ?? this.#store.activeFontSize.value,
       fill: first && FILLABLE.includes(first.type) ? !!first.fill : this.#store.activeFill.value,
       tagArrow: first?.type === 'tag' ? (first.tagArrow ?? 'bottom-center') : this.#store.activeTagArrow.value,
+      textStyle: this.#textEdit?.textStyle ?? (first && (first.type === 'text' || first.type === 'tag') ? (first.textStyle ?? {}) : this.#store.activeTextStyle.value),
     };
   }
 
@@ -2236,8 +2429,10 @@ export class ScreenMarker extends LitElement {
     if (style.fontSize !== undefined) this.#store.activeFontSize.set(style.fontSize);
     if (style.fill !== undefined) this.#store.activeFill.set(style.fill);
     if (style.tagArrow !== undefined) this.#store.activeTagArrow.set(style.tagArrow);
+    if (style.textStyle) this.#store.activeTextStyle.set({ ...this.#store.activeTextStyle.value, ...style.textStyle });
     const edit = this.#textEdit;
     if (edit) {
+      if (style.textStyle) edit.textStyle = { ...edit.textStyle, ...style.textStyle };
       if (style.color !== undefined) edit.color = style.color;
       if (style.fontSize !== undefined) edit.fontSize = style.fontSize;
       if (style.fill !== undefined) edit.fill = style.fill;
@@ -2492,6 +2687,8 @@ export class ScreenMarker extends LitElement {
         let height = 0;
         let focusWidth = 0;
         let focusHeight = 0;
+        // Slides of only text and shapes have no source resolution to keep: render them sharp.
+        const ratio = p.shapes.some((s) => s.type === 'picture') ? 1 : 2;
         for (let k = 0; k <= revealed.length; k++) {
           const hidden = new Set(revealed.slice(k).map((s) => s.id));
           const shown = p.shapes.filter((s) => !hidden.has(s.id));
@@ -2503,8 +2700,10 @@ export class ScreenMarker extends LitElement {
             centered: true,
             // A page framed by hand (panned/zoomed in the editor) is centered where it was framed.
             center: p.view,
+            pixelRatio: ratio,
           });
-          ({ width, height } = flat.canvas);
+          width = flat.canvas.width / ratio;
+          height = flat.canvas.height / ratio;
           ({ w: focusWidth, h: focusHeight } = flat.focus);
           builds.push(flat.canvas.toDataURL('image/png'));
         }
@@ -2587,7 +2786,6 @@ export class ScreenMarker extends LitElement {
   };
 
   #onCanvasContextMenu = (e: MouseEvent) => {
-    if (!this.#store.activePage.shapes.length) return;
     const pt = this.#canvasPoint(e);
     const hit = hitTestShapes(this.#store.activePage.shapes, pt);
     if (hit) {
@@ -2615,6 +2813,13 @@ export class ScreenMarker extends LitElement {
       ];
       this.#openMenu(e, [
         ...(editable ? [{ label: hit.type === 'step' ? 'Edit number' : 'Edit text', shortcut: 'Enter', run: () => this.#startTextEdit(hit) }] : []),
+        ...(hit.type === 'text' && hit.width && this.#store.selectedIds.length === 1
+          ? [{ label: 'Auto width (no wrapping)', run: () => {
+              const next = { ...hit };
+              delete next.width;
+              this.#store.replaceShape(next);
+            } }]
+          : []),
         ...pictureItems,
         ...(pictureItems.length ? ['sep' as const] : []),
         ...(hit.type === 'magnifier'
@@ -2878,11 +3083,23 @@ export class ScreenMarker extends LitElement {
     `;
   }
 
+  /** Starts typing a text label in the middle of the view (the empty page's "Add text"). */
+  #startBlankText(): void {
+    this.#setTool('text');
+    const fs = this.#store.activeFontSize.value;
+    this.#startTextEdit(null, { x: Math.round(this.#cam.x - fs * 4), y: Math.round(this.#cam.y - fs) });
+  }
+
   #renderEmpty() {
     const recent = !this.#hasContent() ? (this.#recent ?? []) : [];
     return html`
-      <div class="empty">
-        <div>Paste a screenshot (Cmd/Ctrl+V), drag one in, or use "Open image…" above.</div>
+      <div class="empty empty-overlay">
+        <div>
+          Paste a screenshot (Cmd/Ctrl+V), drag one in, or use "Open image…" above.<br />
+          Or use this page as a blank slide:
+          <button class="empty-text" @click=${() => this.#startBlankText()}>T Add text</button>
+          or pick any tool (text, arrows, shapes, tags…) and draw.
+        </div>
         ${recent.length
           ? html`
               <div class="recent-heading">Recent documents</div>
@@ -3053,6 +3270,11 @@ export class ScreenMarker extends LitElement {
     add('flip-v', 'Flip vertically', () => void this.#transformImage('flip-v'), '', hasImage);
 
     add('new-page', 'New page', () => this.#addPage(), '');
+    add('add-text', 'Add text in the middle of the view', () => this.#startBlankText());
+    const labels = this.#textStyleContext();
+    add('text-bold', 'Text: bold on/off', () => this.#toggleTextStyle('bold'), '⌘B', labels);
+    add('text-italic', 'Text: italic on/off', () => this.#toggleTextStyle('italic'), '⌘I', labels);
+    add('text-underline', 'Text: underline on/off', () => this.#toggleTextStyle('underline'), '⌘U', labels);
     add('dup-page', 'Duplicate page', () => this.#duplicatePage(page.id), '⇧⌘D');
     add('next-page', 'Next page', () => this.#gotoAdjacentPage(1), '→', pages.length > 1);
     add('prev-page', 'Previous page', () => this.#gotoAdjacentPage(-1), '←', pages.length > 1);
@@ -3424,6 +3646,7 @@ export class ScreenMarker extends LitElement {
         >
           ◼ Fill
         </button>
+        ${this.#textStyleContext() ? this.#renderTextStyleControls(style.textStyle) : ''}
         <button
           class=${this.#store.snapArrows.value ? 'active' : ''}
           title="Snap arrow and line ends to text and pictures, so they follow when those move"
@@ -3525,24 +3748,21 @@ export class ScreenMarker extends LitElement {
         @pointerup=${this.#onStagePointerUp}
         @wheel=${this.#onWheel}
       >
-        ${page.shapes.length
-          ? html`
-              <div class="canvas-wrap ${this.#spaceHeld ? 'panning' : ''}" style=${this.#canvasWrapStyle()}>
-                <canvas
-                  ${ref(this.#canvasRef)}
-                  style="transform: scale(${this.#displayScale()}); cursor: ${this.#canvasCursorCss()}"
-                  @pointerdown=${this.#onPointerDown}
-                  @pointermove=${this.#onPointerMove}
-                  @pointerup=${this.#onPointerUp}
-                  @dblclick=${this.#onDoubleClick}
-                  @contextmenu=${this.#onCanvasContextMenu}
-                ></canvas>
-                ${this.#regionActions()} ${this.#textEditor()} ${this.#tagPanel()}
-              </div>
-            `
-          : this.#renderEmpty()}
+        <div class="canvas-wrap ${this.#spaceHeld ? 'panning' : ''}" style=${this.#canvasWrapStyle()}>
+          <canvas
+            ${ref(this.#canvasRef)}
+            style="transform: scale(${this.#displayScale()}); cursor: ${this.#canvasCursorCss()}"
+            @pointerdown=${this.#onPointerDown}
+            @pointermove=${this.#onPointerMove}
+            @pointerup=${this.#onPointerUp}
+            @dblclick=${this.#onDoubleClick}
+            @contextmenu=${this.#onCanvasContextMenu}
+          ></canvas>
+          ${this.#regionActions()} ${this.#textEditor()} ${this.#tagPanel()}
+        </div>
+        ${page.shapes.length || this.#textEdit || this.#drawing ? '' : this.#renderEmpty()}
       </div>
-      ${page.shapes.length ? this.#renderSlidePanel(page) : ''}
+      ${this.#renderSlidePanel(page)}
       </div>
       </div>
       <div class="status">${this.#statusMsg}</div>

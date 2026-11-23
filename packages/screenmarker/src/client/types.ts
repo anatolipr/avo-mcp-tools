@@ -17,8 +17,12 @@ export interface Shape {
   // pen: full stroke path. text: top-left anchor. step: center.
   // tag: arrow tip (or the bubble's top-left when tagArrow is 'none').
   points: Point[];
-  // text and tag
+  // text and tag: may use a small Markdown subset (see richtext.ts)
   label?: string;
+  // text and tag: formatting for the whole label
+  textStyle?: TextStyle;
+  // text only: wrap width in image pixels. Absent: no wrapping, the box grows with the text.
+  width?: number;
   // text, step, and tag: font size (step's circle radius and a tag's
   // padding/arrow scale with it)
   fontSize?: number;
@@ -39,6 +43,17 @@ export interface Shape {
   // arrow / line only: ends snapped to a text, tag, or picture (by id), as a
   // spot in fractions of its box, so they follow it. null: a free end.
   ends?: [ArrowEnd | null, ArrowEnd | null];
+}
+
+export type TextFont = 'sans' | 'serif' | 'mono' | 'hand';
+
+export interface TextStyle {
+  // Absent means bold (labels were always bold before styles existed).
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  align?: 'left' | 'center' | 'right';
+  font?: TextFont;
 }
 
 export interface ArrowEnd {

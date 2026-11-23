@@ -767,4 +767,51 @@ export const screenMarkerStyles = css`
       gap: 6px;
       padding: 4px 10px;
     }
+    .empty-overlay {
+      position: absolute;
+      inset: 0;
+      margin: 0;
+      max-width: none;
+      padding: 48px 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      overflow: auto;
+    }
+    .empty-overlay > div:first-child {
+      max-width: 520px;
+    }
+    .empty-overlay .recent-grid {
+      width: min(760px, 100%);
+    }
+    .empty-overlay button {
+      pointer-events: auto;
+    }
+    .empty-text {
+      margin: 0 4px;
+      padding: 2px 8px;
+      font-size: 13px;
+    }
+    .label-editor {
+      resize: none;
+      overflow: hidden;
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      box-sizing: border-box;
+      field-sizing: fixed;
+    }
+    .text-style {
+      align-items: center;
+    }
+    .text-style button {
+      min-width: 28px;
+    }
+    .md-help {
+      cursor: help;
+      font-size: 12px;
+      opacity: 0.6;
+      padding: 0 4px;
+    }
 `;

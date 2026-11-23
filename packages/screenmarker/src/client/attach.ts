@@ -2,7 +2,7 @@ import type { Point, Shape } from './types.js';
 import { shapeBounds } from './render.js';
 
 /**
- * Arrow/line ends snapped to text, tags, and pictures. An attached end is
+ * Arrow/line ends snapped to text, tags, pictures, rectangles, and ellipses. An attached end is
  * stored as a spot on its target, in fractions of the target's box, so it
  * follows the target when it moves or is resized (and the text grows).
  */
@@ -15,14 +15,16 @@ function inside(p: Point, s: Shape): boolean {
   return p.x >= b.x && p.y >= b.y && p.x <= b.x + b.width && p.y <= b.y + b.height;
 }
 
-/** What an end at `p` snaps to: the topmost text or tag there, else the topmost picture. */
+const BOXES = new Set(['picture', 'rect', 'ellipse']);
+
+/** What an end at `p` snaps to: the topmost text or tag there, else the topmost picture, rectangle, or ellipse. */
 function targetAt(p: Point, shapes: Shape[], self: string): Shape | null {
   let picture: Shape | null = null;
   for (let i = shapes.length - 1; i >= 0; i--) {
     const s = shapes[i]!;
     if (s.id === self || !inside(p, s)) continue;
     if (TEXTLIKE.has(s.type)) return s;
-    if (s.type === 'picture') picture ??= s;
+    if (BOXES.has(s.type)) picture ??= s;
   }
   return picture;
 }
