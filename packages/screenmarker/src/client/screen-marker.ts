@@ -111,7 +111,7 @@ const TAG_ARROW_LABEL: Record<TagArrow, string> = {
 /** Largest editor canvas side, in image pixels (keeps very low zoom levels from allocating huge canvases). */
 const MAX_AREA_SIDE = 8192;
 
-const BOX_RESIZABLE: ShapeType[] = ['rect', 'ellipse', 'highlight', 'blur', 'pen', 'picture'];
+const BOX_RESIZABLE: ShapeType[] = ['rect', 'ellipse', 'highlight', 'blur', 'pen', 'picture', 'text'];
 
 /** Which part of a box a drag grabbed: an edge/corner (compass letters) or the body. */
 type BoxGrab = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -143,8 +143,9 @@ type TextEdit = {
   fill: boolean;
   tagArrow: TagArrow;
   textStyle: TextStyle;
-  // text only: wrap width (image pixels); undefined grows with the text.
+  // text only: wrap width and minimum height (image pixels); undefined grows with the text.
   width?: number;
+  height?: number;
 };
 
 function sortedRect(x1: number, y1: number, x2: number, y2: number): Rect {
@@ -356,6 +357,14 @@ export class ScreenMarker extends LitElement {
     }
   })();
   #menu: { x: number; y: number; items: MenuItem[] } | null = null;
+  // Toolbar minimized to the essentials. Remembered per browser.
+  #toolbarCollapsed = (() => {
+    try {
+      return localStorage.getItem('screenmarker_toolbar') === 'min';
+    } catch {
+      return false;
+    }
+  })();
   #cloudName: string | null = cloudNameFromHash();
   // The document behind a public link, kept for "Edit a copy".
   #publicDoc: { pages: Page[]; activePageId: string } | null = null;
@@ -456,6 +465,11 @@ export class ScreenMarker extends LitElement {
   #onKeyup = (e: KeyboardEvent) => {
     if (e.key !== ' ' || !this.#spaceHeld) return;
     this.#spaceHeld = false;
+    // The Space went into a text field (e.g. the editor opened mid-keypress): no preview, no tag cycling.
+    if (fromEditable(e) || this.#textEdit) {
+      this.requestUpdate();
+      return;
+    }
     // A Space tap (no drag) cycles a selected tag's pointer clockwise;
     // otherwise it toggles the preview, as before Space+drag panning existed.
     const tag = this.#singleSelectedTag();
@@ -471,6 +485,8 @@ export class ScreenMarker extends LitElement {
 
   #onKeydown = (e: KeyboardEvent) => {
     if (this.#presenting) return;
+    // While a label is being edited, keys belong to the editor (it handles its own), never to app shortcuts.
+    if (this.#textEdit) return;
     if (this.#menu) {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -939,22 +955,12 @@ export class ScreenMarker extends LitElement {
     if (sizeChanged) this.requestUpdate();
   }
 
-  /** Resize-handle positions for a shape: two endpoints for arrows/lines, 8 box handles for box-like shapes, none for text/steps (sized via font size). */
+  /** Resize-handle positions for a shape: two endpoints for arrows/lines, 8 box handles for box-like shapes and text boxes, none for steps (sized via font size). */
   #handlePoints(shape: Shape): Point[] {
     if (shape.type === 'arrow' || shape.type === 'line') return shape.points.slice(0, 2);
     if (shape.type === 'magnifier') return this.#magnifierHandles(shape);
-    if (shape.type === 'text') return this.#textWidthHandles(shape);
     if (BOX_RESIZABLE.includes(shape.type)) return boxHandlePoints(boundsRect(shape));
     return [];
-  }
-
-  /** A text box's width handles: the middle of its left (w) and right (e) edges. */
-  #textWidthHandles(shape: Shape): Point[] {
-    const b = boundsRect(shape);
-    return [
-      { x: b.x, y: b.y + b.h / 2 },
-      { x: b.x + b.w, y: b.y + b.h / 2 },
-    ];
   }
 
   /** A magnifier's handles: the spot (0), the lens center (1), and the lens radius on its right edge (2). */
@@ -974,10 +980,6 @@ export class ScreenMarker extends LitElement {
     if (shape.type === 'arrow' || shape.type === 'line') {
       const i = shape.points.slice(0, 2).findIndex((p) => Math.hypot(p.x - pt.x, p.y - pt.y) <= tol);
       return i === 0 || i === 1 ? i : null;
-    }
-    if (shape.type === 'text') {
-      const i = this.#textWidthHandles(shape).findIndex((p) => Math.hypot(p.x - pt.x, p.y - pt.y) <= tol);
-      return i === 0 ? 'w' : i === 1 ? 'e' : null;
     }
     if (!BOX_RESIZABLE.includes(shape.type)) return null;
     const grab = boxGrabAt(boundsRect(shape), pt, tol);
@@ -1363,14 +1365,24 @@ export class ScreenMarker extends LitElement {
     }
     if (drag.grab === 'move') return o;
     if (o.type === 'text') {
-      // Dragging a side sets the wrap width; the left side moves the anchor with it.
+      // A side or corner sets the wrap width and/or the box's minimum height; the far sides stay put.
       const L = layoutText(o);
-      const dx = pt.x - drag.start.x;
-      const min = (o.fontSize ?? 18) * 2;
-      const width = Math.max(min, Math.round(L.inner.w + (drag.grab === 'w' ? -dx : dx)));
-      const a = o.points[0]!;
-      const x = drag.grab === 'w' ? a.x + L.inner.w - width : a.x;
-      return { ...o, width, points: [{ x, y: a.y }] };
+      const g = drag.grab;
+      const [l, t, r, b] = resizeBox(L.inner, g, pt.x - drag.start.x, pt.y - drag.start.y);
+      const fs = o.fontSize ?? 18;
+      const next: Shape = { ...o };
+      let { x, y } = L.inner;
+      if (g.includes('e') || g.includes('w')) {
+        next.width = Math.max(fs * 2, Math.round(r - l));
+        if (g.includes('w')) x = L.inner.x + L.inner.w - next.width;
+      }
+      if (g.includes('n') || g.includes('s')) {
+        const h = Math.max(fs * LINE_HEIGHT, Math.round(b - t));
+        next.height = h;
+        if (g.includes('n')) y = L.inner.y + L.inner.h - h;
+      }
+      next.points = [{ x, y }];
+      return next;
     }
     const from = boundsRect(o);
     let [l, t, r, b] = resizeBox(from, drag.grab, pt.x - drag.start.x, pt.y - drag.start.y);
@@ -1845,6 +1857,7 @@ export class ScreenMarker extends LitElement {
           tagArrow: shape.tagArrow ?? 'bottom-center',
           textStyle: { ...shape.textStyle },
           width: shape.width,
+          height: shape.height,
         }
       : {
           kind,
@@ -1883,7 +1896,16 @@ export class ScreenMarker extends LitElement {
     if (edit.id) {
       const shape = this.#store.activePage.shapes.find((s) => s.id === edit.id);
       if (shape && !label) this.#store.deleteShapes([edit.id]);
-      else if (shape && label !== shape.label) this.#store.replaceShape({ ...shape, label });
+      else if (shape && (label !== shape.label || edit.width !== shape.width || edit.height !== shape.height)) {
+        const next: Shape = { ...shape, label };
+        if (shape.type === 'text') {
+          next.width = edit.width;
+          next.height = edit.height;
+          if (next.width === undefined) delete next.width;
+          if (next.height === undefined) delete next.height;
+        }
+        this.#store.replaceShape(next);
+      }
     } else if (label) {
       const shape = this.#newShape(edit.kind, [edit.anchor]);
       shape.label = label;
@@ -1894,6 +1916,7 @@ export class ScreenMarker extends LitElement {
       else {
         shape.fill = edit.fill;
         if (edit.width) shape.width = edit.width;
+        if (edit.height) shape.height = edit.height;
       }
       this.#store.addShape(shape);
       this.#store.selectShapes([shape.id]);
@@ -2013,6 +2036,8 @@ export class ScreenMarker extends LitElement {
     // The raw text (Markdown markers and all) sizes the field; it wraps at the box width if there is one.
     const raw = layoutRich(edit.value || ' ', edit.fontSize, edit.textStyle, edit.width ?? Infinity, true);
     const w = edit.width ?? Math.max(edit.fontSize * 2, raw.width + edit.fontSize * 0.6);
+    const h = Math.max(raw.height, edit.fontSize * LINE_HEIGHT, edit.height ?? 0);
+    this.#editorBox = { w, h, scale, pad };
     const style = [
       `left:${(edit.anchor.x - ox) * scale - pad}px`,
       `top:${(edit.anchor.y - oy) * scale - pad}px`,
@@ -2021,7 +2046,7 @@ export class ScreenMarker extends LitElement {
       `padding:${pad}px`,
       // +2: the dashed border sits inside the box (border-box).
       `width:${w * scale + pad * 2 + 2}px`,
-      `height:${Math.max(raw.height, edit.fontSize * LINE_HEIGHT) * scale + pad * 2 + 2}px`,
+      `height:${h * scale + pad * 2 + 2}px`,
       this.#editorFontCss(edit.textStyle),
       `color:${edit.fill ? contrastColor(edit.color) : edit.color}`,
       edit.fill ? `background:${edit.color}` : '',
@@ -2041,9 +2066,34 @@ export class ScreenMarker extends LitElement {
         @keydown=${this.#onTextKeydown}
         @blur=${() => this.#commitTextEdit()}
         @pointerdown=${(e: Event) => e.stopPropagation()}
+        @pointerup=${this.#onEditorResized}
+        @mouseup=${this.#onEditorResized}
       ></textarea>
     `;
   }
+
+  /** The text editor's box as last rendered (image pixels), to tell a drag of its resize grip from a click. */
+  #editorBox: { w: number; h: number; scale: number; pad: number } | null = null;
+
+  /** After the editor's resize grip is dragged: the new size becomes the box's wrap width / minimum height. */
+  #onEditorResized = (e: Event) => {
+    const el = e.currentTarget as HTMLTextAreaElement;
+    const edit = this.#textEdit;
+    const box = this.#editorBox;
+    if (!edit || edit.kind !== 'text' || !box) return;
+    const w = (el.offsetWidth - 2 - box.pad * 2) / box.scale;
+    const h = (el.offsetHeight - 2 - box.pad * 2) / box.scale;
+    let changed = false;
+    if (Math.abs(w - box.w) > 1) {
+      edit.width = Math.max(edit.fontSize * 2, Math.round(w));
+      changed = true;
+    }
+    if (Math.abs(h - box.h) > 1) {
+      edit.height = Math.max(edit.fontSize * LINE_HEIGHT, Math.round(h));
+      changed = true;
+    }
+    if (changed) this.requestUpdate();
+  };
 
   /** CSS for the in-place editor so it looks like the label's base style. */
   #editorFontCss(t: TextStyle): string {
@@ -2813,10 +2863,11 @@ export class ScreenMarker extends LitElement {
       ];
       this.#openMenu(e, [
         ...(editable ? [{ label: hit.type === 'step' ? 'Edit number' : 'Edit text', shortcut: 'Enter', run: () => this.#startTextEdit(hit) }] : []),
-        ...(hit.type === 'text' && hit.width && this.#store.selectedIds.length === 1
-          ? [{ label: 'Auto width (no wrapping)', run: () => {
+        ...(hit.type === 'text' && (hit.width || hit.height) && this.#store.selectedIds.length === 1
+          ? [{ label: 'Auto size (fit the text, no wrapping)', run: () => {
               const next = { ...hit };
               delete next.width;
+              delete next.height;
               this.#store.replaceShape(next);
             } }]
           : []),
@@ -2927,6 +2978,50 @@ export class ScreenMarker extends LitElement {
     });
     this.#thumbUrls.set(page, null);
     return null;
+  }
+
+  #setToolbarCollapsed(collapsed: boolean): void {
+    this.#toolbarCollapsed = collapsed;
+    try {
+      localStorage.setItem('screenmarker_toolbar', collapsed ? 'min' : 'full');
+    } catch {
+      // per-browser nicety only
+    }
+    this.requestUpdate();
+  }
+
+  /** ‹ Page n / N › and + : always at the start of the toolbar. */
+  #renderPageNav(activeId: string) {
+    const pages = this.#store.pages.value;
+    const index = pages.findIndex((p) => p.id === activeId);
+    return html`
+      <div class="group page-nav">
+        <button ?disabled=${pages.length < 2} @click=${() => this.#gotoAdjacentPage(-1)} title="Previous page (←)">‹</button>
+        <span class="page-nav-label" title=${pages[index]?.title || this.#pageLabel(index)}>${index + 1} / ${pages.length}</span>
+        <button ?disabled=${pages.length < 2} @click=${() => this.#gotoAdjacentPage(1)} title="Next page (→)">›</button>
+        <button @click=${() => this.#addPage()} title="Add a blank page">+</button>
+      </div>
+    `;
+  }
+
+  /** The minimized toolbar: tool icons, undo/redo, present and copy. */
+  #renderCompactToolbar(noImage: boolean) {
+    return html`
+      <div class="group compact-tools">
+        ${TOOLS.map(
+          (t) => html`<button
+            class=${this.#store.activeTool.value === t.type ? 'active' : ''}
+            title="${t.label} (${t.key.toUpperCase()})"
+            @click=${() => this.#setTool(t.type)}
+          >${t.icon}</button>`
+        )}
+      </div>
+      <div class="spacer"></div>
+      <button @click=${() => this.#store.undo()} title="Undo (Cmd/Ctrl+Z)">↶</button>
+      <button @click=${() => this.#store.redo()} title="Redo (Shift+Cmd/Ctrl+Z)">↷</button>
+      <button ?disabled=${noImage} @click=${() => this.#present()} title="Present all pages as slides">▶</button>
+      <button class="button-primary" ?disabled=${noImage} @click=${this.#copyImage} title="Copy image">📋</button>
+    `;
   }
 
   #setStripCollapsed(collapsed: boolean): void {
@@ -3569,7 +3664,16 @@ export class ScreenMarker extends LitElement {
           : ''}
       </div>
 
-      <div class="toolbar">
+      <div class="toolbar ${this.#toolbarCollapsed ? 'collapsed' : ''}">
+        <button
+          class="toolbar-toggle"
+          title=${this.#toolbarCollapsed ? 'Show the full toolbar' : 'Minimize the toolbar'}
+          @click=${() => this.#setToolbarCollapsed(!this.#toolbarCollapsed)}
+        >
+          ${this.#toolbarCollapsed ? '▾' : '▴'}
+        </button>
+        ${this.#renderPageNav(page.id)}
+        ${this.#toolbarCollapsed ? this.#renderCompactToolbar(noImage) : html`
         ${TOOLS.map(
           (t) => html`
             <button
@@ -3733,6 +3837,7 @@ export class ScreenMarker extends LitElement {
         <button ?disabled=${noImage} @click=${this.#copyAsMarkdown} title="Copy titles, steps and tags as Markdown; rich paste (Docs, Notion…) also gets the images">Copy as Markdown</button>
         <button ?disabled=${noImage} @click=${this.#download}>Download</button>
         ${this.#renderExportBackground()}
+              `}
       </div>
 
       <div class="workspace">

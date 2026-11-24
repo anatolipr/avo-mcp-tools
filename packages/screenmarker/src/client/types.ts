@@ -23,6 +23,8 @@ export interface Shape {
   textStyle?: TextStyle;
   // text only: wrap width in image pixels. Absent: no wrapping, the box grows with the text.
   width?: number;
+  // text only: minimum box height in image pixels (the box still grows to fit its text).
+  height?: number;
   // text, step, and tag: font size (step's circle radius and a tag's
   // padding/arrow scale with it)
   fontSize?: number;

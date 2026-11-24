@@ -795,7 +795,8 @@ export const screenMarkerStyles = css`
       font-size: 13px;
     }
     .label-editor {
-      resize: none;
+      /* Drag the corner grip to make the box wider (wraps) or taller while typing. */
+      resize: both;
       overflow: hidden;
       white-space: pre-wrap;
       overflow-wrap: break-word;
@@ -813,5 +814,27 @@ export const screenMarkerStyles = css`
       font-size: 12px;
       opacity: 0.6;
       padding: 0 4px;
+    }
+    .toolbar.collapsed {
+      padding: 4px 14px;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+    }
+    .toolbar-toggle {
+      min-width: 28px;
+    }
+    .page-nav {
+      align-items: center;
+    }
+    .page-nav-label {
+      min-width: 44px;
+      text-align: center;
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }
+    .compact-tools button {
+      min-width: 30px;
+      padding-left: 6px;
+      padding-right: 6px;
     }
 `;

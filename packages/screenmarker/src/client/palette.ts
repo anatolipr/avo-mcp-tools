@@ -134,7 +134,10 @@ export class ScreenMarkerPalette extends LitElement {
 
   /** Detects the double Shift tap; any other key in between cancels it. */
   #onWindowKey = (e: KeyboardEvent) => {
-    if (e.key !== 'Shift' || e.repeat || e.metaKey || e.ctrlKey || e.altKey) {
+    // Shift while typing (capitals) never opens the palette.
+    const el = e.composedPath()[0] as HTMLElement | undefined;
+    const typing = !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+    if (typing || e.key !== 'Shift' || e.repeat || e.metaKey || e.ctrlKey || e.altKey) {
       this.#lastShift = 0;
       return;
     }

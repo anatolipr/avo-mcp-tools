@@ -21,7 +21,7 @@ export function layoutText(shape: Shape): TextLayout {
   const fontSize = shape.fontSize ?? DEFAULT_FONT_SIZE;
   const rich = layoutRich(shape.label ?? '', fontSize, shape.textStyle, shape.width ?? Infinity);
   const w = shape.width ?? Math.max(fontSize, rich.width);
-  const h = Math.max(fontSize * LINE_HEIGHT, rich.height);
+  const h = Math.max(fontSize * LINE_HEIGHT, rich.height, shape.height ?? 0);
   const pad = shape.fill ? fontSize * TEXT_PAD_RATIO : 0;
   return { rich, inner: { x: a.x, y: a.y, w, h }, box: { x: a.x - pad, y: a.y - pad, w: w + pad * 2, h: h + pad * 2 } };
 }
