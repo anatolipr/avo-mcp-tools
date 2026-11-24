@@ -9,6 +9,8 @@ export interface Slide {
   // Size of the page image plus its picture shapes, without the tags around them.
   focusWidth: number;
   focusHeight: number;
+  // The slide is the editor's framing of the page (pan and zoom): it always fills the screen.
+  framed?: boolean;
   title: string;
   notes: string;
 }
@@ -357,6 +359,7 @@ export class ScreenMarkerPresenter extends LitElement {
     const v = this.viewSize;
     const cur = this.slides[this.index];
     if (!v || !cur?.width || v.w <= 0 || v.h <= 0) return null;
+    if (cur.framed) return Math.min(v.w / cur.width, v.h / cur.height);
     let scale = 1;
     for (const s of this.slides) {
       if (s.focusWidth !== cur.focusWidth || s.focusHeight !== cur.focusHeight) continue;

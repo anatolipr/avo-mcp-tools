@@ -1043,11 +1043,32 @@ export class ScreenMarker extends LitElement {
     const pageId = this.#store.activePageId.value;
     clearTimeout(this.#viewSaveTimer);
     this.#viewSaveTimer = setTimeout(() => {
-      if (this.#store.activePageId.value !== pageId) return;
-      const view = { x: Math.round(this.#cam.x), y: Math.round(this.#cam.y), zoom: this.#store.zoom.value };
-      const old = this.#store.activePage.view;
-      if (!old || old.x !== view.x || old.y !== view.y || old.zoom !== view.zoom) this.#store.setPageView(pageId, view);
+      if (this.#store.activePageId.value === pageId) this.#rememberView();
     }, 400);
+  }
+
+  /**
+   * Saves where the active page is being looked at (center, zoom, and the
+   * visible area). Runs on pan/zoom and whenever the editor leaves a page,
+   * so coming back shows everything exactly where it was, and the page's
+   * slide shows the same framing.
+   */
+  #rememberView(): void {
+    clearTimeout(this.#viewSaveTimer);
+    if (!this.#stageRef.value || !this.#canvasRef.value?.width) return;
+    const scale = this.#displayScale();
+    const { w, h } = this.#viewSize();
+    const view = {
+      x: Math.round(this.#cam.x),
+      y: Math.round(this.#cam.y),
+      zoom: this.#store.zoom.value,
+      w: Math.round(w / scale),
+      h: Math.round(h / scale),
+    };
+    const old = this.#store.activePage.view;
+    if (!old || old.x !== view.x || old.y !== view.y || old.zoom !== view.zoom || old.w !== view.w || old.h !== view.h) {
+      this.#store.setPageView(this.#store.activePageId.value, view);
+    }
   }
 
   /** Shows the page as last left (its saved view), or fitted when it has none. */
@@ -2707,6 +2728,7 @@ export class ScreenMarker extends LitElement {
 
   /** Saves the document, then copies a no-account link that opens it in presentation mode. */
   #sharePresentation = async () => {
+    this.#rememberView();
     const name = await this.#saveToCloud();
     if (!name) return;
     try {
@@ -2737,8 +2759,12 @@ export class ScreenMarker extends LitElement {
         let height = 0;
         let focusWidth = 0;
         let focusHeight = 0;
-        // Slides of only text and shapes have no source resolution to keep: render them sharp.
-        const ratio = p.shapes.some((s) => s.type === 'picture') ? 1 : 2;
+        // The editor's framing (pan and zoom), when known: the slide shows exactly that area.
+        const v = p.view;
+        const frame = v?.w && v.h ? { x: Math.round(v.x - v.w / 2), y: Math.round(v.y - v.h / 2), w: v.w, h: v.h } : undefined;
+        // Render at about screen resolution: zoomed-in frames and slides of only text and shapes stay sharp.
+        const pictures = p.shapes.some((s) => s.type === 'picture');
+        const ratio = Math.min(4, Math.max(pictures ? 1 : 2, frame ? (v?.zoom ?? 1) : 1));
         for (let k = 0; k <= revealed.length; k++) {
           const hidden = new Set(revealed.slice(k).map((s) => s.id));
           const shown = p.shapes.filter((s) => !hidden.has(s.id));
@@ -2751,19 +2777,21 @@ export class ScreenMarker extends LitElement {
             // A page framed by hand (panned/zoomed in the editor) is centered where it was framed.
             center: p.view,
             pixelRatio: ratio,
+            area: frame,
           });
           width = flat.canvas.width / ratio;
           height = flat.canvas.height / ratio;
-          ({ w: focusWidth, h: focusHeight } = flat.focus);
+          ({ w: focusWidth, h: focusHeight } = frame ?? flat.focus);
           builds.push(flat.canvas.toDataURL('image/png'));
         }
-        return { builds, width, height, focusWidth, focusHeight, title: p.title ?? '', notes: withNotes ? (p.notes ?? '') : '' };
+        return { builds, width, height, focusWidth, focusHeight, framed: !!frame, title: p.title ?? '', notes: withNotes ? (p.notes ?? '') : '' };
       })
     );
   }
 
   #present = async (fromPageId?: string) => {
     this.#commitTextEdit();
+    this.#rememberView();
     const pages = this.#store.pages.value;
     const withImages = pages.filter((p) => p.shapes.length > 0);
     if (!withImages.length) return;
@@ -2771,7 +2799,9 @@ export class ScreenMarker extends LitElement {
       const slides = await this.#renderSlides(pages, true);
       const start = fromPageId ?? this.#store.activePageId.value;
       const index = Math.max(0, withImages.findIndex((p) => p.id === start));
-      this.#presenting = { slides, index, publicView: false, heading: this.#cloudName ?? '', message: '', zoom: this.#store.zoom.value };
+      // Framed slides fit the screen; older, unframed ones open at the editor zoom.
+      const zoom = slides.some((sl) => sl.framed) ? undefined : this.#store.zoom.value;
+      this.#presenting = { slides, index, publicView: false, heading: this.#cloudName ?? '', message: '', zoom };
       this.requestUpdate();
     } catch (err) {
       this.#flashStatus(`Present failed: ${(err as Error).message}`);
@@ -3471,6 +3501,8 @@ export class ScreenMarker extends LitElement {
 
   async #switchPage(id: string): Promise<void> {
     this.#commitTextEdit();
+    if (id === this.#store.activePageId.value) return;
+    this.#rememberView();
     this.#store.setActivePage(id);
     await this.updateComplete;
     await this.#redraw();
@@ -3488,13 +3520,16 @@ export class ScreenMarker extends LitElement {
   #duplicatePage(id: string): void {
     this.#commitTextEdit();
     this.#clearRegion();
+    this.#rememberView();
     this.#store.duplicatePage(id);
     this.#flashStatus('Page duplicated');
   }
 
   #addPage(): void {
     this.#commitTextEdit();
+    this.#rememberView();
     this.#store.addPage();
+    void this.updateComplete.then(() => this.#restoreView());
   }
 
   /** Pages have no stored name — tabs are always labeled by current position, so reordering/closing/adding can never produce out-of-sequence numbers. */

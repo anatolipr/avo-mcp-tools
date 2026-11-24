@@ -95,7 +95,9 @@ export interface Page {
   // Where the editor was looking, once the page has been panned or zoomed by
   // hand: the image point at the center of the view, and the zoom. Slides
   // center on that point too. Absent: fit to the content (the default).
-  view?: { x: number; y: number; zoom: number };
+  // w/h: the size of the visible area in image pixels; with them, the page's
+  // slide shows exactly that area (the framing, zoom included).
+  view?: { x: number; y: number; zoom: number; w?: number; h?: number };
 }
 
 /** Axis-aligned rectangle in canvas (image) pixels. */

@@ -735,6 +735,8 @@ export interface FlattenOptions {
   center?: Point;
   // Canvas pixels per page pixel (2 renders text-only slides crisply on HiDPI screens).
   pixelRatio?: number;
+  // Exactly this box of the page, instead of one sized by the content.
+  area?: Rect;
 }
 
 /** Every picture on the page (or, with none, all its content): what a slide centers on. Integer-aligned. */
@@ -773,12 +775,14 @@ const SCENE_BACKGROUND = '#ffffff';
  */
 export async function flattenPage(
   shapes: Shape[],
-  { background = SCENE_BACKGROUND, sceneShapes = shapes, centered = false, center, pixelRatio = 1 }: FlattenOptions = {}
+  { background = SCENE_BACKGROUND, sceneShapes = shapes, centered = false, center, pixelRatio = 1, area: fixedArea }: FlattenOptions = {}
 ): Promise<{ canvas: HTMLCanvasElement; origin: Point; focus: Rect }> {
   await preloadPictures(shapes);
   let area = sceneBounds(sceneShapes);
   const focus = focusBounds(sceneShapes);
-  if (centered && center) {
+  if (fixedArea) {
+    area = fixedArea;
+  } else if (centered && center) {
     const cx = Math.round(center.x);
     const cy = Math.round(center.y);
     const dx = Math.max(cx - area.x, area.x + area.w - cx);
