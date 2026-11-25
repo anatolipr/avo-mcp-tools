@@ -837,4 +837,46 @@ export const screenMarkerStyles = css`
       padding-left: 6px;
       padding-right: 6px;
     }
+    .draft-card {
+      position: relative;
+      padding: 0;
+    }
+    .draft-card.current {
+      outline: 2px solid var(--accent, #0a84ff);
+      border-radius: 6px;
+    }
+    .draft-open {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      width: 100%;
+      padding: 6px;
+      text-align: left;
+      border: 1px solid var(--border);
+    }
+    .draft-delete {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      padding: 0 6px;
+      font-size: 12px;
+      opacity: 0;
+    }
+    .draft-card:hover .draft-delete,
+    .draft-delete:focus-visible {
+      opacity: 1;
+    }
+    .drafts-card {
+      width: min(900px, 100%);
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .drafts-body {
+      overflow: auto;
+      padding: 14px;
+    }
+    .local-draft {
+      opacity: 0.5;
+    }
 `;

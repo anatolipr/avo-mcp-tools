@@ -1,11 +1,17 @@
 import { Signal, effect } from 'avosignals';
 import type { Page, Shape, TagArrow, TextStyle, Tool } from './types.js';
-import { loadSession, saveSession } from './persistence.js';
+import { loadDraft, loadTabDraftId, saveDraft, saveTabDraftId, type Draft } from './persistence.js';
 import { getTabId } from './tab-identity.js';
 import { loadPreferences, savePreferences } from './preferences.js';
 import { shapeBounds } from './render.js';
 import { upgradePages } from './legacy.js';
 import { followAttachments, snapEnds, unsnap } from './attach.js';
+
+type Store = AnnotatorStore;
+
+function makeDraftId(): string {
+  return crypto.randomUUID();
+}
 
 export function makeId(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -65,17 +71,26 @@ export class AnnotatorStore {
   #redoStack: { pages: Page[]; activePageId: string }[] = [];
   #restored = false;
   #tabId: string | null = null;
+  // The local draft (IndexedDB) this tab is editing; see persistence.ts.
+  draftId = '';
+  // Where the open document is also saved, recorded with the draft.
+  docInfo = new Signal<Pick<Draft, 'cloudName' | 'fileName' | 'fileHandle'>>({});
+  #draftTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor() {
     effect(() => {
-      // Read both signals so the effect re-runs on either change; skip the
-      // very first tick until restore() has run (and #tabId is known), so a
-      // fresh load doesn't clobber a not-yet-loaded persisted session with
-      // the default empty page.
+      // Read the signals so the effect re-runs on any change; skip until
+      // restore() has run, so a fresh load doesn't clobber a not-yet-loaded
+      // draft with the default empty page.
       const pages = this.pages.value;
       const activePageId = this.activePageId.value;
-      if (!this.#restored || !this.#tabId) return;
-      void saveSession(this.#tabId, { pages, activePageId });
+      const info = this.docInfo.value;
+      if (!this.#restored || !this.draftId) return;
+      // A blank document isn't worth a draft (yet).
+      if (!this.hasContent()) return;
+      const id = this.draftId;
+      clearTimeout(this.#draftTimer);
+      this.#draftTimer = setTimeout(() => void saveDraft({ id, pages, activePageId, updatedAt: Date.now(), ...info }), 300);
     });
 
     effect(() => {
@@ -98,14 +113,66 @@ export class AnnotatorStore {
    * startup — every other page/tab in the browser gets its own document,
    * even a duplicated tab (see tab-identity.ts).
    */
-  async restore(): Promise<void> {
+  async restore(): Promise<Draft | null> {
     this.#tabId = await getTabId();
-    const session = await loadSession(this.#tabId);
-    if (session && session.pages.length > 0) {
-      this.pages.set(await upgradePages(session.pages));
-      this.activePageId.set(session.activePageId);
+    const draftId = await loadTabDraftId(this.#tabId);
+    const draft = draftId ? await loadDraft(draftId) : null;
+    if (draft && draft.pages.length > 0) {
+      this.draftId = draft.id;
+      this.pages.set(await upgradePages(draft.pages));
+      this.activePageId.set(draft.activePageId || draft.pages[0]!.id);
+      this.docInfo.set({ cloudName: draft.cloudName, fileName: draft.fileName, fileHandle: draft.fileHandle });
+    } else {
+      this.#setDraftId(makeDraftId());
     }
     this.#restored = true;
+    return draft;
+  }
+
+  #setDraftId(id: string): void {
+    clearTimeout(this.#draftTimer);
+    this.draftId = id;
+    if (this.#tabId) void saveTabDraftId(this.#tabId, id);
+  }
+
+  hasContent(): boolean {
+    return this.pages.value.length > 1 || this.pages.value.some((p) => p.shapes.length > 0);
+  }
+
+  /** Switches this tab to another document as a separate draft (the current one stays saved). Clears undo history. */
+  #switchDraft(id: string, pages: Page[], activePageId: string, info: Store['docInfo']['value']): void {
+    this.flushDraft();
+    this.#setDraftId(id);
+    this.#undoStack = [];
+    this.#redoStack = [];
+    this.docInfo.set(info);
+    this.pages.set(pages);
+    this.activePageId.set(activePageId || pages[0]?.id || '');
+    this.selection.set(null);
+  }
+
+  /** Writes the current draft now (before switching away from it). */
+  flushDraft(): void {
+    clearTimeout(this.#draftTimer);
+    if (!this.#restored || !this.draftId || !this.hasContent()) return;
+    void saveDraft({ id: this.draftId, pages: this.pages.value, activePageId: this.activePageId.value, updatedAt: Date.now(), ...this.docInfo.value });
+  }
+
+  /** Opens a saved draft in this tab. */
+  async openDraft(id: string): Promise<boolean> {
+    const draft = await loadDraft(id);
+    if (!draft?.pages.length) return false;
+    this.#switchDraft(draft.id, await upgradePages(draft.pages), draft.activePageId, {
+      cloudName: draft.cloudName,
+      fileName: draft.fileName,
+      fileHandle: draft.fileHandle,
+    });
+    return true;
+  }
+
+  /** Opens a document (from a file or the cloud) as a new draft, keeping the current one. */
+  openAsNewDraft(pages: Page[], activePageId: string, info: Store['docInfo']['value'] = {}, reuseId: string | null = null): void {
+    this.#switchDraft(reuseId ?? makeDraftId(), pages, activePageId, info);
   }
 
   get activePage(): Page {
@@ -449,13 +516,10 @@ export class AnnotatorStore {
     this.selection.set(null);
   }
 
-  /** Wipes all pages back to a single blank page. Undoable. */
+  /** Starts a blank document as a new draft. The current document stays in the drafts list. */
   newDocument(): void {
-    this.#snapshot();
     const page = makePage();
-    this.pages.set([page]);
-    this.activePageId.set(page.id);
-    this.selection.set(null);
+    this.#switchDraft(makeDraftId(), [page], page.id, {});
   }
 
   clearActivePage(): void {

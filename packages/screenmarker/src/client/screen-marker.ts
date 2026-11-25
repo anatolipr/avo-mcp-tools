@@ -34,7 +34,9 @@ import { findSecrets, findText, recognizeLines } from './ocr.js';
 import { followAttachments, snapEnds, unsnap } from './attach.js';
 import { diffRegions } from './diff.js';
 import { pagesToMarkdown } from './markdown.js';
-import { documentValue, downloadDocument, parseDocumentValue, readDocumentFile } from './save-load.js';
+import { documentValue, parseDocument, parseDocumentValue, serializeDocument } from './save-load.js';
+import { deleteDraft, draftTitle, listDrafts, type DraftSummary } from './persistence.js';
+import { baseName, canWrite, downloadFile, fileHandlesSupported, pickFileToOpen, pickFileToSave, sameFile, writeFile } from './localfile.js';
 import { screenMarkerStyles } from './styles.js';
 import {
   cloudNameFromHash,
@@ -292,7 +294,6 @@ export class ScreenMarker extends LitElement {
   #canvasRef = createRef<HTMLCanvasElement>();
   #stageRef = createRef<HTMLDivElement>();
   #textInputRef = createRef<HTMLInputElement | HTMLTextAreaElement>();
-  #loadDocumentInputRef = createRef<HTMLInputElement>();
   #imageInputRef = createRef<HTMLInputElement>();
   // The canvas covers this box of the scene, in image coordinates (the
   // image sits at 0,0; the margin around it can hold tags and shapes).
@@ -357,6 +358,15 @@ export class ScreenMarker extends LitElement {
     }
   })();
   #menu: { x: number; y: number; items: MenuItem[] } | null = null;
+  // The local file the document is bound to (Save and autosave write it in place). Handle is null without the File System Access API.
+  #localFile: { name: string; handle: FileSystemFileHandle | null } | null = null;
+  #fileState: 'saved' | 'dirty' | 'saving' | 'error' | 'permission' = 'saved';
+  #lastFileSavedPages: Page[] | null = null;
+  #fileTimer: ReturnType<typeof setTimeout> | undefined;
+  // Drafts in this browser (IndexedDB), for the start screen and the Drafts dialog.
+  #drafts: DraftSummary[] | null = null;
+  #draftThumbs = new Map<string, string | null>();
+  #draftsOpen = false;
   // Toolbar minimized to the essentials. Remembered per browser.
   #toolbarCollapsed = (() => {
     try {
@@ -393,13 +403,21 @@ export class ScreenMarker extends LitElement {
     window.addEventListener('keydown', this.#onKeydown);
     window.addEventListener('keyup', this.#onKeyup);
     window.addEventListener('blur', this.#onWindowBlur);
+    // Write the draft right away when the tab goes away (its save is otherwise debounced).
+    window.addEventListener('pagehide', this.#flushDraft);
     this.addEventListener('dragover', this.#onDragOver);
     this.addEventListener('drop', this.#onDrop);
     document.addEventListener('folderfoo-file-open', this.#onCloudFileChosen);
     if (publicToken) void this.#openPublicPresentation(publicToken);
     void mountAccountUi().then(() => this.#loadRecent());
     window.addEventListener('folderfoo-auth-change', this.#onAuthChange);
-    this.#store.restore().then(async () => {
+    this.#store.restore().then(async (draft) => {
+      if (draft?.fileName && !cloudNameFromHash()) {
+        this.#localFile = { name: draft.fileName, handle: draft.fileHandle ?? null };
+        this.#lastFileSavedPages = this.#store.pages.value;
+      }
+      this.#syncDocInfo();
+      void this.#loadDrafts();
       this.requestUpdate();
       await this.updateComplete;
       if (this.#stageRef.value) this.#stageObserver.observe(this.#stageRef.value);
@@ -416,6 +434,7 @@ export class ScreenMarker extends LitElement {
     window.removeEventListener('keydown', this.#onKeydown);
     window.removeEventListener('keyup', this.#onKeyup);
     window.removeEventListener('blur', this.#onWindowBlur);
+    window.removeEventListener('pagehide', this.#flushDraft);
     document.removeEventListener('folderfoo-file-open', this.#onCloudFileChosen);
     window.removeEventListener('folderfoo-auth-change', this.#onAuthChange);
     this.#stageObserver.disconnect();
@@ -455,6 +474,8 @@ export class ScreenMarker extends LitElement {
       }
     }
   };
+
+  #flushDraft = () => this.#store.flushDraft();
 
   #onWindowBlur = () => {
     this.#spaceHeld = false;
@@ -693,10 +714,11 @@ export class ScreenMarker extends LitElement {
       this.#store.paste();
     } else if (key === 's') {
       e.preventDefault();
-      this.#saveDocument();
+      if (e.shiftKey) void this.#saveAsFile();
+      else this.#saveDocument();
     } else if (key === 'o') {
       e.preventDefault();
-      this.#loadDocumentInputRef.value?.click();
+      void this.#openFile();
     }
   };
 
@@ -809,36 +831,242 @@ export class ScreenMarker extends LitElement {
     input.value = '';
   };
 
+  /**
+   * Cmd/Ctrl+S: a cloud document saves to the cloud; a document bound to a
+   * local file writes that file in place; otherwise asks where to save it.
+   */
   #saveDocument = () => {
-    const saved = downloadDocument(this.#store.pages.value, this.#store.activePageId.value);
-    if (saved) this.#flashStatus('Document saved');
+    this.#commitTextEdit();
+    if (this.#cloudName) void this.#saveToCloud();
+    else if (this.#localFile?.handle) void this.#writeLocalFile(true);
+    else void this.#saveAsFile();
   };
 
-  #onLoadDocumentPick = async (e: Event) => {
-    const input = e.target as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file) return;
+  /** Saves the document to a new file on this computer and binds to it. */
+  #saveAsFile = async () => {
+    this.#commitTextEdit();
+    const pages = this.#store.pages.value;
+    const text = serializeDocument(pages, this.#store.activePageId.value);
+    const suggested = this.#localFile?.name ?? this.#cloudName?.split('/').pop() ?? draftTitle({ pages });
+    try {
+      if (!fileHandlesSupported) {
+        const typed = window.prompt('File name:', baseName(suggested));
+        if (typed === null) return;
+        downloadFile(typed || suggested, text);
+        this.#flashStatus('Document downloaded');
+        return;
+      }
+      const handle = await pickFileToSave(baseName(suggested));
+      if (!handle) return;
+      await writeFile(handle, text);
+      this.#setCloudName(null);
+      this.#setLocalFile({ name: handle.name, handle });
+      this.#lastFileSavedPages = pages;
+      this.#fileState = 'saved';
+      this.#flashStatus(`Saved to ${handle.name} on this computer`);
+    } catch (err) {
+      this.#flashStatus(`Save failed: ${(err as Error).message}`);
+    }
+  };
 
-    const hasContent =
-      this.#store.pages.value.length > 1 ||
-      this.#store.pages.value.some((p) => p.shapes.length > 0);
-    if (hasContent && !window.confirm('Load this document? It will replace everything currently open. You can Undo (Cmd/Ctrl+Z) afterward.')) {
+  /** Writes the bound local file. `ask`: may prompt for permission (only from a click or key press). */
+  async #writeLocalFile(ask: boolean): Promise<void> {
+    const file = this.#localFile;
+    if (!file?.handle) return;
+    const pages = this.#store.pages.value;
+    try {
+      if (!(await canWrite(file.handle, ask))) {
+        this.#fileState = 'permission';
+        this.requestUpdate();
+        return;
+      }
+      this.#fileState = 'saving';
+      this.requestUpdate();
+      await writeFile(file.handle, serializeDocument(pages, this.#store.activePageId.value));
+      if (this.#localFile !== file) return;
+      this.#lastFileSavedPages = pages;
+      this.#fileState = pages === this.#store.pages.value ? 'saved' : 'dirty';
+      if (ask) this.#flashStatus(`Saved ${file.name}`);
+    } catch (err) {
+      this.#fileState = 'error';
+      if (ask) this.#flashStatus(`Save failed: ${(err as Error).message}`);
+    }
+    this.requestUpdate();
+  }
+
+  /** Opens a document file from this computer as a new draft (the current document stays in Drafts). */
+  #openFile = async () => {
+    this.#commitTextEdit();
+    try {
+      const picked = await pickFileToOpen();
+      if (!picked) return;
+      const { pages, activePageId } = await parseDocument(await picked.file.text());
+      this.#rememberView();
+      const existing = picked.handle ? await this.#draftForFile(picked.handle) : null;
+      this.#store.openAsNewDraft(pages, activePageId, { fileName: picked.file.name, fileHandle: picked.handle }, existing);
+      this.#setCloudName(null);
+      // Without a handle the file can't be written back: Save asks where to save.
+      this.#setLocalFile(picked.handle ? { name: picked.file.name, handle: picked.handle } : null);
+      this.#lastFileSavedPages = this.#store.pages.value;
+      this.#fileState = 'saved';
+      await this.#afterDocumentSwitch();
+      this.#flashStatus(`Opened ${picked.file.name}`);
+    } catch (err) {
+      this.#flashStatus(`Open failed: ${(err as Error).message}`);
+    }
+  };
+
+  /** The draft already holding this file, so opening it again doesn't add a duplicate draft. */
+  async #draftForFile(handle: FileSystemFileHandle): Promise<string | null> {
+    for (const d of await listDrafts()) if (await sameFile(d.fileHandle, handle)) return d.id;
+    return null;
+  }
+
+  #setLocalFile(file: { name: string; handle: FileSystemFileHandle | null } | null): void {
+    clearTimeout(this.#fileTimer);
+    this.#localFile = file;
+    this.#fileState = 'saved';
+    if (!file) this.#lastFileSavedPages = null;
+    this.#syncDocInfo();
+    this.requestUpdate();
+  }
+
+  /** Records where the document is also saved, with its draft. */
+  #syncDocInfo(): void {
+    this.#store.docInfo.set({
+      cloudName: this.#cloudName,
+      fileName: this.#localFile?.name ?? null,
+      fileHandle: this.#localFile?.handle ?? null,
+    });
+  }
+
+  /** A bound local file saves itself shortly after the last change (when the browser still lets us write it). */
+  #checkFileAutosave(): void {
+    const file = this.#localFile;
+    if (!file?.handle || this.#presenting?.publicView) return;
+    if (this.#store.pages.value === this.#lastFileSavedPages) return;
+    if (this.#fileState === 'saved') {
+      this.#fileState = 'dirty';
+      this.requestUpdate();
+    }
+    clearTimeout(this.#fileTimer);
+    this.#fileTimer = setTimeout(() => void this.#writeLocalFile(false), 1500);
+  }
+
+  #fileStateLabel(): string {
+    switch (this.#fileState) {
+      case 'saving':
+        return 'Saving…';
+      case 'dirty':
+        return 'Unsaved changes';
+      case 'error':
+        return 'Save failed';
+      case 'permission':
+        return 'Press Save to keep saving to this file';
+      default:
+        return 'Saved';
+    }
+  }
+
+  // ---------- drafts (IndexedDB) ----------
+
+  async #loadDrafts(): Promise<void> {
+    this.#drafts = await listDrafts();
+    this.requestUpdate();
+    for (const d of this.#drafts) {
+      if (this.#draftThumbs.has(d.id + d.updatedAt) || !d.firstPage) continue;
+      this.#draftThumbs.set(d.id + d.updatedAt, await pageThumbnail(d.firstPage, 240, 'image/jpeg'));
+      this.requestUpdate();
+    }
+  }
+
+  #openDraftsDialog = () => {
+    this.#commitTextEdit();
+    this.#rememberView();
+    this.#draftsOpen = true;
+    void this.#loadDrafts();
+  };
+
+  async #openDraft(id: string): Promise<void> {
+    this.#draftsOpen = false;
+    if (id === this.#store.draftId) return this.requestUpdate();
+    this.#rememberView();
+    if (!(await this.#store.openDraft(id))) {
+      this.#flashStatus('That draft is empty or gone');
+      void this.#loadDrafts();
       return;
     }
+    const info = this.#store.docInfo.value;
+    // A draft of a cloud document opens unbound, so it never overwrites a newer cloud version.
+    this.#setCloudName(null);
+    this.#setLocalFile(info.fileName && info.fileHandle ? { name: info.fileName, handle: info.fileHandle } : null);
+    this.#lastFileSavedPages = this.#localFile ? this.#store.pages.value : null;
+    await this.#afterDocumentSwitch();
+    this.#flashStatus(info.cloudName ? `Opened the local draft of ☁ ${info.cloudName} (☁ Save to update it there)` : 'Draft opened');
+  }
 
-    try {
-      const { pages, activePageId } = await readDocumentFile(file);
-      this.#store.loadDocument(pages, activePageId);
-      this.#setCloudName(null);
-      await this.updateComplete;
-      await this.#redraw();
-      await this.#restoreView();
-      this.#flashStatus('Document loaded');
-    } catch (err) {
-      this.#flashStatus(`Load failed: ${(err as Error).message}`);
-    }
-  };
+  async #deleteDraft(d: DraftSummary): Promise<void> {
+    if (!window.confirm(`Delete the draft "${d.title}" from this browser? This can't be undone.${d.cloudName || d.fileName ? ' Its cloud document or file is not touched.' : ''}`)) return;
+    await deleteDraft(d.id);
+    void this.#loadDrafts();
+  }
+
+  async #afterDocumentSwitch(): Promise<void> {
+    this.#clearRegion();
+    this.requestUpdate();
+    await this.updateComplete;
+    await this.#redraw();
+    await this.#restoreView();
+    void this.#loadDrafts();
+  }
+
+  #renderDraftCards(limit = Infinity) {
+    const drafts = (this.#drafts ?? []).slice(0, limit);
+    return html`
+      <div class="recent-grid">
+        ${drafts.map((d) => {
+          const thumb = this.#draftThumbs.get(d.id + d.updatedAt);
+          const current = d.id === this.#store.draftId;
+          const where = d.cloudName ? '☁ ' : d.fileName ? '🖫 ' : '';
+          return html`
+            <div class="recent-card draft-card ${current ? 'current' : ''}">
+              <button class="draft-open" @click=${() => void this.#openDraft(d.id)} title=${current ? 'Open now' : `Open "${d.title}"`}>
+                <div class="recent-thumb">${thumb ? html`<img src=${thumb} alt="" />` : html`<span>${d.pageCount ? '✎' : ''}</span>`}</div>
+                <div class="recent-name">${where}${d.title}</div>
+                <div class="recent-when">${current ? 'Open now · ' : ''}${relativeTime(d.updatedAt)} · ${d.pageCount} page${d.pageCount === 1 ? '' : 's'}</div>
+              </button>
+              ${current ? '' : html`<button class="draft-delete" title="Delete this draft" @click=${() => void this.#deleteDraft(d)}>✕</button>`}
+            </div>
+          `;
+        })}
+      </div>
+    `;
+  }
+
+  #renderDraftsDialog() {
+    if (!this.#draftsOpen) return '';
+    const close = () => {
+      this.#draftsOpen = false;
+      this.requestUpdate();
+    };
+    return html`
+      <div class="preview-overlay" @click=${close}>
+        <div class="preview-card drafts-card" @click=${(e: Event) => e.stopPropagation()}>
+          <div class="preview-header">
+            <span>Drafts in this browser — every document is kept here as you edit</span>
+            <div class="preview-header-controls">
+              <button @click=${() => { close(); this.#newDocument(); }}>＋ New document</button>
+              <button @click=${() => { close(); void this.#openFile(); }}>📂 Open file…</button>
+              <button @click=${close} title="Close">✕</button>
+            </div>
+          </div>
+          <div class="drafts-body">
+            ${this.#drafts?.length ? this.#renderDraftCards() : html`<div class="empty">No drafts yet. Anything you make is saved here automatically.</div>`}
+          </div>
+        </div>
+      </div>
+    `;
+  }
 
   // ---------- drawing ----------
 
@@ -2550,7 +2778,13 @@ export class ScreenMarker extends LitElement {
       this.#lastSavedPages = name ? this.#store.pages.value : null;
     }
     this.#cloudName = name;
+    if (name && this.#localFile) {
+      clearTimeout(this.#fileTimer);
+      this.#localFile = null;
+      this.#lastFileSavedPages = null;
+    }
     setCloudNameInHash(name);
+    this.#syncDocInfo();
     this.requestUpdate();
   }
 
@@ -2563,6 +2797,7 @@ export class ScreenMarker extends LitElement {
 
   /** Called after every render: a cloud document with unsaved edits saves itself shortly after the last change. */
   #checkAutosave(): void {
+    this.#checkFileAutosave();
     if (!this.#cloudName || this.#presenting?.publicView) return;
     // No baseline yet (e.g. a #name from the URL that is still loading):
     // never push the local session over the cloud copy before it's read.
@@ -2667,16 +2902,23 @@ export class ScreenMarker extends LitElement {
   };
 
   async #openCloudDocument(name: string, { confirmReplace, keepView = false }: { confirmReplace: boolean; keepView?: boolean }): Promise<void> {
-    if (confirmReplace && this.#hasContent() && name !== this.#cloudName) {
-      if (!window.confirm(`Open "${name}"? It will replace everything currently open. You can Undo (Cmd/Ctrl+Z) afterward.`)) return;
-    }
+    // Nothing to confirm: another document opens as its own draft, and the current one stays in Drafts.
+    void confirmReplace;
     this.#commitTextEdit();
     try {
       const { pages, activePageId } = await parseDocumentValue(await loadCloudDocument(name));
       // A live reload keeps you on the page you were looking at, when it still exists.
       const current = this.#store.activePageId.value;
       const stay = keepView && pages.some((p) => p.id === current) ? current : activePageId;
-      this.#store.loadDocument(pages, stay);
+      if (name === this.#cloudName) {
+        this.#store.loadDocument(pages, stay);
+      } else {
+        // Another document: open it as its own draft (reusing its earlier draft), keeping the current one.
+        this.#rememberView();
+        const existing = (await listDrafts()).find((d) => d.cloudName === name)?.id ?? null;
+        this.#store.openAsNewDraft(pages, stay, { cloudName: name }, existing);
+        void this.#loadDrafts();
+      }
       this.#setCloudName(name);
       this.#markSaved();
       this.#clearRegion();
@@ -2838,11 +3080,10 @@ export class ScreenMarker extends LitElement {
   #editPublicCopy = async () => {
     const doc = this.#publicDoc;
     if (!doc) return;
-    if (this.#hasContent() && !window.confirm('Replace what is open in your editor with a copy of this presentation? You can Undo (Cmd/Ctrl+Z) afterward.')) {
-      return;
-    }
-    this.#store.loadDocument(structuredClone(doc.pages), doc.activePageId);
+    // A new draft: whatever was open in this browser stays in Drafts.
+    this.#store.openAsNewDraft(structuredClone(doc.pages), doc.activePageId);
     this.#setCloudName(null);
+    this.#setLocalFile(null);
     this.#presenting = null;
     void mountAccountUi();
     await this.updateComplete;
@@ -3047,6 +3288,9 @@ export class ScreenMarker extends LitElement {
         )}
       </div>
       <div class="spacer"></div>
+      <button @click=${this.#newDocument} title="New document (the current one stays in Drafts)">＋</button>
+      <button @click=${this.#openDraftsDialog} title="Drafts">🗂</button>
+      <button @click=${this.#saveDocument} title="Save (Cmd/Ctrl+S)">💾</button>
       <button @click=${() => this.#store.undo()} title="Undo (Cmd/Ctrl+Z)">↶</button>
       <button @click=${() => this.#store.redo()} title="Redo (Shift+Cmd/Ctrl+Z)">↷</button>
       <button ?disabled=${noImage} @click=${() => this.#present()} title="Present all pages as slides">▶</button>
@@ -3217,6 +3461,7 @@ export class ScreenMarker extends LitElement {
 
   #renderEmpty() {
     const recent = !this.#hasContent() ? (this.#recent ?? []) : [];
+    const drafts = !this.#hasContent() ? (this.#drafts ?? []).filter((d) => d.id !== this.#store.draftId) : [];
     return html`
       <div class="empty empty-overlay">
         <div>
@@ -3225,6 +3470,15 @@ export class ScreenMarker extends LitElement {
           <button class="empty-text" @click=${() => this.#startBlankText()}>T Add text</button>
           or pick any tool (text, arrows, shapes, tags…) and draw.
         </div>
+        ${drafts.length
+          ? html`
+              <div class="recent-heading">
+                Drafts in this browser
+                ${drafts.length > 8 ? html`<button class="empty-text" @click=${this.#openDraftsDialog}>See all ${drafts.length}</button>` : ''}
+              </div>
+              ${this.#renderDraftCards(8)}
+            `
+          : ''}
         ${recent.length
           ? html`
               <div class="recent-heading">Recent documents</div>
@@ -3413,8 +3667,10 @@ export class ScreenMarker extends LitElement {
     add('strip', this.#stripCollapsed ? 'Show page thumbnails' : 'Collapse pages to tabs', () => this.#setStripCollapsed(!this.#stripCollapsed));
 
     add('open-image', 'Open image file…', () => this.#imageInputRef.value?.click());
-    add('save-file', 'Save document to file', () => this.#saveDocument(), '⌘S');
-    add('load-file', 'Load document from file…', () => this.#loadDocumentInputRef.value?.click(), '⌘O');
+    add('save-file', 'Save document (to its file, or choose one)', () => this.#saveDocument(), '⌘S');
+    add('save-file-as', 'Save document to a new file…', () => void this.#saveAsFile(), '⇧⌘S');
+    add('load-file', 'Open document file…', () => void this.#openFile(), '⌘O');
+    add('drafts', 'Drafts (documents kept in this browser)…', this.#openDraftsDialog, '');
     add('cloud-save', 'Save to folderfoo', () => void this.#saveToCloud(), '');
     add('cloud-save-as', 'Save to folderfoo as…', () => void this.#saveToCloud(true), '');
     add('cloud-open', 'Open from folderfoo…', () => void showFilePicker().catch((err: Error) => this.#flashStatus(`folderfoo unavailable: ${err.message}`)), '');
@@ -3486,17 +3742,15 @@ export class ScreenMarker extends LitElement {
 
   // ---------- pages ----------
 
+  /** Starts a blank document. Nothing is lost: the current one stays in Drafts. */
   #newDocument = () => {
-    const hasContent =
-      this.#store.pages.value.length > 1 ||
-      this.#store.pages.value.some((p) => p.shapes.length > 0);
-    if (!hasContent) return;
-    if (!window.confirm('Start a new document? This clears all pages. You can Undo (Cmd/Ctrl+Z) afterward.')) {
-      return;
-    }
+    this.#commitTextEdit();
+    this.#rememberView();
     this.#store.newDocument();
     this.#setCloudName(null);
-    this.#store.zoomReset();
+    this.#setLocalFile(null);
+    void this.#afterDocumentSwitch();
+    this.#flashStatus('New document — the previous one is in Drafts');
   };
 
   async #switchPage(id: string): Promise<void> {
@@ -3696,7 +3950,14 @@ export class ScreenMarker extends LitElement {
                 : ''}
               ${this.#peers ? html`<span class="peers" title="Also open elsewhere">👥 ${this.#peers}</span>` : ''}
             `
-          : ''}
+          : this.#localFile
+            ? html`
+                <span class="cloud-name" title=${this.#localFile.handle ? 'Saved to this file on your computer' : 'Opened from this file'}>🖫 ${this.#localFile.name}</span>
+                ${this.#localFile.handle ? html`<span class="save-state ${this.#fileState}">${this.#fileStateLabel()}</span>` : ''}
+              `
+            : this.#store.hasContent()
+              ? html`<span class="cloud-name local-draft" title="Kept in this browser as you edit (🗂 Drafts). Save to a file or folderfoo to keep it elsewhere.">Draft saved in this browser</span>`
+              : ''}
       </div>
 
       <div class="toolbar ${this.#toolbarCollapsed ? 'collapsed' : ''}">
@@ -3834,18 +4095,22 @@ export class ScreenMarker extends LitElement {
         <button @click=${() => this.#store.undo()} title="Undo (Cmd/Ctrl+Z)">↶ Undo</button>
         <button @click=${() => this.#store.redo()} title="Redo (Shift+Cmd/Ctrl+Z)">↷ Redo</button>
         <button @click=${() => this.#store.clearActivePage()}>Clear</button>
-        <button @click=${this.#newDocument} title="Wipe all pages and start fresh">New document</button>
-        <button @click=${this.#saveDocument} title="Save the whole document (all pages) to a file (Cmd/Ctrl+S)">Save</button>
-        <label style="display:inline-flex; align-items:center; cursor:pointer; border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:13px;" title="Load a document file, replacing everything currently open (Cmd/Ctrl+O)">
-          <input
-            ${ref(this.#loadDocumentInputRef)}
-            type="file"
-            accept="application/json,.json"
-            style="display:none"
-            @change=${this.#onLoadDocumentPick}
-          />
-          Load…
-        </label>
+        <div class="group">
+          <button @click=${this.#newDocument} title="Start a blank document (the current one stays in Drafts)">＋ New</button>
+          <button @click=${this.#openDraftsDialog} title="Documents kept in this browser: reopen or delete">🗂 Drafts</button>
+          <button @click=${this.#openFile} title="Open a document file from this computer (Cmd/Ctrl+O)">📂 Open file…</button>
+          <button
+            @click=${this.#saveDocument}
+            title=${this.#cloudName
+              ? `Save to folderfoo as "${this.#cloudName}" (Cmd/Ctrl+S)`
+              : this.#localFile?.handle
+                ? `Save to ${this.#localFile.name} (Cmd/Ctrl+S)`
+                : 'Save the document to a file on this computer (Cmd/Ctrl+S)'}
+          >
+            💾 Save
+          </button>
+          <button @click=${this.#saveAsFile} title="Save to a new file on this computer (Shift+Cmd/Ctrl+S)">Save as…</button>
+        </div>
         <label style="display:inline-flex; align-items:center; cursor:pointer; border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:13px;">
           <input ${ref(this.#imageInputRef)} type="file" accept="image/*" style="display:none" @change=${this.#onFilePick} />
           Open image…
@@ -3942,6 +4207,7 @@ export class ScreenMarker extends LitElement {
             </div>
           `
         : ''}
+      ${this.#renderDraftsDialog()}
       <screen-marker-palette .commands=${this.#commands()}></screen-marker-palette>
       ${this.#presenting
         ? html`
