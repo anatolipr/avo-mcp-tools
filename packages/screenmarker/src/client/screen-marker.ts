@@ -54,6 +54,7 @@ import {
 } from './cloud.js';
 import './presenter.js';
 import './video-frames.js';
+import { $mcpChannel, $mcpState, mcpConnectClick, setUpMcp } from './mcp.js';
 import type { FrameEventDetail } from './video-frames.js';
 import './palette.js';
 import type { Command } from './palette.js';
@@ -424,6 +425,7 @@ export class ScreenMarker extends LitElement {
       }
       this.#syncDocInfo();
       void this.#loadDrafts();
+      if (!publicToken) this.#setUpMcp();
       this.requestUpdate();
       await this.updateComplete;
       if (this.#stageRef.value) this.#stageObserver.observe(this.#stageRef.value);
@@ -487,6 +489,31 @@ export class ScreenMarker extends LitElement {
   };
 
   #flushDraft = () => this.#store.flushDraft();
+
+  /** Exposes the document to an LLM through a local js-bridge-mcp (see mcp.ts). */
+  #setUpMcp(): void {
+    setUpMcp({
+      store: this.#store,
+      documentName: () => this.#cloudName ?? this.#localFile?.name ?? draftTitle({ pages: this.#store.pages.value }),
+      switchPage: (id) => this.#switchPage(id),
+      addPage: async () => {
+        this.#addPage();
+        await this.updateComplete;
+      },
+      openDraft: (id) => this.#openDraft(id),
+      newDocument: () => this.#newDocument(),
+    });
+  }
+
+  #renderMcpButton() {
+    const state = $mcpState.value;
+    const dot = state === 'connected' ? '🟢' : state === 'connecting' ? '🟡' : '⚪';
+    const title =
+      state === 'connected'
+        ? `Connected to js-bridge-mcp as "${$mcpChannel.value}": an MCP client (e.g. Claude) can read and annotate this document with the screenmarker__* tools. Click to rename the connection.`
+        : 'Let an LLM read and annotate this document: start a local js-bridge-mcp (npx js-bridge-mcp), then click to connect.';
+    return html`<button class="mcp-button" title=${title} @click=${mcpConnectClick}>${dot} ${state === 'connected' ? $mcpChannel.value : 'MCP'}</button>`;
+  }
 
   #onWindowBlur = () => {
     this.#spaceHeld = false;
@@ -865,20 +892,22 @@ export class ScreenMarker extends LitElement {
     input.click();
   };
 
-  /** A frame from the grabber: onto the current page if it is blank, else onto a new page right after it. */
-  #onVideoFrame = async (e: CustomEvent<FrameEventDetail>) => {
+  /** Frames from the grabber, in time order: the first onto the current page if it is blank, the rest each onto a new page. */
+  #onVideoFrames = async (e: CustomEvent<FrameEventDetail>) => {
     const video = this.#video;
     if (!video) return;
-    const { blob, time } = e.detail;
-    if (this.#store.hasContent() && this.#store.activePage.shapes.length) {
-      this.#rememberView();
-      this.#store.addPage();
-      await this.updateComplete;
+    const name = video.file.name.replace(/\.[^.]+$/, '');
+    for (const { blob, time } of e.detail.frames) {
+      if (this.#store.activePage.shapes.length) {
+        this.#rememberView();
+        this.#store.addPage();
+        await this.updateComplete;
+      }
+      const page = this.#store.activePage;
+      if (!page.title) this.#store.updatePageMeta(page.id, { title: `${name} @ ${time.toFixed(2)}s` });
+      await this.#loadImageFile(new File([blob], `frame-${time.toFixed(2)}.png`, { type: 'image/png' }));
+      video.added += 1;
     }
-    const page = this.#store.activePage;
-    if (!page.title) this.#store.updatePageMeta(page.id, { title: `${video.file.name.replace(/\.[^.]+$/, '')} @ ${time.toFixed(2)}s` });
-    await this.#loadImageFile(new File([blob], `frame-${time.toFixed(2)}.png`, { type: 'image/png' }));
-    video.added += 1;
     this.requestUpdate();
   };
 
@@ -3998,6 +4027,7 @@ export class ScreenMarker extends LitElement {
       </button>
       <div class="titlebar">
         <span class="app-name">screenmarker</span>
+        ${publicToken ? '' : this.#renderMcpButton()}
         ${this.#stripCollapsed ? this.#renderPageTabs(page.id) : ''}
         ${this.#cloudName
           ? html`
@@ -4272,7 +4302,7 @@ export class ScreenMarker extends LitElement {
         ? html`<screen-marker-video
             .file=${this.#video.file}
             .added=${this.#video.added}
-            @frame=${this.#onVideoFrame}
+            @frames=${this.#onVideoFrames}
             @close=${this.#closeVideo}
           ></screen-marker-video>`
         : ''}

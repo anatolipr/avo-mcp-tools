@@ -879,4 +879,9 @@ export const screenMarkerStyles = css`
     .local-draft {
       opacity: 0.5;
     }
+    .mcp-button {
+      margin-left: 10px;
+      padding: 2px 8px;
+      font-size: 12px;
+    }
 `;

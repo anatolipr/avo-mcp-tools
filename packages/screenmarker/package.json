@@ -1,6 +1,6 @@
 {
   "name": "screenmarker",
-  "version": "0.7.4",
+  "version": "0.8.0",
   "type": "module",
   "description": "Paste a screenshot (or start from a blank slide), annotate it with arrows/boxes/rich text/pen/highlight, and copy the flattened image back to the clipboard.",
   "repository": {
@@ -39,6 +39,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "js-bridge-mcp": "^0.8.1",
     "npm-run-all": "^4.1.5",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
