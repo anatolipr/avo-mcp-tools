@@ -1,6 +1,6 @@
 {
   "name": "screenmarker",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "type": "module",
   "description": "Paste a screenshot (or start from a blank slide), annotate it with arrows/boxes/rich text/pen/highlight, and copy the flattened image back to the clipboard.",
   "repository": {

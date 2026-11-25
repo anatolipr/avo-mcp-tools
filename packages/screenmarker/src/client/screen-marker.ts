@@ -53,6 +53,8 @@ import {
   showFilePicker,
 } from './cloud.js';
 import './presenter.js';
+import './video-frames.js';
+import type { FrameEventDetail } from './video-frames.js';
 import './palette.js';
 import type { Command } from './palette.js';
 import type { Slide } from './presenter.js';
@@ -256,6 +258,10 @@ function fileToDataUrl(file: File): Promise<string> {
 }
 
 /** Whether a keyboard/clipboard event started in an editable field — checked via composedPath since targets inside the shadow root are retargeted to the host at window level. */
+function isVideoFile(f: File): boolean {
+  return f.type.startsWith('video/') || /\.(mov|mp4|m4v|webm|mkv|ogv)$/i.test(f.name);
+}
+
 function fromEditable(e: Event): boolean {
   const el = e.composedPath()[0] as HTMLElement | undefined;
   return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
@@ -448,6 +454,11 @@ export class ScreenMarker extends LitElement {
 
   #onDrop = async (e: DragEvent) => {
     e.preventDefault();
+    const video = [...(e.dataTransfer?.files ?? [])].find(isVideoFile);
+    if (video) {
+      this.#openVideo(video);
+      return;
+    }
     const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/'));
     if (!files.length) return;
     // Onto a page with content, files become pictures centered at the drop point.
@@ -505,7 +516,7 @@ export class ScreenMarker extends LitElement {
   };
 
   #onKeydown = (e: KeyboardEvent) => {
-    if (this.#presenting) return;
+    if (this.#presenting || this.#video) return;
     // While a label is being edited, keys belong to the editor (it handles its own), never to app shortcuts.
     if (this.#textEdit) return;
     if (this.#menu) {
@@ -827,8 +838,54 @@ export class ScreenMarker extends LitElement {
   #onFilePick = async (e: Event) => {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
-    if (file) await this.#loadImageFile(file);
     input.value = '';
+    if (file && isVideoFile(file)) this.#openVideo(file);
+    else if (file) await this.#loadImageFile(file);
+  };
+
+  // ---------- video frames ----------
+
+  /** The frame grabber's video, and how many frames it has added so far. */
+  #video: { file: File; added: number } | null = null;
+
+  #openVideo(file: File): void {
+    this.#commitTextEdit();
+    this.#video = { file, added: 0 };
+    this.requestUpdate();
+  }
+
+  #pickVideo = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'video/*,.mov,.mp4,.m4v,.webm';
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (file) this.#openVideo(file);
+    };
+    input.click();
+  };
+
+  /** A frame from the grabber: onto the current page if it is blank, else onto a new page right after it. */
+  #onVideoFrame = async (e: CustomEvent<FrameEventDetail>) => {
+    const video = this.#video;
+    if (!video) return;
+    const { blob, time } = e.detail;
+    if (this.#store.hasContent() && this.#store.activePage.shapes.length) {
+      this.#rememberView();
+      this.#store.addPage();
+      await this.updateComplete;
+    }
+    const page = this.#store.activePage;
+    if (!page.title) this.#store.updatePageMeta(page.id, { title: `${video.file.name.replace(/\.[^.]+$/, '')} @ ${time.toFixed(2)}s` });
+    await this.#loadImageFile(new File([blob], `frame-${time.toFixed(2)}.png`, { type: 'image/png' }));
+    video.added += 1;
+    this.requestUpdate();
+  };
+
+  #closeVideo = () => {
+    if (this.#video?.added) this.#flashStatus(`${this.#video.added} frame${this.#video.added === 1 ? '' : 's'} added as pages`);
+    this.#video = null;
+    this.requestUpdate();
   };
 
   /**
@@ -3466,6 +3523,7 @@ export class ScreenMarker extends LitElement {
       <div class="empty empty-overlay">
         <div>
           Paste a screenshot (Cmd/Ctrl+V), drag one in, or use "Open image…" above.<br />
+          Drop a video (MP4, MOV) or use <button class="empty-text" @click=${this.#pickVideo}>🎞 Video frames…</button> to pick frames as pages.<br />
           Or use this page as a blank slide:
           <button class="empty-text" @click=${() => this.#startBlankText()}>T Add text</button>
           or pick any tool (text, arrows, shapes, tags…) and draw.
@@ -3667,6 +3725,7 @@ export class ScreenMarker extends LitElement {
     add('strip', this.#stripCollapsed ? 'Show page thumbnails' : 'Collapse pages to tabs', () => this.#setStripCollapsed(!this.#stripCollapsed));
 
     add('open-image', 'Open image file…', () => this.#imageInputRef.value?.click());
+    add('video-frames', 'Extract frames from a video (MP4, MOV)…', this.#pickVideo);
     add('save-file', 'Save document (to its file, or choose one)', () => this.#saveDocument(), '⌘S');
     add('save-file-as', 'Save document to a new file…', () => void this.#saveAsFile(), '⇧⌘S');
     add('load-file', 'Open document file…', () => void this.#openFile(), '⌘O');
@@ -4115,6 +4174,7 @@ export class ScreenMarker extends LitElement {
           <input ${ref(this.#imageInputRef)} type="file" accept="image/*" style="display:none" @change=${this.#onFilePick} />
           Open image…
         </label>
+        <button @click=${this.#pickVideo} title="Open a video (MP4, MOV…) and pick frames to add as pages">🎞 Video frames…</button>
         <div class="group">
           <button @click=${() => void showFilePicker().catch((err: Error) => this.#flashStatus(`folderfoo unavailable: ${err.message}`))} title="Open a document from your folderfoo account">
             ☁ Open…
@@ -4208,6 +4268,14 @@ export class ScreenMarker extends LitElement {
           `
         : ''}
       ${this.#renderDraftsDialog()}
+      ${this.#video
+        ? html`<screen-marker-video
+            .file=${this.#video.file}
+            .added=${this.#video.added}
+            @frame=${this.#onVideoFrame}
+            @close=${this.#closeVideo}
+          ></screen-marker-video>`
+        : ''}
       <screen-marker-palette .commands=${this.#commands()}></screen-marker-palette>
       ${this.#presenting
         ? html`
